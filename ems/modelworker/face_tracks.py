@@ -194,7 +194,9 @@ def appearances(times: list[float], interval: float, duration: float | None) -> 
 
 def faces_of(samples: list[dict], interval: float, duration: float | None) -> list[dict]:
     """The faces of a video, first seen first: per face `appearances`, how many `detections`,
-    its clearest detection (`detection`, with the `t` it was seen at) and its `vector`."""
+    its clearest detection (`detection`, with the `t` it was seen at), its `vector`, and every
+    `sighting` in time order. A face's tracks are never seen in the same frame, so there is at
+    most one sighting a sampled frame."""
     tracks = follow(samples)
     if len(tracks) > MAX_TRACKS:
         tracks = sorted(tracks, key=lambda track: max(quality(d) for d in track), reverse=True)[:MAX_TRACKS]
@@ -207,5 +209,6 @@ def faces_of(samples: list[dict], interval: float, duration: float | None) -> li
             "detections": len(detections),
             "detection": clearest,
             "vector": mean_vector(detections),
+            "sightings": sorted(detections, key=lambda d: d["t"]),
         })
     return sorted(faces, key=lambda face: (face["appearances"][0][0], face["detection"]["t"]))

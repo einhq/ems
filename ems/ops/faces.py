@@ -140,6 +140,7 @@ async def detect_video(ctx: Context, req: DetectVideoRequest, progress: Progress
             "box": face.get("box") or {},
             "confidence": float(face.get("confidence") or 0),
             "embedding": face.get("embedding") or [],
+            "track": face.get("track") or [],
         }
         if face.get("landmarks"):
             entry["landmarks"] = face["landmarks"]

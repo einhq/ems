@@ -846,8 +846,9 @@ def detect_video_faces(video_path: str, angle=0, mirror=False, interval: float =
     `min_size` of the frame's shorter side or below `min_confidence` are left out before they are
     followed. Returns `{"frame", "interval", "samples", "frames", "faces"}`; each face is
     `{"appearances": [[start, end], …], "detections", "t", "box", "confidence", "landmarks",
-    "pose"?, "embedding"}`, the box and landmarks in fractions of the display frame at `t`
-    seconds, `embedding` the normalized mean of the face's best detections' vectors.
+    "pose"?, "embedding", "track"}`, the box and landmarks in fractions of the display frame at
+    `t` seconds, `embedding` the normalized mean of the face's best detections' vectors, and
+    `track` the box of every sighting, `[t, x, y, width, height]` in time order.
     """
     try:
         import cv2
@@ -933,6 +934,11 @@ def detect_video_faces(video_path: str, angle=0, mirror=False, interval: float =
     if decoded == 0:
         raise Undecodable(f"no video frame could be decoded: {video_path}")
 
+    def fractions(detection) -> list[float]:
+        x0, y0, x1, y1 = detection["box"]
+        width, height = detection["frame"]
+        return [round(max(0.0, x0 / width), 4), round(max(0.0, y0 / height), 4), round(min(1.0, (x1 - x0) / width), 4), round(min(1.0, (y1 - y0) / height), 4)]
+
     faces = []
     for face in face_tracks.faces_of(samples, step, duration):
         best = face["detection"]
@@ -946,6 +952,7 @@ def detect_video_faces(video_path: str, angle=0, mirror=False, interval: float =
             "confidence": best["confidence"],
             "landmarks": [[x / width, y / height] for x, y in best["landmarks"]] if best.get("landmarks") else None,
             "embedding": face["vector"],
+            "track": [[d["t"], *fractions(d)] for d in face["sightings"]],
         }
         if best.get("pose"):
             entry["pose"] = best["pose"]
