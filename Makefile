@@ -11,7 +11,6 @@ VENV        ?= .venv
 PY          := $(VENV)/bin/python
 IMAGE_NAME  ?= ems
 CONTAINER_NAME ?= ems
-HOST        ?= fry
 
 # Build arguments, passed as --build-arg: these win over the Containerfile's defaults.
 TORCH_CUDA      ?= cu130
