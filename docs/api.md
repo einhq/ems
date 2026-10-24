@@ -513,6 +513,39 @@ frame: `pitch` up/down, `yaw` left/right turn, `roll` tilt; all three 0 is a fac
 into the camera. Omitted when the model pack provides none. It says nothing about occlusion —
 `confidence` is the nearest signal for a face partly hidden.
 
+### 4.11a `faces.detect_video` _long_ _(implemented)_
+
+The faces a video shows, each with when it is seen, in one request:
+`{ "file": { "path", "angle", "mirror" }, "interval": 1.0, "min_size": 0.02, "min_confidence": 0.7 }` →
+
+```json
+{ "frame": { "width": 1920, "height": 1080 }, "duration": 63.2, "interval": 1.0, "samples": 63,
+  "faces": [ { "appearances": [[0.5, 9.5], [41.5, 44.5]], "detections": 12, "t": 5.0,
+               "box": { "x": 0.41, "y": 0.22, "width": 0.09, "height": 0.13 }, "confidence": 0.93,
+               "landmarks": [[0.44, 0.27], …], "pose": { "pitch": -4.5, "yaw": 12.0, "roll": 1.3 },
+               "embedding": [ … 512 floats … ] } ] }
+```
+
+A frame every `interval` seconds (0.2–60, default 1), in the display frame the caller's
+`angle`/`mirror` name, read in one pass over the video. A video longer than 1800 intervals is
+sampled more sparsely so it gives no more frames than that; `interval` in the answer is the spacing
+used. Detections smaller than `min_size` of the frame's shorter side, or below `min_confidence`,
+are left out.
+
+The detections are followed from frame to frame and the tracks of the file grouped into faces:
+one per person seen, as far as the vectors tell. Two tracks seen in the same frame are never one
+face, and a person may still come back as two when the vectors are not alike enough. Per face:
+
+- `appearances` — when it is on screen, `[start, end]` in seconds, padded by half an interval.
+- `t`, `box`, `confidence`, `landmarks`, `pose` — its clearest detection (confidence, size and a
+  head turned towards the camera), as in `faces.detect`: fractions of the display frame at `t`.
+  A crop of the face is `video.poster` at `t` with this box as `crop`.
+- `embedding` — the normalized mean of its best detections' vectors, comparable by cosine with
+  `faces.detect`'s.
+
+Faces come first seen first. A file with no picture shows none; one no decoder can read is
+`undecodable`. `duration` is the picture's length, the stream's own before the container's.
+
 ### 4.12 `faces.embed` _(implemented)_
 
 An embedding for a face the caller already located: `{ "file", "box": {…} }` →

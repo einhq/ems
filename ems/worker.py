@@ -29,6 +29,7 @@ from .errors import (
     MODEL_UNAVAILABLE,
     NOT_FOUND,
     TOOL_FAILED,
+    UNDECODABLE,
     UNSUPPORTED,
     EmsError,
 )
@@ -50,6 +51,7 @@ _TYPE_TO_CODE = {
     "RequestAbandoned": DEADLINE_EXCEEDED,
     "FileNotFoundError": NOT_FOUND,
     "UnidentifiedImageError": UNSUPPORTED,
+    "Undecodable": UNDECODABLE,
     "ImportError": INTERNAL,
     "ModuleNotFoundError": INTERNAL,
 }
@@ -112,6 +114,7 @@ WORKER_OP_FAMILIES = {
     "active_speaker_score": "asd",
     "active_speakers": "asd",
     "detect_faces": "insightface",
+    "detect_video_faces": "insightface",
     "embed_face": "insightface",
     "embed_images": "siglip-visual",
     "embed_image_texts": "siglip-text",

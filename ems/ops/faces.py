@@ -1,4 +1,5 @@
-"""`faces.detect` and `faces.embed` — InsightFace, boxes as fractions of the display frame."""
+"""`faces.detect`, `faces.detect_video` and `faces.embed` — InsightFace, boxes as fractions of the
+display frame."""
 
 from __future__ import annotations
 
@@ -6,10 +7,11 @@ from fastapi import APIRouter, Request
 from pydantic import Field
 
 from ..context import Context
-from ..errors import EmsError, UNSUPPORTED
+from ..errors import EmsError, UNDECODABLE, UNSUPPORTED
 from ..schemas import Box, FileRef, WithOptions
 from ..streaming import Outcome, Progress, run_op
 from ..tools import decode as decode_tool
+from ..tools import ffprobe as ffprobe_tool
 from ._models import model_slot
 
 PRODUCER = "insightface/buffalo_l"
@@ -19,6 +21,15 @@ class DetectRequest(WithOptions):
     file: FileRef
     # Smallest face to report, as a fraction of the frame's shorter side.
     min_size: float = Field(default=0.0, ge=0, le=1)
+
+
+class DetectVideoRequest(WithOptions):
+    file: FileRef
+    # Seconds between the frames looked at; a long video is sampled more sparsely (_4.11a_).
+    interval: float = Field(default=1.0, ge=0.2, le=60)
+    min_size: float = Field(default=0.0, ge=0, le=1)
+    # Detections below this confidence are left out before faces are followed.
+    min_confidence: float = Field(default=0.0, ge=0, le=1)
 
 
 class EmbedRequest(WithOptions):
@@ -93,6 +104,61 @@ async def detect(ctx: Context, req: DetectRequest, progress: Progress) -> Outcom
     return Outcome(to_fractions(raw or {}, req.min_size), producer=PRODUCER)
 
 
+async def detect_video(ctx: Context, req: DetectVideoRequest, progress: Progress) -> Outcome:
+    """The faces a video shows, each with when it is seen — one call, one decode of the video
+    (`inference_ops.detect_video_faces`). A file with no picture shows none."""
+    path = ctx.roots.input(req.file.path)
+    probed = await ffprobe_tool.probe(path, timeout=ctx.settings.tool_stall_seconds)
+    if probed.refusal:
+        raise EmsError(UNDECODABLE, f"faces.detect_video: {probed.refusal}")
+    stream = probed.first("video")
+    if not stream:
+        return Outcome({"frame": {"width": 0, "height": 0}, "duration": None, "interval": req.interval, "samples": 0, "faces": []}, producer=PRODUCER)
+    # The picture's own length, which a phone clip's sound can outlast (ein/core#618).
+    duration = ffprobe_tool.number(stream.get("duration")) or ffprobe_tool.number(probed.format.get("duration"))
+    async with model_slot(ctx, req.options):
+        await progress.emit("detect")
+        raw = await ctx.worker.call(
+            "detect_video_faces",
+            {
+                "path": path,
+                "angle": req.file.angle,
+                "mirror": req.file.mirror,
+                "interval": req.interval,
+                "duration": duration,
+                "min_size": req.min_size,
+                "min_confidence": req.min_confidence,
+            },
+            deadline=req.options.deadline,
+        )
+    faces = []
+    for face in raw.get("faces") or []:
+        entry = {
+            "appearances": face.get("appearances") or [],
+            "detections": int(face.get("detections") or 0),
+            "t": float(face.get("t") or 0),
+            "box": face.get("box") or {},
+            "confidence": float(face.get("confidence") or 0),
+            "embedding": face.get("embedding") or [],
+        }
+        if face.get("landmarks"):
+            entry["landmarks"] = face["landmarks"]
+        pose = pose_of(face)
+        if pose:
+            entry["pose"] = pose
+        faces.append(entry)
+    return Outcome(
+        {
+            "frame": raw.get("frame") or {"width": 0, "height": 0},
+            "duration": duration,
+            "interval": float(raw.get("interval") or req.interval),
+            "samples": int(raw.get("samples") or 0),
+            "faces": faces,
+        },
+        producer=PRODUCER,
+    )
+
+
 async def embed(ctx: Context, req: EmbedRequest, progress: Progress) -> Outcome:
     path = ctx.roots.input(req.file.path)
     async with model_slot(ctx, req.options):
@@ -111,6 +177,10 @@ def register(router: APIRouter, ctx: Context) -> None:
     @router.post("/faces/detect")
     async def faces_detect(request: Request, body: DetectRequest):
         return await run_op(request, lambda progress: detect(ctx, body, progress))
+
+    @router.post("/faces/detect_video")
+    async def faces_detect_video(request: Request, body: DetectVideoRequest):
+        return await run_op(request, lambda progress: detect_video(ctx, body, progress))
 
     @router.post("/faces/embed")
     async def faces_embed(request: Request, body: EmbedRequest):

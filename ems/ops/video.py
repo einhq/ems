@@ -169,6 +169,12 @@ class PosterRequest(WithOptions):
     targets: list[RenditionTarget] = Field(min_length=1, max_length=MAX_TARGETS)
 
 
+# Past this second a poster's frame is sought on the input first (`extract_poster`), to this
+# many seconds before it: the input seek lands on a keyframe, the decode from there is exact.
+POSTER_SEEK_AFTER = 10.0
+POSTER_SEEK_LEAD = 5.0
+
+
 class NoFrame(Exception):
     """The decode reached the end of the picture without a frame at the second asked for."""
 
@@ -176,15 +182,19 @@ class NoFrame(Exception):
 async def extract_poster(ctx: Context, path: str, out: str, *, at: float, deinterlace: bool) -> None:
     """One frame at `at` seconds as a lossless-as-JPEG-gets still, in the raw frame with square pixels.
 
-    `-ss` after `-i`: decoding from the start and dropping frames to the timestamp is
-    frame-accurate, and the poster is taken a second in, so there is nothing to skip past.
+    `-ss` after `-i` is frame-accurate: frames are decoded and dropped up to the timestamp. A
+    frame later than POSTER_SEEK_AFTER seconds is first sought to POSTER_SEEK_LEAD seconds before
+    it on the input, so a face's frame forty minutes in is not reached by decoding all forty.
     `-display_rotation 0` keeps ffmpeg from applying the container's matrix on its own — the
     caller's angle is the only thing that turns pixels, the same rule every op keeps.
     """
     timeout = ctx.settings.tool_stall_seconds
     ffmpeg = require("ffmpeg")
     filters = ("yadif," if deinterlace else "") + SQUARE_PIXELS_FILTER
-    tail = ["-i", path, "-vf", filters, "-ss", f"{at:.3f}", "-vframes", "1", "-qscale:v", "0", "-y", "-f", "image2", "-update", "1", out]
+    lead = at - POSTER_SEEK_LEAD if at > POSTER_SEEK_AFTER else 0.0
+    # An input seek counts the output's time from where it landed.
+    seek = ["-ss", f"{lead:.3f}"] if lead > 0 else []
+    tail = [*seek, "-i", path, "-vf", filters, "-ss", f"{at - lead:.3f}", "-vframes", "1", "-qscale:v", "0", "-y", "-f", "image2", "-update", "1", out]
     attempts = []
     if ffmpeg_tool.gpu_present():
         attempts.append([ffmpeg, "-v", "error", "-display_rotation", "0", "-hwaccel", "cuda"] + tail)
