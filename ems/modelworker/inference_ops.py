@@ -812,6 +812,147 @@ def active_speakers(video_path: str, audio_path: str, speakers: list, angle=0, m
     return {"speakers": [best[s] for s in sorted(best)], "windows": len(windows), "frames": decoded}
 
 
+# --- faces through a video ------------------------------------------------------------------
+#
+# Who a video shows, and when (ein/core#410): a frame every `interval` seconds, InsightFace on
+# each, and the detections followed and grouped into the file's faces by `face_tracks`.
+
+# The most frames sampled from one video; a longer one is sampled more sparsely instead.
+VIDEO_FACES_MAX_SAMPLES = 1800
+# Frames detected per hold of the model. The next ones are decoded outside it, so another
+# request for the family waits for one batch at most.
+VIDEO_FACES_BATCH = 16
+# Longer side a frame is cut down to before detection. The detector reads it at 640 and each
+# face is read from the frame itself, so a 4K frame buys a small face little but memory.
+VIDEO_FACES_MAX_EDGE = 1920
+
+
+class Undecodable(Exception):
+    """The input has no picture the decoder can read."""
+
+
+def video_face_step(interval: float, duration: float | None) -> float:
+    """Seconds between sampled frames: `interval`, or longer for a video that would otherwise
+    give more than VIDEO_FACES_MAX_SAMPLES."""
+    return max(interval, duration / VIDEO_FACES_MAX_SAMPLES) if duration and duration > 0 else interval
+
+
+def detect_video_faces(video_path: str, angle=0, mirror=False, interval: float = 1.0, duration: float | None = None,
+                       min_size: float = 0.0, min_confidence: float = 0.0) -> dict:
+    """The faces a video shows: per face when it is seen, its clearest detection and one vector.
+
+    A frame is taken every `video_face_step(interval, duration)` seconds, in the display frame
+    the caller's `angle`/`mirror` name, read in one sequential pass. Detections smaller than
+    `min_size` of the frame's shorter side or below `min_confidence` are left out before they are
+    followed. Returns `{"frame", "interval", "samples", "frames", "faces"}`; each face is
+    `{"appearances": [[start, end], …], "detections", "t", "box", "confidence", "landmarks",
+    "pose"?, "embedding"}`, the box and landmarks in fractions of the display frame at `t`
+    seconds, `embedding` the normalized mean of the face's best detections' vectors.
+    """
+    try:
+        import cv2
+    except ImportError as e:
+        raise ImportError(f"Required package not installed: {e}")
+    import face_tracks
+
+    if not os.path.exists(video_path):
+        raise FileNotFoundError(f"video not found: {video_path}")
+
+    step = video_face_step(float(interval), duration)
+    capture = cv2.VideoCapture(video_path)
+    if not capture.isOpened():
+        raise Undecodable(f"no video stream the decoder can read: {video_path}")
+    # Raw frames: the caller's angle is what turns pixels, as everywhere else in EMS.
+    if hasattr(cv2, "CAP_PROP_ORIENTATION_AUTO"):
+        capture.set(cv2.CAP_PROP_ORIENTATION_AUTO, 0)
+    fps = capture.get(cv2.CAP_PROP_FPS) or 0.0
+
+    samples: list = []
+    pending: list = []
+    frame_size = (0, 0)
+
+    def detect(batch):
+        out = []
+        for index, t, frame in batch:
+            height, width = frame.shape[:2]
+            shorter = min(width, height)
+            found = []
+            for face in _insightface_get(frame):
+                x0, y0, x1, y1 = (float(v) for v in face.bbox)
+                if min(x1 - x0, y1 - y0) < min_size * shorter or float(face.det_score) < min_confidence:
+                    continue
+                detection = {
+                    "box": (x0, y0, x1, y1),
+                    "frame": (width, height),
+                    "confidence": float(face.det_score),
+                    "unit": face.normed_embedding.tolist(),
+                    "landmarks": face.kps.tolist() if face.kps is not None else None,
+                }
+                pose = _pose_of(face)
+                if pose is not None:
+                    detection["pose"] = pose
+                found.append(detection)
+            out.append({"index": index, "t": t, "faces": found})
+        return out
+
+    def flush():
+        if not pending:
+            return
+        batch = list(pending)
+        pending.clear()
+        with registry.family_lock(INSIGHTFACE):
+            samples.extend(registry.run_on_model_thread(INSIGHTFACE, lambda: detect(batch)))
+
+    decoded, next_t = 0, 0.0
+    try:
+        while capture.grab():
+            decoded += 1
+            t = capture.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
+            # A container without timestamps reports 0 throughout; its frames are counted instead.
+            if t <= 0 and decoded > 1 and fps > 0:
+                t = (decoded - 1) / fps
+            if t + 1e-3 < next_t:
+                continue
+            ok, frame = capture.retrieve()
+            if not ok:
+                continue
+            frame = _display_video_frame(cv2, frame, angle, mirror)
+            height, width = frame.shape[:2]
+            if max(width, height) > VIDEO_FACES_MAX_EDGE:
+                scale = VIDEO_FACES_MAX_EDGE / max(width, height)
+                frame = cv2.resize(frame, (round(width * scale), round(height * scale)), interpolation=cv2.INTER_AREA)
+            frame_size = (frame.shape[1], frame.shape[0])
+            pending.append((len(samples) + len(pending), round(t, 3), frame))
+            next_t = t + step
+            if len(pending) >= VIDEO_FACES_BATCH:
+                flush()
+        flush()
+    finally:
+        capture.release()
+
+    if decoded == 0:
+        raise Undecodable(f"no video frame could be decoded: {video_path}")
+
+    faces = []
+    for face in face_tracks.faces_of(samples, step, duration):
+        best = face["detection"]
+        x0, y0, x1, y1 = best["box"]
+        width, height = best["frame"]
+        entry = {
+            "appearances": face["appearances"],
+            "detections": face["detections"],
+            "t": best["t"],
+            "box": {"x": max(0.0, x0 / width), "y": max(0.0, y0 / height), "width": min(1.0, (x1 - x0) / width), "height": min(1.0, (y1 - y0) / height)},
+            "confidence": best["confidence"],
+            "landmarks": [[x / width, y / height] for x, y in best["landmarks"]] if best.get("landmarks") else None,
+            "embedding": face["vector"],
+        }
+        if best.get("pose"):
+            entry["pose"] = best["pose"]
+        faces.append(entry)
+    return {"frame": {"width": frame_size[0], "height": frame_size[1]}, "interval": step, "samples": len(samples), "frames": decoded, "faces": faces}
+
+
 def embed_voice_segments(file_path: str, spans: list) -> dict:
     """Embed many speech turns of one recording as voiceprints, in one pass over its sound.
 

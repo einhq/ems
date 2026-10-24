@@ -794,7 +794,7 @@ def catalog() -> dict[str, dict]:
             "model": "insightface/buffalo_l", "device": "auto",
             "purpose": "Finds faces in photos and video frames and turns each into a fingerprint, so the same person "
                        "can be recognised across the archive.",
-            "ops": ["faces.detect", "faces.embed", "speech.active_speakers"],
+            "ops": ["faces.detect", "faces.detect_video", "faces.embed", "speech.active_speakers"],
         },
         "whisper": {
             "model": WHISPER_MODEL, "device": "auto",

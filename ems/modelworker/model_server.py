@@ -24,6 +24,7 @@ response per connection.
   -> {"op":"shot_boundaries","path":"/scratch/…/frames.rgb","times":[0.0,0.04,…],"duration":180.5,"threshold":0.6,…}
   -> {"op":"embed_image_texts","texts":["segelbåt"]}
   -> {"op":"detect_faces","path":"/files/S1/01K...","angle":270,"mirror":false}
+  -> {"op":"detect_video_faces","path":"/files/S1/01K...","angle":90,"interval":1.0,"duration":63.2,"min_size":0.02,"min_confidence":0.7}
   -> {"op":"embed_face","path":"...","box":{"x":0.1,"y":0.2,"width":0.1,"height":0.1},"angle":270}
   -> {"op":"health"}
 
@@ -401,6 +402,19 @@ def handle(request: dict) -> dict:
         if not path:
             raise ValueError("detect_faces: missing path")
         return ops.detect_faces(path, angle, mirror)
+
+    if op == "detect_video_faces":
+        path = request.get("path")
+        if not path:
+            raise ValueError("detect_video_faces: missing path")
+        duration = request.get("duration")
+        return ops.detect_video_faces(
+            path, angle, mirror,
+            interval=float(request.get("interval") or 1.0),
+            duration=float(duration) if duration else None,
+            min_size=float(request.get("min_size") or 0.0),
+            min_confidence=float(request.get("min_confidence") or 0.0),
+        )
 
     if op == "embed_face":
         path, box = request.get("path"), request.get("box")
