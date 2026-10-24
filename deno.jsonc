@@ -1,0 +1,10 @@
+{
+  // Formatting only, for the docs: the same settings as core and wow, so notes read the
+  // same wherever they are edited.
+  "fmt": {
+    "lineWidth": 175,
+    "indentWidth": 2,
+    "singleQuote": true,
+    "proseWrap": "preserve"
+  }
+}
