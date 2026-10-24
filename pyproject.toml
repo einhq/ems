@@ -20,7 +20,10 @@ tools = [
   "python-docx",
   "odfpy",
 ]
-test = ["pytest>=8", "httpx>=0.27"]
+test = ["pytest>=8", "pytest-asyncio>=1", "httpx>=0.27"]
+
+[tool.setuptools.packages.find]
+include = ["ems*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
