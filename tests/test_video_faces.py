@@ -132,6 +132,7 @@ async def test_detect_video_asks_the_worker_with_the_pictures_own_length(client,
             "appearances": [[0.5, 9.5]], "detections": 9, "t": 4.0,
             "box": {"x": 0.4, "y": 0.2, "width": 0.1, "height": 0.18}, "confidence": 0.93,
             "landmarks": [[0.42, 0.25]], "pose": {"pitch": 1, "yaw": -8, "roll": 0}, "embedding": [0.6, 0.8],
+            "track": [[1.0, 0.41, 0.2, 0.1, 0.18], [2.0, 0.4, 0.2, 0.1, 0.18]],
         }],
     })
     r = await client.post("/v0/faces/detect_video", json={"file": {"path": str(ro / "v.mp4"), "angle": 90}, "min_size": 0.02, "min_confidence": 0.7})
@@ -142,6 +143,7 @@ async def test_detect_video_asks_the_worker_with_the_pictures_own_length(client,
         "faces": [{
             "appearances": [[0.5, 9.5]], "detections": 9, "t": 4.0,
             "box": {"x": 0.4, "y": 0.2, "width": 0.1, "height": 0.18}, "confidence": 0.93, "embedding": [0.6, 0.8],
+            "track": [[1.0, 0.41, 0.2, 0.1, 0.18], [2.0, 0.4, 0.2, 0.1, 0.18]],
             "landmarks": [[0.42, 0.25]], "pose": {"pitch": 1.0, "yaw": -8.0, "roll": 0.0},
         }],
     }
@@ -300,6 +302,8 @@ def test_the_worker_samples_a_frame_an_interval_and_answers_fractions(monkeypatc
     assert anna["appearances"] == [[0.0, 4.5]] and anna["detections"] == 5
     assert anna["box"] == {"x": 0.1, "y": 100 / 360, "width": 0.125, "height": 80 / 360}
     assert anna["embedding"] == ANNA
+    # Every sighting's box, in time order: one a sampled frame.
+    assert anna["track"] == [[t, 0.1, 0.2778, 0.125, 0.2222] for t in (0.0, 1.0, 2.0, 3.0, 4.0)]
 
 
 def test_a_long_video_is_sampled_more_sparsely():

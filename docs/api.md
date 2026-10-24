@@ -523,7 +523,8 @@ The faces a video shows, each with when it is seen, in one request:
   "faces": [ { "appearances": [[0.5, 9.5], [41.5, 44.5]], "detections": 12, "t": 5.0,
                "box": { "x": 0.41, "y": 0.22, "width": 0.09, "height": 0.13 }, "confidence": 0.93,
                "landmarks": [[0.44, 0.27], …], "pose": { "pitch": -4.5, "yaw": 12.0, "roll": 1.3 },
-               "embedding": [ … 512 floats … ] } ] }
+               "embedding": [ … 512 floats … ],
+               "track": [[0.0, 0.40, 0.21, 0.09, 0.13], [1.0, 0.41, 0.22, 0.09, 0.13], …] } ] }
 ```
 
 A frame every `interval` seconds (0.2–60, default 1), in the display frame the caller's
@@ -542,6 +543,9 @@ face, and a person may still come back as two when the vectors are not alike eno
   A crop of the face is `video.poster` at `t` with this box as `crop`.
 - `embedding` — the normalized mean of its best detections' vectors, comparable by cosine with
   `faces.detect`'s.
+- `track` — where it was in every sampled frame it was seen in, `[t, x, y, width, height]` in
+  time order, in fractions of the display frame: at most one a frame, so a box can follow the
+  face through the video.
 
 Faces come first seen first. A file with no picture shows none; one no decoder can read is
 `undecodable`. `duration` is the picture's length, the stream's own before the container's.
