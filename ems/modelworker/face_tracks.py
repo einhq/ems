@@ -26,10 +26,11 @@ TRACK_MIN_SIMILARITY = 0.5
 # Samples a track may go without a detection and still continue: a face turned away or blurred
 # for a moment.
 TRACK_MAX_GAP = 2
-# Average cosine between two groups of tracks for them to be one face. A split is cheaper than a
-# fusion: the caller can still give both halves the same person, but a fused face gives one
-# person's appearances to another.
-GROUP_MIN_SIMILARITY = 0.5
+# Cosine between the mean vectors of two groups of tracks for them to be one face. Lower than a
+# photo's match: a face a few dozen pixels high, turned and moving, is far from its own other
+# sightings, and the rule that two faces on screen together are two people keeps apart the
+# lookalikes that do come this close.
+GROUP_MIN_SIMILARITY = 0.4
 # The best detections whose mean is a track's or a face's vector.
 VECTOR_DETECTIONS = 5
 # Shorter side, in pixels, at which a face counts as fully sized for its quality: the size the
@@ -130,19 +131,19 @@ def dot_matrix(vectors: list[list[float]]) -> list[list[float]]:
 
 
 def group(tracks: list[list[dict]], min_similarity: float = GROUP_MIN_SIMILARITY) -> list[list[list[dict]]]:
-    """The tracks of one file grouped into faces, by average linkage on their vectors.
+    """The tracks of one file grouped into faces, by the likeness of their mean vectors.
 
-    Two groups join while the mean cosine between their tracks is at least `min_similarity`,
-    most alike first, unless some track of one was seen in a frame some track of the other was
-    seen in too. With unit vectors the mean cosine between two groups is the dot product of
-    their sums over the product of their sizes, so `between[i][j]`, the dot product of two
-    groups' sums, is all a join has to update: the joined group's row is the sum of the two.
-    Candidate pairs wait in a heap and are checked against the groups' versions when taken.
+    Two groups join while the cosine between the sums of their tracks' vectors is at least
+    `min_similarity`, most alike first, unless some track of one was seen in a frame some track
+    of the other was seen in too. A group's sum averages out the noise of its single sightings,
+    which the mean of every pairwise cosine between two groups keeps. `between[i][j]` is the dot
+    product of two groups' sums and `between[i][i]` a sum's squared length, so a join only adds
+    rows: the joined group's row is the sum of the two. Candidate pairs wait in a heap and are
+    checked against the groups' versions when taken.
     """
     count = len(tracks)
     between = dot_matrix([mean_vector(track) for track in tracks])
     members = [[i] for i in range(count)]
-    size = [1] * count
     seen = [{d["index"] for d in track} for track in tracks]
     version = [0] * count
     live = set(range(count))
@@ -150,7 +151,7 @@ def group(tracks: list[list[dict]], min_similarity: float = GROUP_MIN_SIMILARITY
     heap: list[tuple[float, int, int, int, int]] = []
 
     def offer(i: int, j: int) -> None:
-        likeness = between[i][j] / (size[i] * size[j])
+        likeness = between[i][j] / math.sqrt(between[i][i] * between[j][j])
         if likeness >= min_similarity and not seen[i] & seen[j]:
             heapq.heappush(heap, (-likeness, i, j, version[i], version[j]))
 
@@ -164,9 +165,9 @@ def group(tracks: list[list[dict]], min_similarity: float = GROUP_MIN_SIMILARITY
             continue
         live.discard(j)
         members[i].extend(members[j])
-        size[i] += size[j]
         seen[i] |= seen[j]
         version[i] += 1
+        between[i][i] += between[j][j] + 2 * between[i][j]
         for k in live:
             if k != i:
                 between[i][k] += between[j][k]

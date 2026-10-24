@@ -74,12 +74,22 @@ def test_tracks_seen_in_the_same_frame_are_never_one_face():
     assert len(face_tracks.group(tracks)) == 2
 
 
-def test_groups_join_by_their_mean_likeness_not_their_closest_pair():
+def test_groups_join_by_the_likeness_of_their_means():
     a, b = [{"index": 0, "t": 0.0, **face(0, ANNA)}], [{"index": 5, "t": 5.0, **face(0, BERIT)}]
-    # Close to Anna, unlike Berit: joins Anna, and the two together do not reach Berit.
-    near = [{"index": 9, "t": 9.0, **face(0, face_tracks.unit([1.0, 0.45, 0.0, 0.0]))}]
+    # Like Anna, and half as like Berit as a join needs: joins Anna, and the two together are
+    # further from Berit still.
+    near = [{"index": 9, "t": 9.0, **face(0, face_tracks.unit([1.0, 0.39, 0.0, 0.0]))}]
     groups = face_tracks.group([a, b, near])
     assert sorted(len(g) for g in groups) == [1, 2]
+
+
+def test_a_noisy_sighting_joins_through_the_mean_of_the_others():
+    # Three blurred looks at Anna, each pulled off her by noise of its own. The third is less
+    # like either of the others than a join needs, but the two together are a better Anna.
+    looks = [face_tracks.unit([1.0, 0.9, 0.0, 0.0]), face_tracks.unit([1.0, 0.0, 0.9, 0.0]), face_tracks.unit([1.0, 0.0, 0.0, 1.2])]
+    assert face_tracks.dot(looks[0], looks[2]) < 0.5 and face_tracks.dot(looks[1], looks[2]) < 0.5
+    tracks = [[{"index": i * 5, "t": float(i * 5), **face(0, v)}] for i, v in enumerate(looks)]
+    assert len(face_tracks.group(tracks, min_similarity=0.5)) == 1
 
 
 def test_appearances_merge_close_sightings_and_stay_within_the_video():
