@@ -925,7 +925,10 @@ def detect_video_faces(video_path: str, angle=0, mirror=False, interval: float =
                 frame = cv2.resize(frame, (round(width * scale), round(height * scale)), interpolation=cv2.INTER_AREA)
             frame_size = (frame.shape[1], frame.shape[0])
             pending.append((len(samples) + len(pending), round(t, 3), frame))
-            next_t = t + step
+            # On a grid of `step` from the start, not `step` after this frame: a step that is no
+            # whole number of frames would otherwise drift, 0.25 s at 50 fps becoming 0.26 s.
+            while next_t <= t + 1e-3:
+                next_t += step
             if len(pending) >= VIDEO_FACES_BATCH:
                 flush()
         flush()

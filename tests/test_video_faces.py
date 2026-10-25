@@ -345,6 +345,25 @@ def test_the_worker_samples_a_frame_an_interval_and_answers_fractions(monkeypatc
     assert anna["track"] == [[t, 0.1, 0.2778, 0.125, 0.2222] for t in (0.0, 1.0, 2.0, 3.0, 4.0)]
 
 
+def test_samples_keep_to_a_grid_of_the_interval_when_it_is_no_whole_number_of_frames(monkeypatch):
+    import types
+
+    import inference_ops as ops
+    import model_registry as registry
+
+    seconds = [i / 10 for i in range(21)]
+    cv2 = types.SimpleNamespace(CAP_PROP_FPS="fps", CAP_PROP_POS_MSEC="msec", VideoCapture=lambda path: FakeCapture(seconds))
+    monkeypatch.setitem(sys.modules, "cv2", cv2)
+    monkeypatch.setattr(ops.os.path, "exists", lambda path: True)
+    monkeypatch.setattr(registry, "run_on_model_thread", lambda family, fn: fn())
+    looked_at = []
+    monkeypatch.setattr(ops, "_insightface_get", lambda frame: looked_at.append(frame.t) or [])
+    ops.detect_video_faces("/files/v.mp4", interval=0.25, duration=2.0)
+    # The first frame at or after each quarter second: 0.3 and 0.8 stand in for 0.25 and 0.75,
+    # and the grid goes on from 0.5 and 1.0, not from the frames taken.
+    assert looked_at == [0.0, 0.3, 0.5, 0.8, 1.0, 1.3, 1.5, 1.8, 2.0]
+
+
 def test_a_long_video_is_sampled_more_sparsely():
     import inference_ops as ops
 
