@@ -837,7 +837,7 @@ def video_face_step(interval: float, duration: float | None) -> float:
     return max(interval, duration / VIDEO_FACES_MAX_SAMPLES) if duration and duration > 0 else interval
 
 
-def detect_video_faces(video_path: str, angle=0, mirror=False, interval: float = 1.0, duration: float | None = None,
+def detect_video_faces(video_path: str, angle=0, mirror=False, interval: float = 0.25, duration: float | None = None,
                        min_size: float = 0.0, min_confidence: float = 0.0) -> dict:
     """The faces a video shows: per face when it is seen, its clearest detection and one vector.
 
@@ -848,7 +848,8 @@ def detect_video_faces(video_path: str, angle=0, mirror=False, interval: float =
     `{"appearances": [[start, end], …], "detections", "t", "box", "confidence", "landmarks",
     "pose"?, "embedding", "track"}`, the box and landmarks in fractions of the display frame at
     `t` seconds, `embedding` the normalized mean of the face's best detections' vectors, and
-    `track` the box of every sighting, `[t, x, y, width, height]` in time order.
+    `track` its path (`face_tracks.path`): `[t, x, y, width, height]` in time order, every
+    sample while the face moves and about one a second while it stands still.
     """
     try:
         import cv2
@@ -952,7 +953,7 @@ def detect_video_faces(video_path: str, angle=0, mirror=False, interval: float =
             "confidence": best["confidence"],
             "landmarks": [[x / width, y / height] for x, y in best["landmarks"]] if best.get("landmarks") else None,
             "embedding": face["vector"],
-            "track": [[d["t"], *fractions(d)] for d in face["sightings"]],
+            "track": face_tracks.path([[d["t"], *fractions(d)] for d in face["sightings"]], step),
         }
         if best.get("pose"):
             entry["pose"] = best["pose"]

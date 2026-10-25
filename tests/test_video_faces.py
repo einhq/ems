@@ -26,29 +26,29 @@ def face(x: float, vector, size: float = 120.0, confidence: float = 0.9, yaw: fl
     return detection
 
 
-def samples(*frames) -> list[dict]:
-    return [{"index": i, "t": float(i), "faces": list(found)} for i, found in enumerate(frames)]
+def samples(*frames, interval: float = 1.0) -> list[dict]:
+    return [{"index": i, "t": round(i * interval, 3), "faces": list(found)} for i, found in enumerate(frames)]
 
 
 def test_a_face_that_stays_put_is_one_track():
-    tracks = face_tracks.follow(samples([face(100, ANNA)], [face(110, ANNA)], [face(120, ANNA)]))
+    tracks = face_tracks.follow(samples([face(100, ANNA)], [face(110, ANNA)], [face(120, ANNA)]), 1.0)
     assert [len(track) for track in tracks] == [3]
     assert [d["t"] for d in tracks[0]] == [0.0, 1.0, 2.0]
 
 
 def test_a_face_that_moved_too_far_to_overlap_is_followed_by_its_likeness():
-    tracks = face_tracks.follow(samples([face(100, ANNA)], [face(900, ANNA)]))
+    tracks = face_tracks.follow(samples([face(100, ANNA)], [face(900, ANNA)]), 1.0)
     assert [len(track) for track in tracks] == [1 + 1]
 
 
 def test_an_overlapping_box_of_somebody_else_does_not_continue_a_track():
     # Berit steps in front of the camera where Anna stood.
-    tracks = face_tracks.follow(samples([face(100, ANNA)], [face(105, BERIT)]))
+    tracks = face_tracks.follow(samples([face(100, ANNA)], [face(105, BERIT)]), 1.0)
     assert [len(track) for track in tracks] == [1, 1]
 
 
 def test_two_people_side_by_side_keep_their_own_tracks():
-    tracks = face_tracks.follow(samples([face(100, ANNA), face(400, BERIT)], [face(420, BERIT), face(110, ANNA)]))
+    tracks = face_tracks.follow(samples([face(100, ANNA), face(400, BERIT)], [face(420, BERIT), face(110, ANNA)]), 1.0)
     assert sorted(len(track) for track in tracks) == [2, 2]
     for track in tracks:
         assert len({tuple(d["unit"]) for d in track}) == 1
@@ -56,21 +56,30 @@ def test_two_people_side_by_side_keep_their_own_tracks():
 
 def test_a_track_survives_a_short_gap_and_ends_after_a_long_one():
     gap = [[] for _ in range(face_tracks.TRACK_MAX_GAP)]
-    assert [len(t) for t in face_tracks.follow(samples([face(100, ANNA)], *gap, [face(100, ANNA)]))] == [2]
+    assert [len(t) for t in face_tracks.follow(samples([face(100, ANNA)], *gap, [face(100, ANNA)]), 1.0)] == [2]
     longer = [[] for _ in range(face_tracks.TRACK_MAX_GAP + 1)]
-    assert [len(t) for t in face_tracks.follow(samples([face(100, ANNA)], *longer, [face(100, ANNA)]))] == [1, 1]
+    assert [len(t) for t in face_tracks.follow(samples([face(100, ANNA)], *longer, [face(100, ANNA)]), 1.0)] == [1, 1]
+
+
+def test_a_gap_is_measured_in_seconds_however_often_the_video_is_sampled():
+    # Two seconds unseen at a quarter of a second is eight samples, and still the same track.
+    gap = [[] for _ in range(8)]
+    assert [len(t) for t in face_tracks.follow(samples([face(100, ANNA)], *gap, [face(100, ANNA)], interval=0.25), 0.25)] == [2]
+    longer = [[] for _ in range(9)]
+    assert [len(t) for t in face_tracks.follow(samples([face(100, ANNA)], *longer, [face(100, ANNA)], interval=0.25), 0.25)] == [1, 1]
+    assert face_tracks.appearances([0.0, 2.25, 4.75], 0.25, None) == [[0.0, 2.375], [4.625, 4.875]]
 
 
 def test_tracks_of_one_person_at_different_times_are_one_face():
     gap = [[] for _ in range(10)]
-    tracks = face_tracks.follow(samples([face(100, ANNA)], *gap, [face(500, ANNA_LATER)], [face(500, BERIT)]))
+    tracks = face_tracks.follow(samples([face(100, ANNA)], *gap, [face(500, ANNA_LATER)], [face(500, BERIT)]), 1.0)
     groups = face_tracks.group(tracks)
     assert sorted(len(g) for g in groups) == [1, 2]
 
 
 def test_tracks_seen_in_the_same_frame_are_never_one_face():
     # Two near-identical faces side by side — twins, or a mirror — are two faces of the frame.
-    tracks = face_tracks.follow(samples([face(100, ANNA), face(600, ANNA_LATER)]))
+    tracks = face_tracks.follow(samples([face(100, ANNA), face(600, ANNA_LATER)]), 1.0)
     assert len(face_tracks.group(tracks)) == 2
 
 
@@ -115,6 +124,36 @@ def test_faces_come_first_seen_first():
     assert [f["detection"]["unit"] for f in face_tracks.faces_of(found, 1.0, None)] == [BERIT, CARL]
 
 
+def test_a_face_standing_still_keeps_about_one_point_a_second_without_its_jitter():
+    # Eight seconds at a quarter of a second, the detector's box off to one side now and then.
+    points = [[i * 0.25, 0.5 + (0.003 if i % 4 == 2 else 0.0), 0.4, 0.05, 0.08] for i in range(33)]
+    kept = face_tracks.path(points, 0.25)
+    assert [p[0] for p in kept] == [float(s) for s in range(9)]
+    # The median of each sighting and its neighbours: a lone stray box is gone.
+    assert all(p[1] == 0.5 for p in kept)
+
+
+def test_a_face_moving_steadily_keeps_a_point_a_second_and_one_that_stops_keeps_the_stop():
+    steady = [[i * 0.25, 0.1 + 0.02 * i, 0.4, 0.05, 0.08] for i in range(9)]
+    assert [p[0] for p in face_tracks.path(steady, 0.25)] == [0.0, 1.0, 2.0]
+    # Across the frame for a second, then still: a line from the start past the stop would miss
+    # the face where it stopped, so the stop is kept.
+    stops = [0.1, 0.2, 0.3, 0.4, 0.5, 0.5, 0.5, 0.5, 0.5]
+    kept = face_tracks.path([[i * 0.25, x, 0.4, 0.05, 0.08] for i, x in enumerate(stops)], 0.25)
+    assert [p[0] for p in kept] == [0.0, 1.0, 2.0]
+
+
+def test_a_face_moving_fast_and_unevenly_keeps_every_sample():
+    jumps = [0.1, 0.12, 0.3, 0.32, 0.6, 0.62, 0.9]
+    kept = face_tracks.path([[i * 0.25, x, 0.4, 0.05, 0.08] for i, x in enumerate(jumps)], 0.25)
+    assert len(kept) == len(jumps)
+
+
+def test_a_path_keeps_both_ends_of_a_stretch_the_face_was_unseen_in():
+    seen = [[t, 0.5, 0.4, 0.05, 0.08] for t in (0.0, 0.25, 0.5, 0.75, 3.0, 3.25, 3.5)]
+    assert [p[0] for p in face_tracks.path(seen, 0.25)] == [0.0, 0.75, 3.0, 3.5]
+
+
 def readable_video(duration: str = "63.2"):
     async def probe(path, *, timeout):
         return ffprobe.Probe({"streams": [{"codec_type": "video", "duration": duration}], "format": {"duration": "64.0"}}, None)
@@ -148,7 +187,7 @@ async def test_detect_video_asks_the_worker_with_the_pictures_own_length(client,
         }],
     }
     sent = fake_worker.requests[-1]
-    assert sent["duration"] == 63.2 and sent["angle"] == 90 and sent["interval"] == 1.0
+    assert sent["duration"] == 63.2 and sent["angle"] == 90 and sent["interval"] == 0.25
     assert sent["min_size"] == 0.02 and sent["min_confidence"] == 0.7
 
 
