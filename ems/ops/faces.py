@@ -25,8 +25,9 @@ class DetectRequest(WithOptions):
 
 class DetectVideoRequest(WithOptions):
     file: FileRef
-    # Seconds between the frames looked at; a long video is sampled more sparsely (_4.11a_).
-    interval: float = Field(default=1.0, ge=0.2, le=60)
+    # Seconds between the frames looked at, often enough for a box to follow a face that moves;
+    # a long video is sampled more sparsely (_4.11a_).
+    interval: float = Field(default=0.25, ge=0.2, le=60)
     min_size: float = Field(default=0.0, ge=0, le=1)
     # Detections below this confidence are left out before faces are followed.
     min_confidence: float = Field(default=0.0, ge=0, le=1)

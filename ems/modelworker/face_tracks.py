@@ -20,11 +20,13 @@ TRACK_MIN_IOU = 0.3
 # Below this a detection never continues a track, however much the boxes overlap: two people
 # crossing in front of the camera.
 TRACK_FLOOR_SIMILARITY = 0.3
-# Samples are a second or more apart, and a person moving across the frame leaves no overlap
-# between them; this much likeness continues the track anyway.
+# A person moving fast across the frame, or a long video's samples seconds apart, leave no overlap
+# between two sightings; this much likeness continues the track anyway.
 TRACK_MIN_SIMILARITY = 0.5
-# Samples a track may go without a detection and still continue: a face turned away or blurred
-# for a moment.
+# How long a track may go without a detection and still continue, and a face stay on screen: a
+# face turned away or blurred for a moment. Seconds, or samples for a long video sampled more
+# sparsely (`max_gap`).
+TRACK_MAX_GAP_SECONDS = 2.0
 TRACK_MAX_GAP = 2
 # Cosine between the mean vectors of two groups of tracks for them to be one face. Lower than a
 # photo's match: a face a few dozen pixels high, turned and moving, is far from its own other
@@ -39,6 +41,17 @@ FULL_SIZE_PIXELS = 112.0
 # The most tracks grouped, clearest first. A crowd seen for an hour could give thousands, and
 # grouping costs the square of their number; the faint ones dropped are background faces.
 MAX_TRACKS = 1500
+# How far the box drawn between two kept sightings of a face may stray from one left out of its
+# path, as a fraction of the face's own width or height.
+PATH_TOLERANCE = 0.1
+# The longest a path goes between two kept sightings: a face that stands still is placed anew at
+# least this often.
+PATH_MAX_STEP = 1.0
+
+
+def max_gap(interval: float) -> float:
+    """Seconds a face may go unseen and still be the same track and on screen."""
+    return max(TRACK_MAX_GAP_SECONDS, TRACK_MAX_GAP * interval)
 
 
 def unit(vector: list[float]) -> list[float]:
@@ -80,19 +93,20 @@ def mean_vector(detections: list[dict], count: int = VECTOR_DETECTIONS) -> list[
     return unit(total)
 
 
-def follow(samples: list[dict]) -> list[list[dict]]:
-    """Detections followed through the samples, in order, as tracks: lists of detections, each
-    with the sample `index` and `t` it was seen at.
+def follow(samples: list[dict], interval: float) -> list[list[dict]]:
+    """Detections followed through the samples, `interval` seconds apart, in order, as tracks:
+    lists of detections, each with the sample `index` and `t` it was seen at.
 
-    Greedy and forward-only. Each detection continues at most one track that was seen within
-    `TRACK_MAX_GAP` samples, best pairing first: a box that overlaps the track's last one, or a
-    face much like the track's own; never one that looks like somebody else.
+    Greedy and forward-only. Each detection continues at most one track seen within
+    `max_gap(interval)`, best pairing first: a box that overlaps the track's last one, or a face
+    much like the track's own; never one that looks like somebody else.
     """
+    reach = max_gap(interval) + interval + 1e-6
     tracks: list[dict] = []
     for sample in samples:
         index = sample["index"]
         found = [{**d, "index": index, "t": sample["t"]} for d in sample["faces"]]
-        live = [ti for ti, track in enumerate(tracks) if index - track["last"] <= TRACK_MAX_GAP + 1]
+        live = [ti for ti, track in enumerate(tracks) if sample["t"] - track["last"] <= reach]
         pairs = []
         for ti in live:
             track = tracks[ti]
@@ -111,12 +125,12 @@ def follow(samples: list[dict]) -> list[list[dict]]:
             track["detections"].append(found[di])
             track["sum"] = [s + v for s, v in zip(track["sum"], found[di]["unit"])]
             track["vector"] = unit(track["sum"])
-            track["last"] = index
+            track["last"] = sample["t"]
             used_tracks.add(ti)
             used_found.add(di)
         for di, detection in enumerate(found):
             if di not in used_found:
-                tracks.append({"detections": [detection], "sum": list(detection["unit"]), "vector": list(detection["unit"]), "last": index})
+                tracks.append({"detections": [detection], "sum": list(detection["unit"]), "vector": list(detection["unit"]), "last": sample["t"]})
     return [track["detections"] for track in tracks]
 
 
@@ -179,12 +193,13 @@ def group(tracks: list[list[dict]], min_similarity: float = GROUP_MIN_SIMILARITY
 
 
 def appearances(times: list[float], interval: float, duration: float | None) -> list[list[float]]:
-    """The seconds a face is on screen: the times it was seen merged into spans wherever no more
-    than `TRACK_MAX_GAP` samples are missing, each padded by half an interval and kept within
+    """The seconds a face is on screen: the times it was seen merged into spans wherever it went
+    unseen no longer than `max_gap(interval)`, each padded by half an interval and kept within
     the video."""
+    reach = max_gap(interval) + interval + 1e-6
     spans: list[list[float]] = []
     for t in sorted(set(times)):
-        if spans and t - spans[-1][1] <= (TRACK_MAX_GAP + 1) * interval + 1e-6:
+        if spans and t - spans[-1][1] <= reach:
             spans[-1][1] = t
         else:
             spans.append([t, t])
@@ -197,7 +212,7 @@ def faces_of(samples: list[dict], interval: float, duration: float | None) -> li
     its clearest detection (`detection`, with the `t` it was seen at), its `vector`, and every
     `sighting` in time order. A face's tracks are never seen in the same frame, so there is at
     most one sighting a sampled frame."""
-    tracks = follow(samples)
+    tracks = follow(samples, interval)
     if len(tracks) > MAX_TRACKS:
         tracks = sorted(tracks, key=lambda track: max(quality(d) for d in track), reverse=True)[:MAX_TRACKS]
     faces = []
@@ -212,3 +227,50 @@ def faces_of(samples: list[dict], interval: float, duration: float | None) -> li
             "sightings": sorted(detections, key=lambda d: d["t"]),
         })
     return sorted(faces, key=lambda face: (face["appearances"][0][0], face["detection"]["t"]))
+
+
+def path(points: list[list[float]], interval: float) -> list[list[float]]:
+    """A face's sightings `[t, x, y, width, height]`, in time order and `interval` seconds apart
+    where it was seen without a break, cut down to the ones a box needs to follow it.
+
+    Each sighting's box is first the median of it and its neighbours', coordinate by coordinate:
+    that takes out the detector's jitter on a face standing still and leaves a steady movement as
+    it is. A sighting is then kept where the line between the kept ones either side would miss it
+    by more than `PATH_TOLERANCE`, and at least every `PATH_MAX_STEP` seconds, so a face moving
+    fast keeps every sample and one standing still about one a second. Both ends of a run of
+    sightings are kept, so the line never bridges a stretch the face went unseen in.
+    """
+    runs: list[list[list[float]]] = []
+    for point in points:
+        if runs and point[0] - runs[-1][-1][0] <= 1.5 * interval + 1e-6:
+            runs[-1].append(point)
+        else:
+            runs.append([point])
+    kept: list[list[float]] = []
+    for run in runs:
+        steady = [list(run[0])] + [
+            [run[i][0], *(sorted(run[k][c] for k in (i - 1, i, i + 1))[1] for c in range(1, 5))] for i in range(1, len(run) - 1)
+        ] + ([list(run[-1])] if len(run) > 1 else [])
+        kept.append(steady[0])
+        start = 0
+        while start < len(steady) - 1:
+            end = start + 1
+            while end + 1 < len(steady) and steady[end + 1][0] - steady[start][0] <= PATH_MAX_STEP + 1e-6 and _drawn_within(steady[start], steady[end + 1], steady[start + 1:end + 1]):
+                end += 1
+            kept.append(steady[end])
+            start = end
+    return [[point[0], *(round(v, 4) for v in point[1:])] for point in kept]
+
+
+def _drawn_within(first: list[float], last: list[float], between: list[list[float]]) -> bool:
+    """Whether the box slid from `first` to `last` passes within `PATH_TOLERANCE` of each of
+    `between`: its centre, width and height."""
+    for t, x, y, width, height in between:
+        w = (t - first[0]) / (last[0] - first[0])
+        at = [first[c] + (last[c] - first[c]) * w for c in range(1, 5)]
+        across, down = max(width, 1e-6) * PATH_TOLERANCE, max(height, 1e-6) * PATH_TOLERANCE
+        if abs(at[0] + at[2] / 2 - (x + width / 2)) > across or abs(at[1] + at[3] / 2 - (y + height / 2)) > down:
+            return False
+        if abs(at[2] - width) > across or abs(at[3] - height) > down:
+            return False
+    return True
