@@ -734,6 +734,15 @@ def _forget(keys: list[str]) -> None:
         _forget_own_card_reading()
 
 
+def forget_copies(family: str, device: str) -> None:
+    """Unload `family`'s copies on `device`. For a caller on the family's model thread, inside its
+    lock, so no request is using them."""
+    with _lock:
+        keys = [key for key in _cache if _family_of(key) == family and _device_of(key) == device]
+    if keys:
+        _forget(keys)
+
+
 def evict(key: str) -> None:
     """Drop one family from the cache (used on CUDA OOM retry)."""
     _forget([key])
@@ -1117,7 +1126,7 @@ def _back_to_card(family: str, resident: list[str]) -> bool:
     _card_return_at[family] = now
     if _short_of_room(family) is not None:
         return False
-    _forget([key for key in resident if _device_of(key) == "cpu"])
+    forget_copies(family, "cpu")
     print(f"[model-server] {family}: the card has room again — back from the CPU", file=sys.stderr, flush=True)
     return True
 

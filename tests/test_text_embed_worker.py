@@ -69,3 +69,22 @@ def test_a_text_over_the_limit_is_refused_not_cut(embedder):
 def test_an_unknown_role_is_refused(embedder):
     with pytest.raises(ValueError, match="role"):
         ops.embed_texts(["a"], "passage")
+
+
+def test_documents_are_placed_on_the_model_thread_not_before_it(embedder, monkeypatch):
+    # Placing outside the family's thread and lock could move the family under a request that
+    # is using it (ein/core#736).
+    placed, threads = [], []
+    monkeypatch.setattr(registry, "text_embed_device", lambda: placed.append("placed") or "cuda")
+    monkeypatch.setattr(registry, "run_on_model_thread", lambda family, fn: threads.append(family) or (placed.append("thread") or fn()))
+    ops.embed_texts(["a"], "document")
+    assert placed == ["thread", "placed"]
+
+
+def test_documents_the_card_takes_leave_no_copy_on_the_cpu(embedder, monkeypatch):
+    monkeypatch.setattr(registry, "_cache", {"text-embed:cpu": object()})
+    monkeypatch.setattr(registry, "free_vram_mb", lambda: 9000.0)
+    monkeypatch.setattr(registry, "cleanup_torch", lambda: None)
+    ops.embed_texts(["a"], "document", device="card")
+    assert embedder.loaded == [("text-embed", "cuda")]
+    assert "text-embed:cpu" not in registry._cache
