@@ -1153,12 +1153,17 @@ def embed_image_texts(texts: list[str]) -> dict:
 
 
 def _document_device(requested: str | None) -> str:
-    """Where documents embed: on the card when the caller says it is free (`card`) and it has room, else the setting."""
+    """Where documents embed: on the card when the caller says it is free (`card`) and it has room, else the setting.
+
+    A copy on the CPU goes when the card takes the documents, so the family is never held twice.
+    Runs on the family's model thread, inside its lock, so no request is using that copy.
+    """
     if requested == "card":
         if f"{TEXT_EMBED}:cuda" in registry.loaded():
             return "cuda"
         free = registry.free_vram_mb()
         if free is not None and free >= registry.TEXT_EMBED_MIN_FREE_MB:
+            registry.forget_copies(TEXT_EMBED, "cpu")
             return "cuda"
     return registry.text_embed_device()
 
@@ -1174,10 +1179,12 @@ def embed_texts(texts: list[str], role: str, device: str | None = None) -> dict:
     if role not in ("query", "document"):
         raise ValueError(f"embed_texts: role must be query or document, not {role!r}")
     family = TEXT_QUERY if role == "query" else TEXT_EMBED
-    document_device = _document_device(device) if role == "document" else None
+    requested = device
 
     def run():
-        device = registry.text_embed_query_device() if role == "query" else document_device
+        # Placed here, on the family's thread and inside its lock, as every family is: a family
+        # moved between the card and the CPU must not be in use by another request (ein/core#736).
+        device = registry.text_embed_query_device() if role == "query" else _document_device(requested)
         model = registry.text_embedder(family, device)
         limit = registry.TEXT_EMBED_MAX_TOKENS
         prefix = model.prompts.get(role, "")
