@@ -333,6 +333,12 @@ INSIGHTFACE_RESET_FREE_MB = float(os.environ.get('CFG_INSIGHTFACE_RESET_FREE_MB'
 # next: a picture embedded every second is never unloaded. Pinned families stay, as everywhere.
 ROOM_IDLE_SECONDS = float(os.environ.get('CFG_ROOM_IDLE', '30'))
 
+# How often a family the CPU took for want of room on the card looks whether the card has room
+# for it now (`_back_to_card`). Not every request: a look that is short of room lets torch give
+# back what it holds, which is not free to do per picture.
+CARD_RETURN_SECONDS = float(os.environ.get('CFG_CARD_RETURN_SECONDS', '60'))
+_card_return_at: dict[str, float] = {}
+
 
 class CardBusy(RuntimeError):
     """The card has no room now for a family that runs only there (whisper on a host with a card),
@@ -1073,7 +1079,8 @@ def place(family: str, setting: str = "auto") -> str:
     past the grace — and the CPU otherwise. Every family placed here runs the same weights on either
     device, so where it lands changes only how fast it is, and a family never loads onto a card
     that cannot hold it: no out-of-memory, on a 16 GB card or an 8 GB one (ein/core#515).
-    A family already resident stays where it is rather than load a second copy.
+    A family already resident stays where it is rather than load a second copy — except one on the
+    CPU, which goes back to the card once the card has room for it again (`_back_to_card`).
 
     Runs on the family's own model thread: `select_device` is its first CUDA call.
     """
@@ -1084,12 +1091,35 @@ def place(family: str, setting: str = "auto") -> str:
     with _lock:
         resident = [key for key in _cache if _family_of(key) == family]
     if resident:
-        return _device_of(resident[0]) or "cuda"
+        device = _device_of(resident[0]) or "cuda"
+        if device == "cpu" and _back_to_card(family, resident):
+            return "cuda"
+        return device
     why = _short_of_room(family)
     if why is not None:
         print(f"[model-server] {family}: {why} — on the CPU", file=sys.stderr, flush=True)
         return "cpu"
     return "cuda"
+
+
+def _back_to_card(family: str, resident: list[str]) -> bool:
+    """Whether `family`, resident on the CPU because the card had no room when it loaded, moves to the
+    card now: once a `CARD_RETURN_SECONDS`, it looks whether the card has room for it — after
+    unloading families idle past the grace — and if so its CPU copies are unloaded for the card's
+    to load. A family in use the whole of a crawl is never idle, so without this it never left the
+    CPU: on fry, faces ran there for ten hours beside an idle card (ein/core#736).
+
+    Runs on the family's own model thread, inside its lock, so no request is using the copies it
+    unloads."""
+    now = time.monotonic()
+    if now - _card_return_at.get(family, float("-inf")) < CARD_RETURN_SECONDS:
+        return False
+    _card_return_at[family] = now
+    if _short_of_room(family) is not None:
+        return False
+    _forget([key for key in resident if _device_of(key) == "cpu"])
+    print(f"[model-server] {family}: the card has room again — back from the CPU", file=sys.stderr, flush=True)
+    return True
 
 
 def _short_of_room(family: str) -> str | None:
