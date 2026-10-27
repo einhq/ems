@@ -167,10 +167,10 @@ def test_a_host_transcribes_in_one_place_and_says_where(stubbed, monkeypatch):
     assert ",on=cpu:int8," in ops.transcribe_signature()
     # A card: always on it, in float16; short of room it waits rather than use the CPU.
     monkeypatch.setattr(registry, "select_device", lambda: "cuda")
-    monkeypatch.setattr(registry, "_short_of_room", lambda family: None)
+    monkeypatch.setattr(registry, "_short_of_room", lambda family, max_idle=None: None)
     ops.transcribe(path)
     assert loads[-1] == ("cuda", "float16")
     assert ",on=cuda:float16," in ops.transcribe_signature()
-    monkeypatch.setattr(registry, "_short_of_room", lambda family: "1600MB of the card left")
+    monkeypatch.setattr(registry, "_short_of_room", lambda family, max_idle=None: "1600MB of the card left")
     with pytest.raises(registry.CardBusy, match="whisper waits for the card"):
         ops.transcribe(path)
