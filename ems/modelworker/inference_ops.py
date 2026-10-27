@@ -12,6 +12,7 @@ must not drag in torch.
 
 import os
 import sys
+import time
 
 import model_registry as registry
 
@@ -285,6 +286,7 @@ def transcribe(file_path: str, language: str | None = None, min_silence_ms: int 
         # Detection is ours, not the decoder's: whisper would read the first window of
         # the file and decide for all of it. The choice is then handed to the decoder as
         # if it were pinned, so every window is decoded in the same language.
+        started = time.monotonic()
         detected = None
         if not lang_hint:
             votes = language_votes(model, file_path, vad_params, registry.WHISPER_LANGUAGE_WINDOWS)
@@ -296,7 +298,9 @@ def transcribe(file_path: str, language: str | None = None, min_silence_ms: int 
                     f"({detected['detected_probability']:.2f}) across {len(votes)} windows",
                     file=sys.stderr, flush=True,
                 )
-        # segments is a generator — consume it before releasing the model.
+        voted = time.monotonic()
+        # segments is a generator — consume it before releasing the model. The call decodes the
+        # audio, runs the VAD and computes the features; the loop below runs the decoder.
         segments, info = model.transcribe(
             file_path,
             beam_size=5,
@@ -310,6 +314,7 @@ def transcribe(file_path: str, language: str | None = None, min_silence_ms: int 
         # not a subtitle, and an empty chunk is not worth a vector. So are segments the
         # decoder rated as almost certainly not speech — those are its hallucinations,
         # and they read as sentences, which is exactly why they must not reach search.
+        prepared = time.monotonic()
         out = []
         for segment in segments:
             text = segment.text.strip()
@@ -330,6 +335,13 @@ def transcribe(file_path: str, language: str | None = None, min_silence_ms: int 
             if aligned:
                 entry["words"] = aligned
             out.append(entry)
+        # Where a transcription's time goes, by phase (ein/core#741).
+        print(
+            f"transcribe: {os.path.basename(file_path)}: {float(info.duration or 0.0):.0f}s of audio, "
+            f"language {voted - started:.1f}s, prepare {prepared - voted:.1f}s, "
+            f"decode {time.monotonic() - prepared:.1f}s",
+            file=sys.stderr, flush=True,
+        )
         # `info` is only safe to read after the generator is drained — faster-whisper
         # fills in the detected language as it decodes the first window. When the
         # language was detected here, the reported probability is the averaged one the
