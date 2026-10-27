@@ -29,6 +29,8 @@ from dataclasses import dataclass
 from ..errors import EmsError, TOOL_FAILED
 
 NICE = 10
+# For a tool whose CPU should only be what the model worker, itself at nice 10, leaves over.
+BACKGROUND_NICE = 19
 
 # How often a running tool's activity is read. A stall is noticed within this of its limit.
 ACTIVITY_POLL_SECONDS = 10.0
@@ -54,14 +56,15 @@ def which(name: str) -> str | None:
     return shutil.which(name)
 
 
-async def run(args: list[str], *, timeout: float | None = None, deadline: float | None = None, stdin: bytes | None = None, cwd: str | None = None, env: dict | None = None) -> Completed:
+async def run(args: list[str], *, timeout: float | None = None, deadline: float | None = None, stdin: bytes | None = None, cwd: str | None = None, env: dict | None = None, niceness: int = NICE) -> Completed:
     """Run to completion. Never raises for a non-zero exit — the caller reads `code`.
 
     `timeout` is the longest the tool may go without progress (see the module's docstring);
-    a tool stopped for it comes back as a failed exit whose stderr says so.
+    a tool stopped for it comes back as a failed exit whose stderr says so. `niceness` is the
+    `nice -n` the tool runs under.
     """
     nice = which("nice")
-    argv = [nice, "-n", str(NICE), *args] if nice else list(args)
+    argv = [nice, "-n", str(niceness), *args] if nice else list(args)
     proc = await asyncio.create_subprocess_exec(
         *argv,
         stdin=asyncio.subprocess.PIPE if stdin is not None else asyncio.subprocess.DEVNULL,
