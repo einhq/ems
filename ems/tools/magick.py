@@ -28,7 +28,7 @@ import re
 from dataclasses import dataclass
 
 from ..errors import EmsError, TOOL_FAILED
-from .run import require, run
+from .run import BACKGROUND_NICE, require, run
 
 FORMATS = ("avif", "webp", "jpeg", "png")
 
@@ -142,8 +142,13 @@ def parse_output(stdout: str, count: int) -> Rendered:
 
 
 async def render(source: str, angle: int, mirror: bool, plans: list[Plan], *, timeout: float) -> Rendered:
-    """Run the pipeline. The caller checks the files it asked for and publishes them."""
-    done = await run([require("magick"), *pipeline_args(source, angle, mirror, plans)], timeout=timeout)
+    """Run the pipeline. The caller checks the files it asked for and publishes them.
+
+    At `BACKGROUND_NICE`: one render's encoder threads fill several cores, and at the model
+    worker's priority a few of them starve a transcription's CPU-side decode and VAD while the
+    card waits (ein/core#741).
+    """
+    done = await run([require("magick"), *pipeline_args(source, angle, mirror, plans)], timeout=timeout, niceness=BACKGROUND_NICE)
     if done.code != 0:
         raise EmsError(TOOL_FAILED, f"magick failed: {done.tail() or f'exit {done.code}'}")
     return parse_output(done.stdout.decode(errors="replace"), len(plans))
