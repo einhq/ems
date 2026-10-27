@@ -79,10 +79,18 @@ def _detection_signature() -> str:
     return tag
 
 
-def language_votes(model, file_path: str, vad_params: dict, windows: int) -> list:
+def decode_speech_audio(model, file_path: str):
+    """The file's audio as whisper reads it: mono float samples at the model's sampling rate."""
+    from faster_whisper.audio import decode_audio
+
+    return decode_audio(file_path, sampling_rate=model.feature_extractor.sampling_rate)
+
+
+def language_votes(model, audio, vad_params: dict, windows: int) -> list:
     """Whisper's language probabilities for up to `windows` 30-second windows of the speech.
 
-    The audio is decoded and VAD-filtered the way `transcribe` will do it, so what is judged
+    `audio` is the file decoded at the model's sampling rate (`decode_audio`). It is
+    VAD-filtered the way `transcribe` will do it, so what is judged
     is the speech the decoder will hear, not the file's opening — a clip that starts on
     wind noise or a doorbell gets judged on what is said after it. The windows are spread
     across all of that speech (first, middle and last for three), so a guest speaking at
@@ -95,11 +103,9 @@ def language_votes(model, file_path: str, vad_params: dict, windows: int) -> lis
     import math
 
     import numpy as np
-    from faster_whisper.audio import decode_audio
     from faster_whisper.vad import VadOptions, collect_chunks, get_speech_timestamps
 
     rate = model.feature_extractor.sampling_rate
-    audio = decode_audio(file_path, sampling_rate=rate)
     chunks = get_speech_timestamps(audio, VadOptions(**vad_params))
     if not chunks:
         return []
@@ -288,8 +294,12 @@ def transcribe(file_path: str, language: str | None = None, min_silence_ms: int 
         # if it were pinned, so every window is decoded in the same language.
         started = time.monotonic()
         detected = None
+        # Detection needs the decoded audio, and the decoder then takes that array rather than
+        # the path, so a file is decoded once. Under a pinned language the decoder reads the file.
+        source = file_path
         if not lang_hint:
-            votes = language_votes(model, file_path, vad_params, registry.WHISPER_LANGUAGE_WINDOWS)
+            source = decode_speech_audio(model, file_path)
+            votes = language_votes(model, source, vad_params, registry.WHISPER_LANGUAGE_WINDOWS)
             detected = choose_language(votes, registry.WHISPER_LANGUAGES, registry.WHISPER_LANGUAGE_FLOOR)
             if detected and detected["language"] != detected["detected"]:
                 print(
@@ -302,7 +312,7 @@ def transcribe(file_path: str, language: str | None = None, min_silence_ms: int 
         # segments is a generator — consume it before releasing the model. The call decodes the
         # audio, runs the VAD and computes the features; the loop below runs the decoder.
         segments, info = model.transcribe(
-            file_path,
+            source,
             beam_size=5,
             language=lang_hint or (detected["language"] if detected else None),
             vad_filter=True,

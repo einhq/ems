@@ -31,8 +31,8 @@ class FakeModel:
     def __init__(self, calls):
         self.calls = calls
 
-    def transcribe(self, path, **kwargs):
-        self.calls.append(kwargs)
+    def transcribe(self, source, **kwargs):
+        self.calls.append({"source": source, **kwargs})
         info = types.SimpleNamespace(language="sv", language_probability=0.9, duration=3.0)
         return iter([FakeSegment(0.0, 1.5, "hej"), FakeSegment(1.5, 3.0, "")]), info
 
@@ -52,7 +52,8 @@ def stubbed(monkeypatch, tmp_path):
     monkeypatch.setattr(registry, "WHISPER_WORD_TIMESTAMPS", False)
     # Detection is stubbed at the vote level: it needs real audio and the real VAD, and what
     # is under test here is what the decode is told, not whisper's ear.
-    monkeypatch.setattr(ops, "language_votes", lambda model, path, vad, windows: [{"sv": 0.6, "no": 0.3}])
+    monkeypatch.setattr(ops, "decode_speech_audio", lambda model, path: f"audio of {path}")
+    monkeypatch.setattr(ops, "language_votes", lambda model, audio, vad, windows: [{"sv": 0.6, "no": 0.3}])
     monkeypatch.setattr(registry, "whisper_vad_parameters", lambda: {"threshold": 0.2, "speech_pad_ms": 800, "min_silence_duration_ms": 2000})
     audio = tmp_path / "a.wav"
     audio.write_bytes(b"RIFF")
@@ -71,6 +72,8 @@ def test_defaults_come_from_the_configuration(stubbed):
     assert result["language_probability"] == pytest.approx(0.6)
     assert result["signature"].endswith(",lang=auto:3,words=0")
     assert result["signature"] == ops.transcribe_signature()
+    # The audio detection decoded is what the decoder reads, so the file is decoded once.
+    assert calls[0]["source"] == f"audio of {path}"
 
 
 def test_expected_language_wins_at_the_floor(stubbed, monkeypatch):
@@ -115,8 +118,10 @@ def test_a_pin_skips_detection(stubbed, monkeypatch):
     path, calls = stubbed
     monkeypatch.setattr(registry, "WHISPER_LANGUAGE", "sv")
     monkeypatch.setattr(ops, "language_votes", lambda *a: pytest.fail("detection ran under a pin"))
+    monkeypatch.setattr(ops, "decode_speech_audio", lambda *a: pytest.fail("decoded ahead of a pinned decode"))
     ops.transcribe(path)
     assert calls[0]["language"] == "sv"
+    assert calls[0]["source"] == path
     assert ops.transcribe_signature().endswith(",lang=sv,words=0")
 
 

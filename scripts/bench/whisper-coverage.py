@@ -262,6 +262,8 @@ def top(probabilities: dict, n: int) -> str:
 
 
 def languages(model, files: list, expected: tuple, registry, ops, show_text: bool) -> None:
+    from faster_whisper.audio import decode_audio
+
     vad = registry.whisper_vad_parameters()
     windows = registry.WHISPER_LANGUAGE_WINDOWS
     print(f"expected languages {','.join(expected) or '(none)'}; {windows} windows per file; floors {FLOORS}")
@@ -275,7 +277,7 @@ def languages(model, files: list, expected: tuple, registry, ops, show_text: boo
             if not demux(path, wav):
                 print("    no audio stream")
                 continue
-            votes = ops.language_votes(model, wav, vad, windows)
+            votes = ops.language_votes(model, decode_audio(wav, sampling_rate=model.feature_extractor.sampling_rate), vad, windows)
             if not votes:
                 print("    the VAD found no speech")
                 os.remove(wav)
@@ -345,6 +347,7 @@ def compute_types(files, registry, ops, show_text: bool, placements=PLACEMENTS) 
     import time
 
     from faster_whisper import WhisperModel
+    from faster_whisper.audio import decode_audio
 
     vad = registry.whisper_vad_parameters()
     expected = registry.WHISPER_LANGUAGES or ("sv",)
@@ -369,7 +372,7 @@ def compute_types(files, registry, ops, show_text: bool, placements=PLACEMENTS) 
             texts[placement], seconds[placement] = {}, {}
             for path, wav in clips:
                 if path not in languages:
-                    votes = ops.language_votes(model, wav, vad, registry.WHISPER_LANGUAGE_WINDOWS)
+                    votes = ops.language_votes(model, decode_audio(wav, sampling_rate=model.feature_extractor.sampling_rate), vad, registry.WHISPER_LANGUAGE_WINDOWS)
                     chosen = ops.choose_language(votes, expected, registry.WHISPER_LANGUAGE_FLOOR)
                     languages[path] = chosen["language"] if chosen else None
                 started = time.monotonic()
