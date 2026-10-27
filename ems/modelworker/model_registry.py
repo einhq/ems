@@ -1131,9 +1131,9 @@ def _back_to_card(family: str, resident: list[str]) -> bool:
     return True
 
 
-def _short_of_room(family: str) -> str | None:
+def _short_of_room(family: str, max_idle: float = ROOM_IDLE_SECONDS) -> str | None:
     """Why the card cannot take `family` now, or None when it can — after letting torch give back
-    what it holds unused and unloading families idle past the grace (`ROOM_IDLE_SECONDS`)."""
+    what it holds unused and unloading families idle past `max_idle` (the grace by default)."""
     need = CARD_NEED_MB.get(family)
     if need is None:
         return None
@@ -1150,7 +1150,7 @@ def _short_of_room(family: str) -> str | None:
         return None
     cleanup_torch()
     if short() is not None:
-        evicted = evict_idle(ROOM_IDLE_SECONDS, keep=(family,))
+        evicted = evict_idle(max_idle, keep=(family,))
         if evicted:
             print(f"[model-server] {family}: unloaded idle {', '.join(evicted)} to load on the card", file=sys.stderr, flush=True)
     return short()
@@ -1166,6 +1166,12 @@ def whisper_device() -> str:
     with _lock:
         resident = any(_family_of(key) == "whisper" and _device_of(key) == "cuda" for key in _cache)
     why = None if resident else _short_of_room("whisper")
+    # In a crawl the other kinds keep their families in use, so those idle past the grace never
+    # leave whisper its room, and it would wait for good (ein/core#736). So it makes room: every
+    # family not working right now is unloaded — none pinned, none with a request running or
+    # waiting — and loads again when next asked.
+    if why is not None:
+        why = _short_of_room("whisper", max_idle=0)
     if why is not None:
         raise CardBusy(f"whisper waits for the card: {why}")
     return "cuda"
