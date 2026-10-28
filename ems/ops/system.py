@@ -13,7 +13,7 @@ from fastapi import APIRouter
 from .. import API_VERSION
 from ..context import Context
 from ..errors import EmsError
-from ..tools import encode
+from ..tools import encode, nvml
 from ..tools.run import run, which
 from ..tools.versions import tool_version
 from ..worker import Worker
@@ -25,7 +25,8 @@ TOOLS = ("exiftool", "ffprobe", "ffmpeg", "fpcalc", "magick")
 # The whole card, as `nvidia-smi` reports it: what every process on the card is doing, not what
 # this one's torch has allocated. A caller's metrics sampler polls it; `nvidia-smi` costs tens
 # of milliseconds and a fork, so one reading serves every health request for a few seconds
-# rather than each request paying for its own.
+# rather than each request paying for its own. Its load figures are replaced by NVML's means over
+# the last seconds where the driver keeps samples (tools/nvml.py).
 SMI_QUERY = "utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw,power.limit,driver_version,name"
 SMI_FIELDS = ("util_pct", "mem_used_mb", "mem_total_mb", "temp_c")
 SMI_TIMEOUT = 5.0
@@ -91,7 +92,8 @@ async def _smi(smi: str, query: str) -> str | None:
 
 
 async def _card_stats(fresh: bool = False) -> dict | None:
-    """The first card as `nvidia-smi` reports it, or None without `nvidia-smi`.
+    """The first card as `nvidia-smi` reports it, its load as NVML averages it, or None without
+    `nvidia-smi`.
 
     `processes` is what this container's processes hold of it — `nvidia-smi` in a container sees
     only its own pids — so the whole card less their sum is other containers', which is why the
@@ -106,6 +108,7 @@ async def _card_stats(fresh: bool = False) -> dict | None:
         text = await _smi(smi, f"--query-gpu={SMI_QUERY}")
         stats = parse_smi(text) if text is not None else None
         if stats is not None:
+            stats.update(await asyncio.to_thread(nvml.load) or {})
             apps = await _smi(smi, "--query-compute-apps=pid,used_memory")
             if apps is not None:
                 stats["processes"] = parse_smi_apps(apps)

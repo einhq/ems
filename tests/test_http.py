@@ -103,6 +103,7 @@ async def test_health_reports_the_whole_card_when_nvidia_smi_answers(client, mon
     monkeypatch.setattr(system.os, "listdir", lambda path: ["nvidia0", "nvidiactl"])
     monkeypatch.setattr(system, "_smi_cache", {"at": 0.0, "stats": None})
     monkeypatch.setattr(system, "which", lambda name: "/usr/bin/nvidia-smi" if name == "nvidia-smi" else None)
+    monkeypatch.setattr(system.nvml, "load", lambda: None)
 
     class Done:
         code = 0
@@ -133,6 +134,38 @@ async def test_health_reports_the_whole_card_when_nvidia_smi_answers(client, mon
     # A second request within the cache window is answered from the first reading.
     r = await client.get("/v0/health")
     assert r.json()["gpu"]["util_pct"] == 37 and len(calls) == 2
+
+
+async def test_health_reports_the_card_load_as_nvml_averages_it(client, monkeypatch):
+    from ems.ops import system
+
+    monkeypatch.setattr(system.os.path, "isdir", lambda path: True)
+    monkeypatch.setattr(system.os, "listdir", lambda path: ["nvidia0"])
+    monkeypatch.setattr(system, "_smi_cache", {"at": 0.0, "stats": None})
+    monkeypatch.setattr(system, "which", lambda name: "/usr/bin/nvidia-smi" if name == "nvidia-smi" else None)
+    monkeypatch.setattr(system.nvml, "load", lambda: {"util_pct": 61.5, "dec_pct": 22.0, "enc_pct": 0.0})
+
+    class Done:
+        code = 0
+
+        def __init__(self, stdout: bytes):
+            self.stdout = stdout
+
+    async def fake_run(args, *, deadline, **kwargs):
+        return Done(b"" if args[1].startswith("--query-compute-apps") else b"3, 8123, 16311, 51\n")
+
+    monkeypatch.setattr(system, "run", fake_run)
+    gpu = (await client.get("/v0/health")).json()["gpu"]
+    assert (gpu["util_pct"], gpu["dec_pct"], gpu["enc_pct"], gpu["mem_used_mb"]) == (61.5, 22.0, 0.0, 8123)
+
+
+def test_nvml_mean_covers_only_the_window():
+    from ems.tools import nvml
+
+    samples = [(1_000_000, 100), (2_000_000, 40), (2_200_000, 20)]
+    assert nvml.mean_since(samples, 2_000_000) == 30.0
+    assert nvml.mean_since(samples, 3_000_000) is None
+    assert nvml.mean_since([], 0) is None
 
 
 async def test_health_without_nvidia_smi_reports_presence_alone(client, monkeypatch):

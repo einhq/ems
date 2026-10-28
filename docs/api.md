@@ -785,7 +785,7 @@ Liveness and what is loaded:
 ```json
 { "ok": true, "api": "3.4.0", "uptime": 86400,
   "gpu": { "present": true, "vram_allocated_mb": 6100, "vram_reserved_mb": 7900,
-           "util_pct": 37, "mem_used_mb": 8123, "mem_total_mb": 16311, "temp_c": 51,
+           "util_pct": 37.4, "dec_pct": 21.0, "enc_pct": 0.0, "mem_used_mb": 8123, "mem_total_mb": 16311, "temp_c": 51,
            "power_w": 21.6, "power_limit_w": 180.0, "driver": "610.43.02", "name": "NVIDIA GeForce RTX 5060 Ti",
            "processes": [ { "pid": 49, "used_mb": 1810, "worker": "batch" } ] },
   "models": { "whisper:cuda:float16": { "loaded": true, "device": "cuda" }, "text-query": { "loaded": true, "device": "cpu" } },
@@ -857,7 +857,10 @@ itself, which it does on its own, at most once every ten minutes
 accounting for this EMS's models, present while the model worker has torch loaded. `util_pct`,
 `mem_used_mb`, `mem_total_mb` and `temp_c` are the whole card as `nvidia-smi` reports it — every
 process on it, the transcodes included — present when the container can run `nvidia-smi`, and
-read at most once every few seconds however often health is asked. A caller charting the card
+read at most once every few seconds however often health is asked. Where the driver keeps
+utilization samples (NVML, about every 200 ms), `util_pct` is their mean over the last 15 s rather
+than one reading, and `dec_pct` / `enc_pct` are the video decoder's and encoder's load over the
+same seconds; these units are not part of `util_pct`. A caller charting the card
 (EiN's metrics sampler) reads the second set and treats its absence as "no card to chart",
 not as an idle one.
 
