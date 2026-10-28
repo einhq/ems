@@ -1056,10 +1056,10 @@ def embed_images(paths: list[str], angle=0, mirror=False) -> dict:
     def run():
         # Decoded here rather than on the request thread: its first PIL and numpy imports belong
         # after the pinned preload (see run_on_model_thread).
-        images = [image_io.open_display(path, angle, mirror) for path in paths]
-        device = registry.image_embed_device()
-        vectors = registry.siglip_visual(device).embed(images)
-        return vectors
+        visual = registry.siglip_visual(registry.image_embed_device())
+        # Twice the model's side, so its resize still starts from more pixels than it keeps.
+        images = [image_io.open_display(path, angle, mirror, min_side=2 * max(visual.size)) for path in paths]
+        return visual.embed(images)
 
     with registry.family_lock(SIGLIP_VISUAL):
         vectors = registry.run_on_model_thread(SIGLIP_VISUAL, run)
@@ -1079,7 +1079,10 @@ def copy_descriptors(paths: list[str], angle=0, mirror=False) -> dict:
             raise FileNotFoundError(f"Image not found: {path}")
 
     def run():
-        images = [image_io.open_display(path, angle, mirror) for path in paths]
+        from copy_detect import SHORT_EDGE
+
+        # Twice the model's short edge, so its resize still starts from more pixels than it keeps.
+        images = [image_io.open_display(path, angle, mirror, min_side=2 * SHORT_EDGE) for path in paths]
         return registry.sscd(registry.copy_detect_device()).describe(images)
 
     with registry.family_lock(SSCD):
