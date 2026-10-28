@@ -19,7 +19,8 @@ import urllib.request
 
 from .config import Settings
 
-TIMEOUT_SECONDS = 4
+# Longer than what health itself may wait (`nvidia-smi` twice), and shorter than podman's 15 s.
+TIMEOUT_SECONDS = 12
 
 
 def main() -> int:

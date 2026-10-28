@@ -16,6 +16,7 @@ from ..errors import EmsError
 from ..tools import encode
 from ..tools.run import run, which
 from ..tools.versions import tool_version
+from ..worker import Worker
 from . import transcode
 
 TOOLS = ("exiftool", "ffprobe", "ffmpeg", "fpcalc", "magick")
@@ -204,37 +205,63 @@ def ocr_model(env) -> str:
     return "+".join([f"PP-OCRv6_{tier}", *(os.path.basename(os.path.normpath(root)) for root in roots if os.path.isdir(root))])
 
 
+# How long health waits for each model worker's own answer. A worker loading a model can hold its
+# interpreter for longer than a container health check waits (htr on fry, 2026-10-27); it is then
+# reported by what it last said, as up and not answering.
+HEALTH_WAIT_SECONDS = 2.0
+
+
+async def _no_answer() -> None:
+    return None
+
+
+def _worker_state(worker: Worker, reply: dict | None) -> tuple[dict | None, dict]:
+    """One model worker as health shows it: its reply, or while it is up and silent its last one, and its state."""
+    state: dict = {"running": reply is not None or worker.running, "restarts": worker.restarts}
+    if reply is None and worker.running:
+        state["answering"] = False
+        if worker.answered_at is not None:
+            state["silent_for"] = round(time.time() - worker.answered_at, 1)
+        reply = worker.last_health
+    return reply, state
+
+
 def register(router: APIRouter, ctx: Context) -> None:
     @router.get("/health")
     async def health():
-        worker = await ctx.worker.health()
-        body: dict = {
-            "ok": True,
-            "api": API_VERSION,
-            "uptime": round(time.time() - ctx.started_at, 1),
-            "gpu": await _gpu({
+        # The workers and the card are asked at once, each with its own bound, so one that is busy
+        # does not hold up the answer.
+        query_worker = ctx.query_worker
+        card_worker = ctx.card.card if ctx.card is not None and ctx.card.card is not None and ctx.card.card.running else None
+        worker, query, card, gpu = await asyncio.gather(
+            ctx.worker.health(HEALTH_WAIT_SECONDS),
+            query_worker.health(HEALTH_WAIT_SECONDS) if query_worker is not None and query_worker.running else _no_answer(),
+            card_worker.health(HEALTH_WAIT_SECONDS) if card_worker is not None else _no_answer(),
+            _gpu({
                 "batch": ctx.worker.pid,
                 "query": ctx.query_worker.pid if ctx.query_worker is not None else None,
                 "card": ctx.card.card.pid if ctx.card is not None and ctx.card.card is not None else None,
             }),
+        )
+        worker, state = _worker_state(ctx.worker, worker)
+        body: dict = {
+            "ok": True,
+            "api": API_VERSION,
+            "uptime": round(time.time() - ctx.started_at, 1),
+            "gpu": gpu,
             "models": _models_from_worker(worker),
-            "worker": {"running": worker is not None, "restarts": ctx.worker.restarts},
+            "worker": state,
             "queues": ctx.admission.snapshot(),
             "requests": ctx.admission.requests(),
             "build": BUILD,
         }
-        query = None
-        if ctx.query_worker is not None:
+        if query_worker is not None:
             # The query families live in a worker of their own (Context.for_queries); what it has
             # loaded is listed with the rest, and its state beside the batch worker's.
-            query = await ctx.query_worker.health() if ctx.query_worker.running else None
+            query, body["worker"]["query"] = _worker_state(query_worker, query)
             body["models"].update(_models_from_worker(query))
-            body["worker"]["query"] = {"running": query is not None, "restarts": ctx.query_worker.restarts}
-        card = None
         if ctx.card is not None:
             body["card"] = ctx.card.snapshot()
-            if ctx.card.card is not None and ctx.card.card.running:
-                card = await ctx.card.card.health()
         body["families"] = _families_from_workers(worker, query, card)
         if ctx.card is not None and ctx.card.enabled:
             # The query families' device is the query worker's setting; where each family runs in

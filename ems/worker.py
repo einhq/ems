@@ -146,6 +146,8 @@ class Worker:
         self._stopping = False
         self.started_at: float | None = None
         self.restarts = 0
+        self.last_health: dict | None = None
+        self.answered_at: float | None = None
         # Wraps every call: `gate(op, payload)` returns the context it runs in (the CardArbiter's).
         self.gate: Callable[[str, dict[str, Any]], Any] | None = None
 
@@ -267,8 +269,16 @@ class Worker:
             raise classify(str(reply.get("error") or "model worker returned an error"), reply.get("error_type"))
         return reply.get("result")
 
-    async def health(self) -> dict | None:
+    async def health(self, wait: float | None = None) -> dict | None:
+        """The worker's own health, or None when it does not answer within `wait` seconds.
+
+        A load that holds the worker's interpreter (a model built in native code) keeps its health
+        thread from replying until the load is done, so a bounded wait is how `GET /v0/health`
+        stays prompt; `last_health` and `answered_at` are what it said the last time it did.
+        """
         try:
-            return await self.call("health", {})
-        except EmsError:
+            reply = await asyncio.wait_for(self.call("health", {}), wait)
+        except (EmsError, asyncio.TimeoutError):
             return None
+        self.last_health, self.answered_at = reply, time.time()
+        return reply
