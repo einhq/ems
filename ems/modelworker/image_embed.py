@@ -73,14 +73,19 @@ def session_options():
     return options
 
 
+def visual_preprocess(root: str) -> dict:
+    """The picture tower's preprocessing as the export writes it down: size, mean, std."""
+    with open(os.path.join(root, "visual", "preprocess_cfg.json")) as fh:
+        return json.load(fh)
+
+
 class Visual:
     """The picture tower: PIL images in, normalized vectors out."""
 
     def __init__(self, root: str, device: str, mem_limit_bytes: int):
         import onnxruntime as ort
 
-        with open(os.path.join(root, "visual", "preprocess_cfg.json")) as fh:
-            self.pre = json.load(fh)
+        self.pre = visual_preprocess(root)
         self.session = ort.InferenceSession(os.path.join(root, "visual", "model.onnx"), sess_options=session_options(), providers=providers(device, mem_limit_bytes))
         self.input = self.session.get_inputs()[0].name
         self.size = tuple(self.pre["size"])

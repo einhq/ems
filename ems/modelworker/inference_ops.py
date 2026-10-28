@@ -214,23 +214,20 @@ def _normalize_angle(angle) -> int:
     return a if a in (90, 180, 270) else 0
 
 
-def _read_upright(cv2, image_path: str, angle, mirror):
-    """Read an image into the *display* frame: rotated CCW by `angle`, then flopped.
+def _read_upright(image_path: str, angle, mirror):
+    """Read an image into the *display* frame as BGR: rotated CCW by `angle`, then flopped.
 
     The file's own EXIF Orientation is not what decides that — the caller's `angle` is, because
     it may be a manual override and the tag may simply be wrong, and every other step rotates by
-    it. `image_io` owns that question and reads HEIF and RAW besides.
+    it. `image_io` owns that question and reads HEIF and RAW besides. Decoded on the decode pool,
+    outside the family's lock (registry.decode_all).
     """
     # Read through PIL rather than cv2.imread: cv2 has no HEIF or RAW decoder at all. The
     # rotation moves with it — `open_display` is the one place that knows which formats arrive
     # already turned.
     import image_io
 
-    img = image_io.open_display_bgr(image_path, angle, mirror)
-    if img is None:
-        raise ValueError(f"could not load image: {image_path}")
-
-    return img
+    return registry.decode_all(lambda path: image_io.open_display_bgr(path, angle, mirror), [image_path])[0]
 
 
 def _is_cuda_oom(exc: Exception) -> bool:
@@ -1047,19 +1044,19 @@ def embed_images(paths: list[str], angle=0, mirror=False) -> dict:
     A video's keyframes arrive as several paths (the front extracts them); a photo is one. The
     model name comes back with the vectors so the caller's producer cannot drift from what ran.
     """
+    import image_embed
     import image_io
 
     for path in paths:
         if not os.path.exists(path):
             raise FileNotFoundError(f"Image not found: {path}")
 
+    # Twice the model's side, so its resize still starts from more pixels than it keeps.
+    min_side = 2 * max(image_embed.visual_preprocess(registry.image_embed_root())["size"])
+    images = registry.decode_all(lambda path: image_io.open_display(path, angle, mirror, min_side=min_side), paths)
+
     def run():
-        # Decoded here rather than on the request thread: its first PIL and numpy imports belong
-        # after the pinned preload (see run_on_model_thread).
-        visual = registry.siglip_visual(registry.image_embed_device())
-        # Twice the model's side, so its resize still starts from more pixels than it keeps.
-        images = [image_io.open_display(path, angle, mirror, min_side=2 * max(visual.size)) for path in paths]
-        return visual.embed(images)
+        return registry.siglip_visual(registry.image_embed_device()).embed(images)
 
     with registry.family_lock(SIGLIP_VISUAL):
         vectors = registry.run_on_model_thread(SIGLIP_VISUAL, run)
@@ -1073,16 +1070,16 @@ def copy_descriptors(paths: list[str], angle=0, mirror=False) -> dict:
     the vectors so the caller's producer cannot drift from what ran.
     """
     import image_io
+    from copy_detect import SHORT_EDGE
 
     for path in paths:
         if not os.path.exists(path):
             raise FileNotFoundError(f"Image not found: {path}")
 
-    def run():
-        from copy_detect import SHORT_EDGE
+    # Twice the model's short edge, so its resize still starts from more pixels than it keeps.
+    images = registry.decode_all(lambda path: image_io.open_display(path, angle, mirror, min_side=2 * SHORT_EDGE), paths)
 
-        # Twice the model's short edge, so its resize still starts from more pixels than it keeps.
-        images = [image_io.open_display(path, angle, mirror, min_side=2 * SHORT_EDGE) for path in paths]
+    def run():
         return registry.sscd(registry.copy_detect_device()).describe(images)
 
     with registry.family_lock(SSCD):
@@ -1140,8 +1137,9 @@ def read_text(paths: list[str], angle=0, mirror=False, language: str | None = No
     if not os.path.exists(paths[0]):
         raise FileNotFoundError(f"Image not found: {paths[0]}")
 
+    image = registry.decode_all(lambda path: image_io.open_display(path, angle, mirror), paths)[0]
+
     def run():
-        image = image_io.open_display(paths[0], angle, mirror)
         reading = registry.ocr_photo(registry.ocr_device()).detect(image)
         if language:
             return reading, {"code": language, "confidence": None, "given": True}
@@ -1249,18 +1247,10 @@ def detect_faces(image_path: str, angle=0, mirror=False) -> dict:
     Detection runs on the *display* frame (see `_read_upright`), so `frame` is reported
     alongside the pixel boxes: the caller normalizes against it and stores fractions.
     """
-    try:
-        import cv2
-    except ImportError as e:
-        raise ImportError(
-            f"Required package not installed: {e}\n"
-            "Install with: pip install insightface onnxruntime-gpu opencv-python-headless"
-        )
-
     if not os.path.exists(image_path):
         raise FileNotFoundError(f"Image not found: {image_path}")
 
-    img = _read_upright(cv2, image_path, angle, mirror)
+    img = _read_upright(image_path, angle, mirror)
     frame_h, frame_w = img.shape[:2]
 
     def run():
@@ -1318,18 +1308,10 @@ def embed_face(image_path: str, box: dict, angle=0, mirror=False) -> dict | None
     {"embedding": [...], "confidence": float, "pose"?: {…}}, or None when no face is found
     inside the box (e.g. a mistaken tag or a face too small to detect).
     """
-    try:
-        import cv2
-    except ImportError as e:
-        raise ImportError(
-            f"Required package not installed: {e}\n"
-            "Install with: pip install insightface onnxruntime-gpu opencv-python-headless"
-        )
-
     if not os.path.exists(image_path):
         raise FileNotFoundError(f"Image not found: {image_path}")
 
-    img = _read_upright(cv2, image_path, angle, mirror)
+    img = _read_upright(image_path, angle, mirror)
 
     h, w = img.shape[:2]
     x, y = int(round(float(box["x"]) * w)), int(round(float(box["y"]) * h))
