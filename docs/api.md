@@ -142,6 +142,10 @@ fast it answers, never what (`model_registry.place`):
 - **whisper in one place per host.** On the card in float16 on a host with one
   (`EMS_WHISPER_CARD_COMPUTE`), waiting for room there as `model_unavailable`; on the CPU in int8
   on a host without one (`EMS_WHISPER_CPU_COMPUTE`). The place is in the transcript signature.
+- **The handwriting transcribers on the card.** With `EMS_HTR_DEVICE` / `EMS_HTR_EN_DEVICE` at
+  `auto`, `htr` and `htr-en` run on the card of a host that has one, waiting for room there as
+  `model_unavailable` (`ocr.read` is asked again later), since on the CPU they are about ten times
+  slower; only a card too small ever to hold one leaves it on the CPU.
 - **A shared card.** `EMS_CARD_SHARE_MB` caps what EMS's own processes hold (counted with
   `nvidia-smi`, which in the container lists only them), for a card another service shares; the
   other side is set to leave EMS the same number (ein/llm's `LLM_CARD_RESERVE_MB`).

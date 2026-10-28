@@ -1131,9 +1131,10 @@ def _back_to_card(family: str, resident: list[str]) -> bool:
     return True
 
 
-def _short_of_room(family: str, max_idle: float = ROOM_IDLE_SECONDS) -> str | None:
+def _short_of_room(family: str, max_idle: float = ROOM_IDLE_SECONDS, keep: tuple[str, ...] = ()) -> str | None:
     """Why the card cannot take `family` now, or None when it can — after letting torch give back
-    what it holds unused and unloading families idle past `max_idle` (the grace by default)."""
+    what it holds unused and unloading families idle past `max_idle` (the grace by default), but
+    none in `keep`."""
     need = CARD_NEED_MB.get(family)
     if need is None:
         return None
@@ -1150,7 +1151,7 @@ def _short_of_room(family: str, max_idle: float = ROOM_IDLE_SECONDS) -> str | No
         return None
     cleanup_torch()
     if short() is not None:
-        evicted = evict_idle(max_idle, keep=(family,))
+        evicted = evict_idle(max_idle, keep=(family, *keep))
         if evicted:
             print(f"[model-server] {family}: unloaded idle {', '.join(evicted)} to load on the card", file=sys.stderr, flush=True)
     return short()
@@ -1163,18 +1164,25 @@ def whisper_device() -> str:
     own model thread, like `place`."""
     if select_device() != "cuda":
         return "cpu"
-    with _lock:
-        resident = any(_family_of(key) == "whisper" and _device_of(key) == "cuda" for key in _cache)
-    why = None if resident else _short_of_room("whisper")
-    # In a crawl the other kinds keep their families in use, so those idle past the grace never
-    # leave whisper its room, and it would wait for good (ein/core#736). So it makes room: every
-    # family not working right now is unloaded — none pinned, none with a request running or
-    # waiting — and loads again when next asked.
-    if why is not None:
-        why = _short_of_room("whisper", max_idle=0)
-    if why is not None:
-        raise CardBusy(f"whisper waits for the card: {why}")
+    _wait_for_card("whisper")
     return "cuda"
+
+
+def _wait_for_card(family: str, keep: tuple[str, ...] = ()) -> None:
+    """Raise `CardBusy` unless the card has room for `family` now, or holds it already.
+
+    In a crawl the other kinds keep their families in use, so those idle past the grace never
+    leave `family` its room, and it would wait for good (ein/core#736). So it makes room: every
+    family not working right now is unloaded — none pinned, none with a request running or
+    waiting, none in `keep` — and loads again when next asked."""
+    with _lock:
+        if any(_family_of(key) == family and _device_of(key) == "cuda" for key in _cache):
+            return
+    why = _short_of_room(family)
+    if why is not None:
+        why = _short_of_room(family, max_idle=0, keep=keep)
+    if why is not None:
+        raise CardBusy(f"{family} waits for the card: {why}")
 
 
 def reset_insightface_if_low() -> float | None:
@@ -1345,7 +1353,23 @@ def htr_family(language: str | None) -> str | None:
 
 
 def htr_device(family: str = "htr") -> str:
-    return place(family, _HTR[family][1]())
+    """Where the transcriber runs this time. A setting that names a device is obeyed. With `auto`,
+    the card on a host that has one, and a card without room now raises `CardBusy`, as for whisper:
+    the caller reads the picture again later. On the CPU a picture's lines took ~40 s against
+    ~4.5 s on fry's card, and once there in a crawl the claims of the busy families never let it
+    back (ein/core#750). It makes room as whisper does, but leaves the photo engine, which the next
+    picture needs first. A card too small ever to hold it means the CPU. Runs on the transcriber's
+    own model thread, like `place`."""
+    setting = _HTR[family][1]()
+    if setting in ("cpu", "cuda"):
+        return setting
+    if select_device() != "cuda":
+        return "cpu"
+    total = card_total_mb()
+    if total is not None and total - CUDA_CONTEXT_MB < CARD_NEED_MB[family]:
+        return "cpu"
+    _wait_for_card(family, keep=("ocr",))
+    return "cuda"
 
 
 def htr(device: str, family: str = "htr"):
