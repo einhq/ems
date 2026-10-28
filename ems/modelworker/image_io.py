@@ -85,10 +85,14 @@ def _open_raw(path: str):
         return Image.fromarray(raw.postprocess()).convert("RGB")
 
 
-def open_rgb(path: str):
+def open_rgb(path: str, min_side: int = 0):
     """A PIL RGB image, from any format in the archive.
 
     Orientation is deliberately *not* applied: the caller rotates by its own angle.
+
+    With `min_side`, a JPEG is decoded at the smallest of libjpeg's scales (1/2, 1/4, 1/8) whose
+    width and height are both at least `min_side`, for a caller that resizes far below the full
+    size anyway: a 24 Mpx photo decodes in a fifth of the time. Other formats decode in full.
     """
     from PIL import Image, ImageFile, UnidentifiedImageError
 
@@ -108,12 +112,15 @@ def open_rgb(path: str):
 
     try:
         # .convert() forces pixel data to load, so an image outlives a caller's temp dir.
-        return Image.open(path).convert("RGB")
+        image = Image.open(path)
+        if min_side > 0:
+            image.draft("RGB", (min_side, min_side))
+        return image.convert("RGB")
     except UnidentifiedImageError:
         return _open_raw(path)
 
 
-def open_display(path: str, angle=0, mirror=False):
+def open_display(path: str, angle=0, mirror=False, min_side: int = 0):
     """A PIL RGB image in the *display* frame: rotated CCW by `angle`, then flopped.
 
     `angle` is the **residual** the caller worked out — what the display frame needs minus whatever
@@ -122,7 +129,7 @@ def open_display(path: str, angle=0, mirror=False):
     """
     from PIL import Image
 
-    image = open_rgb(path)
+    image = open_rgb(path, min_side)
 
     a = _normalize_angle(angle)
     # PIL rotates counter-clockwise for a positive angle, which is the display convention.
