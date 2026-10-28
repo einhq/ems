@@ -515,6 +515,10 @@ _libc: object = None
 # One long-lived inference thread per family. See run_on_model_thread.
 _family_executors: dict[str, object] = {}
 
+# How many pictures are read into memory at once, outside every family's lock. See decode_all.
+DECODE_THREADS = max(1, int(os.environ.get('CFG_DECODE_THREADS', '4')))
+_decode_executor = None
+
 # Pseudo-family for reclaim work, which belongs to no model but still calls into CUDA.
 _MAINTENANCE = "maintenance"
 
@@ -564,6 +568,28 @@ def run_on_model_thread(family: str, fn, *args, **kwargs):
             _family_executors[family] = executor
 
     return executor.submit(fn, *args, **kwargs).result()
+
+
+def decode_all(fn, items: list) -> list:
+    """`fn` over each of `items` on the decode pool, the answers in order: pictures read into
+    memory before their family's lock is taken.
+
+    A family runs one call at a time, so a picture decoded inside its lock kept the card waiting
+    on PIL and every request behind it waiting on both. Decoded here, the next pictures are ready
+    while the model works on this one, and the model thread is handed arrays.
+
+    The decode waits for the pins as the model threads do (see run_on_model_thread): its first
+    PIL and numpy imports must not race the preload's. A few long-lived threads rather than the
+    request's own bound how many pictures are being decoded at once, each a full-size copy.
+    """
+    global _decode_executor
+    pinned_ready.wait(PINNED_READY_WAIT_SECONDS)
+    with _lock:
+        if _decode_executor is None:
+            from concurrent.futures import ThreadPoolExecutor
+            _decode_executor = ThreadPoolExecutor(max_workers=DECODE_THREADS, thread_name_prefix="decode")
+        executor = _decode_executor
+    return list(executor.map(fn, items))
 
 
 def select_device() -> str:
