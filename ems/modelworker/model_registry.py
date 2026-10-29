@@ -433,6 +433,7 @@ class FamilyLock:
         self._held = False
         self._ticket = 0
         self._waiters: list[tuple[int, int, object]] = []
+        self._in_use = 0
 
     def acquire(self, priority: int = 0) -> None:
         token = object()
@@ -457,9 +458,23 @@ class FamilyLock:
             raise RequestAbandoned(f"{reason} before the model ran")
 
     def busy(self) -> bool:
-        """Held, or wanted: a family in this state is in use and is not to be unloaded."""
+        """Held, wanted, or `in_use`: a family in this state is in use and is not to be unloaded."""
         with self._condition:
-            return self._held or bool(self._waiters)
+            return self._held or bool(self._waiters) or self._in_use > 0
+
+    @contextmanager
+    def in_use(self):
+        """Keep the family from being unloaded as idle without holding its lock: for a request that
+        uses it and then waits on another family. `read_text` keeps the photo engine through the
+        transcriber's stage, which can take minutes on a busy host: unloaded as idle meanwhile, the
+        next picture loaded it again, and loading it unloaded the transcriber (ein/core#756)."""
+        with self._condition:
+            self._in_use += 1
+        try:
+            yield self
+        finally:
+            with self._condition:
+                self._in_use -= 1
 
     def snapshot(self) -> tuple[bool, int]:
         """Whether a request holds the family right now, and how many wait behind it."""
@@ -1107,12 +1122,12 @@ def _room_mb() -> float | None:
     return own + free - CUDA_CONTEXT_MB - _committed_mb()
 
 
-def place(family: str, setting: str = "auto") -> str:
+def place(family: str, setting: str = "auto", make_room: bool = True) -> str:
     """Where `family` runs this time: `cuda` or `cpu`.
 
     A setting that names a device is obeyed. With `auto` the card is used when it has the family's
     need free now and left after every claim on it (`_room_mb`) — after unloading families idle
-    past the grace — and the CPU otherwise. Every family placed here runs the same weights on either
+    past the grace, unless `make_room` is false — and the CPU otherwise. Every family placed here runs the same weights on either
     device, so where it lands changes only how fast it is, and a family never loads onto a card
     that cannot hold it: no out-of-memory, on a 16 GB card or an 8 GB one (ein/core#515).
     A family already resident stays where it is rather than load a second copy — except one on the
@@ -1128,17 +1143,17 @@ def place(family: str, setting: str = "auto") -> str:
         resident = [key for key in _cache if _family_of(key) == family]
     if resident:
         device = _device_of(resident[0]) or "cuda"
-        if device == "cpu" and _back_to_card(family, resident):
+        if device == "cpu" and _back_to_card(family, resident, make_room):
             return "cuda"
         return device
-    why = _short_of_room(family)
+    why = _short_of_room(family, make_room=make_room)
     if why is not None:
         print(f"[model-server] {family}: {why} — on the CPU", file=sys.stderr, flush=True)
         return "cpu"
     return "cuda"
 
 
-def _back_to_card(family: str, resident: list[str]) -> bool:
+def _back_to_card(family: str, resident: list[str], make_room: bool = True) -> bool:
     """Whether `family`, resident on the CPU because the card had no room when it loaded, moves to the
     card now: once a `CARD_RETURN_SECONDS`, it looks whether the card has room for it — after
     unloading families idle past the grace — and if so its CPU copies are unloaded for the card's
@@ -1151,17 +1166,17 @@ def _back_to_card(family: str, resident: list[str]) -> bool:
     if now - _card_return_at.get(family, float("-inf")) < CARD_RETURN_SECONDS:
         return False
     _card_return_at[family] = now
-    if _short_of_room(family) is not None:
+    if _short_of_room(family, make_room=make_room) is not None:
         return False
     forget_copies(family, "cpu")
     print(f"[model-server] {family}: the card has room again — back from the CPU", file=sys.stderr, flush=True)
     return True
 
 
-def _short_of_room(family: str, max_idle: float = ROOM_IDLE_SECONDS, keep: tuple[str, ...] = ()) -> str | None:
+def _short_of_room(family: str, max_idle: float = ROOM_IDLE_SECONDS, keep: tuple[str, ...] = (), make_room: bool = True) -> str | None:
     """Why the card cannot take `family` now, or None when it can — after letting torch give back
-    what it holds unused and unloading families idle past `max_idle` (the grace by default), but
-    none in `keep`."""
+    what it holds unused and, with `make_room`, unloading families idle past `max_idle` (the grace
+    by default), but none in `keep`."""
     need = CARD_NEED_MB.get(family)
     if need is None:
         return None
@@ -1177,7 +1192,7 @@ def _short_of_room(family: str, max_idle: float = ROOM_IDLE_SECONDS, keep: tuple
     if short() is None:
         return None
     cleanup_torch()
-    if short() is not None:
+    if make_room and short() is not None:
         evicted = evict_idle(max_idle, keep=(family, *keep))
         if evicted:
             print(f"[model-server] {family}: unloaded idle {', '.join(evicted)} to load on the card", file=sys.stderr, flush=True)
@@ -1284,7 +1299,11 @@ def insightface(force_cpu: bool = False):
 
 
 def text_embed_device() -> str:
-    return place("text-embed", TEXT_EMBED_DEVICE)
+    """Where documents embed outside the card's quiet mode: the card when it has room, else the
+    CPU. Never by unloading another family: a document is a few short texts, small work on the
+    CPU, and in a crawl the embedding of each picture's read text unloaded the photo engine or the
+    transcriber, which the next picture loaded again (ein/core#756)."""
+    return place("text-embed", TEXT_EMBED_DEVICE, make_room=False)
 
 
 def text_embed_query_device() -> str:

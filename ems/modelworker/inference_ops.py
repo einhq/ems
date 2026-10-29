@@ -1159,22 +1159,24 @@ def read_text(paths: list[str], angle=0, mirror=False, language: str | None = No
         return reading, found and {"code": found["language"], "confidence": found["confidence"], "given": False}
 
     try:
-        with registry.family_lock(OCR):
-            reading, found = registry.run_on_model_thread(OCR, run)
-        family = registry.htr_family(found and found["code"])
-        reading = text_reader.compose(reading, None if family is None else "recogniser" if family == HTR else "certainty")
-        texts: list[str] = []
-        if reading["transcribe"]:
-            # The transcriber writes the text of the lines judged to be writing, in its own family.
-            crops = [crop for _, crop in reading["transcribe"]]
-            clock.note(f"{family} {len(crops)} of {len(reading['lines'])} lines")
+        # The photo engine stays loaded through the transcriber's stage (FamilyLock.in_use).
+        with registry.family_lock(OCR).in_use():
+            with registry.family_lock(OCR):
+                reading, found = registry.run_on_model_thread(OCR, run)
+            family = registry.htr_family(found and found["code"])
+            reading = text_reader.compose(reading, None if family is None else "recogniser" if family == HTR else "certainty")
+            texts: list[str] = []
+            if reading["transcribe"]:
+                # The transcriber writes the text of the lines judged to be writing, in its own family.
+                crops = [crop for _, crop in reading["transcribe"]]
+                clock.note(f"{family} {len(crops)} of {len(reading['lines'])} lines")
 
-            def transcribe():
-                clock.lap(f"{family} wait")
-                return _transcribe_lines(family, crops, clock)
+                def transcribe():
+                    clock.lap(f"{family} wait")
+                    return _transcribe_lines(family, crops, clock)
 
-            with registry.family_lock(family):
-                texts = registry.run_on_model_thread(family, transcribe)
+                with registry.family_lock(family):
+                    texts = registry.run_on_model_thread(family, transcribe)
     finally:
         print(f"[model-server] read_text: {clock}", file=sys.stderr, flush=True)
     return {**text_reader.write(reading, texts), "language": found, "model": registry.ocr_model()}
