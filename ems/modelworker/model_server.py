@@ -457,7 +457,23 @@ class Handler(socketserver.StreamRequestHandler):
         started = time.time()
         try:
             with registry.request_scope(request.get("expires_at"), self._hung_up):
-                result = handle(request)
+                # A request can sit in the socket's backlog while the server is busy, and a caller
+                # that gave up meanwhile has removed the files it sent, so it is refused before
+                # anything reads them. The family lock checks again once the model is free.
+                reason = registry.abandoned()
+                if reason:
+                    raise registry.RequestAbandoned(f"{reason} before the request started")
+                try:
+                    result = handle(request)
+                except registry.RequestAbandoned:
+                    raise
+                except Exception as exc:
+                    # Work before the lock (a check for the files, the decode) fails on files the
+                    # caller removed when it gave up: that is the drop, not a fault.
+                    reason = registry.abandoned()
+                    if reason:
+                        raise registry.RequestAbandoned(f"{reason}: {exc}") from exc
+                    raise
             self._reply({"ok": True, "result": result})
             if op != "health":
                 log(f"{op} ok in {round(time.time() - started, 2)}s")
