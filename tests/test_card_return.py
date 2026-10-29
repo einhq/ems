@@ -187,3 +187,12 @@ def test_a_family_in_use_without_its_lock_is_not_idle(monkeypatch):
         assert registry.evict_idle(0) == []
         assert registry.place("sscd") == "cpu"
     assert registry.evict_idle(0) == ["siglip-visual:cuda"]
+
+
+def test_making_room_on_the_card_leaves_copies_on_the_cpu(monkeypatch):
+    _crowded_card(monkeypatch)
+    registry._cache["text-language:cpu"] = object()
+    registry._last_used["text-language:cpu"] = 0.0
+    assert registry.place("sscd") == "cuda"
+    assert "siglip-visual:cuda" not in registry._cache
+    assert "text-language:cpu" in registry._cache

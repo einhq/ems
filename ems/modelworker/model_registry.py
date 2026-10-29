@@ -816,8 +816,9 @@ def unload(families: list[str] | None = None, device: str | None = None, wait: b
     return unloaded
 
 
-def evict_idle(max_idle: float = IDLE_EVICT_SECONDS, keep: tuple[str, ...] = ()) -> list[str]:
-    """Unload resident families untouched for `max_idle` seconds. Returns their keys.
+def evict_idle(max_idle: float = IDLE_EVICT_SECONDS, keep: tuple[str, ...] = (), device: str | None = None) -> list[str]:
+    """Unload resident families untouched for `max_idle` seconds, only their copies on `device` if
+    given. Returns their keys.
 
     Families in PINNED_FAMILIES are never evicted — see the note there — nor those in `keep`, nor
     one whose family lock is held or waited on right now.
@@ -827,6 +828,7 @@ def evict_idle(max_idle: float = IDLE_EVICT_SECONDS, keep: tuple[str, ...] = ())
         stale = [
             k for k, seen in _last_used.items()
             if now - seen > max_idle and _family_of(k) not in PINNED_FAMILIES and _family_of(k) not in keep
+            and (device is None or _device_of(k) == device)
             and not (_family_of(k) in _family_locks and _family_locks[_family_of(k)].busy())
         ]
     if stale:
@@ -1193,7 +1195,9 @@ def _short_of_room(family: str, max_idle: float = ROOM_IDLE_SECONDS, keep: tuple
         return None
     cleanup_torch()
     if make_room and short() is not None:
-        evicted = evict_idle(max_idle, keep=(family, *keep))
+        # Only copies on the card: a CPU copy gives the card nothing, and in a crawl the language
+        # identifier, unloaded this way, cost the next picture up to 105 s to load (ein/core#756).
+        evicted = evict_idle(max_idle, keep=(family, *keep), device="cuda")
         if evicted:
             print(f"[model-server] {family}: unloaded idle {', '.join(evicted)} to load on the card", file=sys.stderr, flush=True)
     return short()
