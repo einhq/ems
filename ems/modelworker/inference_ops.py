@@ -15,6 +15,7 @@ import sys
 import time
 
 import model_registry as registry
+from whisper_credits import is_credit_line
 
 INSIGHTFACE = "insightface"
 WHISPER = "whisper"
@@ -44,8 +45,8 @@ def transcribe_signature(language: str | None = None, min_silence_ms: int | None
 
     So every setting that changes the output belongs in here, and nothing else does: the
     model, where and in what precision it runs on this host, the VAD, the no-speech ceiling, the
-    language — pinned, or how it is detected — and whether words are timed. Beam size and the conditioning flag are constants in
-    `transcribe`; if either becomes configurable it goes in too.
+    language — pinned, or how it is detected — and whether words are timed. Beam size, the conditioning flag and the
+    credit-line filter (whisper_credits) are constants in `transcribe`; if one becomes configurable it goes in too.
     """
     # Per-request overrides (the HTTP API's `language`, `vad.min_silence_ms`, `word_timestamps`)
     # take part exactly like the configured values do, so a transcript made with them is
@@ -264,8 +265,9 @@ def transcribe(file_path: str, language: str | None = None, min_silence_ms: int 
     either pinned (WHISPER_LANGUAGE) or detected over several windows of the speech with the
     expected languages given the benefit of the doubt (WHISPER_LANGUAGES, `language_votes`
     and `choose_language`), so a noisy first 30 seconds cannot mislabel an entire recording;
-    and a ceiling on the decoder's own no-speech score (WHISPER_NO_SPEECH_PROB_MAX) that
-    drops the fluent sentences it invents over a window it rated as silence.
+    a ceiling on the decoder's own no-speech score (WHISPER_NO_SPEECH_PROB_MAX) that
+    drops the fluent sentences it invents over a window it rated as silence; and a filter
+    (whisper_credits) for the thank-you and credit lines that get under that ceiling.
     """
     if not os.path.exists(file_path):
         raise FileNotFoundError(f"audio not found: {file_path}")
@@ -319,8 +321,9 @@ def transcribe(file_path: str, language: str | None = None, min_silence_ms: int 
         )
         # Empty segments are dropped here rather than downstream: a cue with no text is
         # not a subtitle, and an empty chunk is not worth a vector. So are segments the
-        # decoder rated as almost certainly not speech — those are its hallucinations,
-        # and they read as sentences, which is exactly why they must not reach search.
+        # decoder rated as almost certainly not speech, and the credit lines it invents
+        # over noise — those are its hallucinations, and they read as sentences, which is
+        # exactly why they must not reach search.
         prepared = time.monotonic()
         out = []
         for segment in segments:
@@ -329,6 +332,8 @@ def transcribe(file_path: str, language: str | None = None, min_silence_ms: int 
                 continue
             no_speech = getattr(segment, "no_speech_prob", None)
             if no_speech is not None and no_speech >= registry.WHISPER_NO_SPEECH_PROB_MAX:
+                continue
+            if is_credit_line(text):
                 continue
             entry = {"start": float(segment.start), "end": float(segment.end), "text": text}
             # Only present when word timestamps were asked for. A segment cannot be split

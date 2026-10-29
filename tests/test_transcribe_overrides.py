@@ -179,3 +179,16 @@ def test_a_host_transcribes_in_one_place_and_says_where(stubbed, monkeypatch):
     monkeypatch.setattr(registry, "_short_of_room", lambda family, max_idle=None, keep=(): "1600MB of the card left")
     with pytest.raises(registry.CardBusy, match="whisper waits for the card"):
         ops.transcribe(path)
+
+
+def test_credit_lines_are_dropped(stubbed, monkeypatch):
+    """A line the decoder was sure of but whisper_credits names never reaches the transcript."""
+    path, _ = stubbed
+
+    def transcribe(self, source, **kwargs):
+        info = types.SimpleNamespace(language="sv", language_probability=0.9, duration=62.6)
+        return iter([FakeSegment(0.0, 62.58, "Tack för att du har tittat på den här videon!")]), info
+
+    monkeypatch.setattr(FakeModel, "transcribe", transcribe)
+    result = ops.transcribe(path)
+    assert result["segments"] == [] and result["text"] == "" and result["speech"] is False

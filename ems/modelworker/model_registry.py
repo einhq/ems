@@ -164,7 +164,8 @@ def whisper_vad_parameters() -> dict:
 # A hallucination is the opposite case: a confident, fluent sentence over a window the model
 # rated likely no-speech. Invented lines — fluent nonsense, the "Takk for at du så på!"
 # video-credit class — score high on it and genuine lines, sung ones included, lower; 0.8 sits
-# between them on the side that keeps speech, and the odd credit line is the accepted residue.
+# between them on the side that keeps speech; the odd credit line that gets under it is
+# dropped by what it says (whisper_credits).
 # Set to 1 to disable.
 WHISPER_NO_SPEECH_PROB_MAX = float(os.environ.get('CFG_WHISPER_NO_SPEECH_PROB_MAX', '0.8'))
 
