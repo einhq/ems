@@ -480,6 +480,12 @@ class Handler(socketserver.StreamRequestHandler):
         except registry.RequestAbandoned as exc:
             self._reply({"ok": False, "error": str(exc), "error_type": type(exc).__name__})
             log(f"{op} dropped after {round(time.time() - started, 2)}s: {exc}")
+        except registry.CardBusy as exc:
+            # The caller asks again later: an answer, not a fault, so no traceback.
+            self._reply({"ok": False, "error": str(exc), "error_type": type(exc).__name__})
+            log(f"{op} card busy after {round(time.time() - started, 2)}s: {exc}")
+            if is_sticky_cuda_error(exc):
+                _on_sticky_cuda_error(op, exc)
         except Exception as exc:  # noqa: BLE001 - every failure goes back to the client
             # `error_type` is the class name, for the HTTP front to classify the failure by
             # (CardBusy → retry later, FileNotFoundError → not found) without parsing prose.

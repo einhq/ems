@@ -1161,11 +1161,37 @@ def read_text(paths: list[str], angle=0, mirror=False, language: str | None = No
         crops = [crop for _, crop in reading["transcribe"]]
 
         def transcribe():
-            return registry.htr(registry.htr_device(family), family).read(crops)
+            return _transcribe_lines(family, crops)
 
         with registry.family_lock(family):
             texts = registry.run_on_model_thread(family, transcribe)
     return {**text_reader.write(reading, texts), "language": found, "model": registry.ocr_model()}
+
+
+def _transcribe_lines(family: str, crops: list) -> list[str]:
+    """The transcriber's text of `crops`, on its model thread inside its lock.
+
+    The card can run out under the transcriber's beam search when the families beside it grow past
+    their claims, and after such a failure the copy on the card fails every later call with "CUDA
+    error: unknown error" while the rest of the process works (ein/core#753). So a CUDA failure
+    unloads that copy, for the next request to load afresh, and answers `CardBusy`: the caller
+    reads the picture again later. A sticky error keeps its text, for the server to recycle on.
+    """
+    device = registry.htr_device(family)
+    try:
+        return registry.htr(device, family).read(crops)
+    except Exception as exc:
+        if device == "cpu" or not _is_cuda_failure(exc):
+            raise
+        registry.forget_copies(family, device)
+        registry.cleanup_torch()
+        raise registry.CardBusy(f"{family} failed on the card and was unloaded: {exc}") from exc
+
+
+def _is_cuda_failure(exc: Exception) -> bool:
+    """Whether `exc` is the card failing a call: out of memory or any CUDA error."""
+    message = str(exc)
+    return "CUDA error" in message or "out of memory" in message.lower()
 
 
 def embed_image_texts(texts: list[str]) -> dict:
