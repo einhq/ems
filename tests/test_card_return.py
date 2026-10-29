@@ -147,3 +147,43 @@ def test_htr_set_to_the_cpu_stays_there(monkeypatch):
     _crawl(monkeypatch, free)
     monkeypatch.setattr(registry, "HTR_DEVICE", "cpu")
     assert registry.htr_device() == "cpu"
+
+
+def _crowded_card(monkeypatch):
+    """A card whose room only an idle siglip-visual, used long ago, can give; unloading it frees 2600 MB."""
+    free = [600.0]
+    monkeypatch.setattr(registry, "select_device", lambda: "cuda")
+    monkeypatch.setattr(registry, "free_vram_mb", lambda: free[0])
+    monkeypatch.setattr(registry, "_own_card_mb", lambda: 2600.0)
+    monkeypatch.setattr(registry, "cleanup_torch", lambda: None)
+    monkeypatch.setattr(registry, "_cache", {"siglip-visual:cuda": object()})
+    monkeypatch.setattr(registry, "_last_used", {"siglip-visual:cuda": 0.0})
+    monkeypatch.setattr(registry, "_family_locks", {})
+
+    def forget(keys):
+        for key in keys:
+            registry._cache.pop(key, None)
+        free[0] += 2600.0
+
+    monkeypatch.setattr(registry, "_forget", forget)
+
+
+def test_documents_embed_on_the_cpu_rather_than_unload_another_family(monkeypatch):
+    _crowded_card(monkeypatch)
+    monkeypatch.setattr(registry, "TEXT_EMBED_DEVICE", "auto")
+    assert registry.text_embed_device() == "cpu"
+    assert "siglip-visual:cuda" in registry._cache
+
+
+def test_another_family_still_unloads_an_idle_one_for_its_room(monkeypatch):
+    _crowded_card(monkeypatch)
+    assert registry.place("sscd") == "cuda"
+    assert "siglip-visual:cuda" not in registry._cache
+
+
+def test_a_family_in_use_without_its_lock_is_not_idle(monkeypatch):
+    _crowded_card(monkeypatch)
+    with registry.family_lock("siglip-visual").in_use():
+        assert registry.evict_idle(0) == []
+        assert registry.place("sscd") == "cpu"
+    assert registry.evict_idle(0) == ["siglip-visual:cuda"]
