@@ -1142,33 +1142,64 @@ def read_text(paths: list[str], angle=0, mirror=False, language: str | None = No
     if not os.path.exists(paths[0]):
         raise FileNotFoundError(f"Image not found: {paths[0]}")
 
+    clock = _Laps()
     image = registry.decode_all(lambda path: image_io.open_display(path, angle, mirror), paths)[0]
+    clock.lap("decode")
 
     def run():
-        reading = registry.ocr_photo(registry.ocr_device()).detect(image)
+        clock.lap("ocr wait")
+        engine = registry.ocr_photo(registry.ocr_device())
+        clock.lap("ocr load")
+        reading = engine.detect(image)
+        clock.lap("ocr")
         if language:
             return reading, {"code": language, "confidence": None, "given": True}
         found = registry.text_language().detect(text_reader.kept_text(reading))
+        clock.lap("language")
         return reading, found and {"code": found["language"], "confidence": found["confidence"], "given": False}
 
-    with registry.family_lock(OCR):
-        reading, found = registry.run_on_model_thread(OCR, run)
-    family = registry.htr_family(found and found["code"])
-    reading = text_reader.compose(reading, None if family is None else "recogniser" if family == HTR else "certainty")
-    texts: list[str] = []
-    if reading["transcribe"]:
-        # The transcriber writes the text of the lines judged to be writing, in its own family.
-        crops = [crop for _, crop in reading["transcribe"]]
+    try:
+        with registry.family_lock(OCR):
+            reading, found = registry.run_on_model_thread(OCR, run)
+        family = registry.htr_family(found and found["code"])
+        reading = text_reader.compose(reading, None if family is None else "recogniser" if family == HTR else "certainty")
+        texts: list[str] = []
+        if reading["transcribe"]:
+            # The transcriber writes the text of the lines judged to be writing, in its own family.
+            crops = [crop for _, crop in reading["transcribe"]]
+            clock.note(f"{family} {len(crops)} of {len(reading['lines'])} lines")
 
-        def transcribe():
-            return _transcribe_lines(family, crops)
+            def transcribe():
+                clock.lap(f"{family} wait")
+                return _transcribe_lines(family, crops, clock)
 
-        with registry.family_lock(family):
-            texts = registry.run_on_model_thread(family, transcribe)
+            with registry.family_lock(family):
+                texts = registry.run_on_model_thread(family, transcribe)
+    finally:
+        print(f"[model-server] read_text: {clock}", file=sys.stderr, flush=True)
     return {**text_reader.write(reading, texts), "language": found, "model": registry.ocr_model()}
 
 
-def _transcribe_lines(family: str, crops: list) -> list[str]:
+class _Laps:
+    """Where a request's time went, as named laps in the order they ran (ein/core#756)."""
+
+    def __init__(self):
+        self.at = time.monotonic()
+        self.parts: list[str] = []
+
+    def lap(self, name: str) -> None:
+        now = time.monotonic()
+        self.parts.append(f"{name} {now - self.at:.2f}s")
+        self.at = now
+
+    def note(self, text: str) -> None:
+        self.parts.append(text)
+
+    def __str__(self) -> str:
+        return ", ".join(self.parts)
+
+
+def _transcribe_lines(family: str, crops: list, clock: _Laps | None = None) -> list[str]:
     """The transcriber's text of `crops`, on its model thread inside its lock.
 
     The card can run out under the transcriber's beam search when the families beside it grow past
@@ -1177,9 +1208,15 @@ def _transcribe_lines(family: str, crops: list) -> list[str]:
     unloads that copy, for the next request to load afresh, and answers `CardBusy`: the caller
     reads the picture again later. A sticky error keeps its text, for the server to recycle on.
     """
+    clock = clock or _Laps()
     device = registry.htr_device(family)
+    clock.lap(f"{family} card")
     try:
-        return registry.htr(device, family).read(crops)
+        transcriber = registry.htr(device, family)
+        clock.lap(f"{family} load on {device}")
+        texts = transcriber.read(crops)
+        clock.lap(family)
+        return texts
     except Exception as exc:
         if device == "cpu" or not _is_cuda_failure(exc):
             raise
