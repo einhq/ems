@@ -236,7 +236,8 @@ ENV NEMO_CACHE_DIR=/opt/nemo
 # Bake the two checkpoints so the first diarize / voiceprint in a request does not pull
 # them from NGC / the Hub with no network guarantee — the same rule as WHISPER_MODEL et al.
 # Sortformer = speaker-turn segmentation (handles overlapped speech); TitaNet-large = the
-# 192-dim voiceprint embedding. Both are CC-BY-4.0 and download without a token.
+# 192-dim voiceprint embedding. Sortformer is CC BY-NC 4.0 (non-commercial), TitaNet is
+# CC BY 4.0; both download without a token.
 #
 # Class names follow the NeMo model cards for nvidia/diar_sortformer_4spk-v1 and
 # nvidia/speakerverification_en_titanet_large; if NeMo moves them, this layer fails first.
