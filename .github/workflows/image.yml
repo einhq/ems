@@ -22,23 +22,6 @@ jobs:
       contents: read
       packages: write
     steps:
-      # The image is about 26 GB unpacked, and the build keeps its layers twice, unpacked and
-      # compressed for the push: more than the runner's root disk has free. Docker's data, and the
-      # builder's with it, goes to the larger disk at /mnt, and the root disk sheds the toolchains
-      # this job does not use.
-      - name: Make room
-        run: |
-          df -h / /mnt
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup \
-            /opt/hostedtoolcache /usr/local/share/boost /usr/share/swift
-          sudo docker image prune -af >/dev/null
-          sudo systemctl stop docker docker.socket
-          sudo mkdir -p /mnt/docker
-          [ -s /etc/docker/daemon.json ] || echo '{}' | sudo tee /etc/docker/daemon.json >/dev/null
-          sudo jq '."data-root" = "/mnt/docker"' /etc/docker/daemon.json >daemon.json
-          sudo mv daemon.json /etc/docker/daemon.json
-          sudo systemctl start docker
-          df -h / /mnt
       - uses: actions/checkout@v7
         with:
           # The tags, for git describe.
@@ -73,6 +56,3 @@ jobs:
             org.opencontainers.image.description=EMS, the EiN Media Service: every media tool and model behind one HTTP API, run by compose from ein/deploy
           cache-from: type=registry,ref=ghcr.io/${{ github.repository_owner }}/ems:main
           cache-to: type=inline
-      - name: Room left
-        if: always()
-        run: df -h / /mnt
