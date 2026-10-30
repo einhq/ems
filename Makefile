@@ -64,7 +64,7 @@ build: ## Build the image (TMPDIR on the graph root: the model layers are tens o
 run: ## Run the container (GPU=1 for NVIDIA; FILES_PATH/OLD_PATH/VOLATILE_PATH/TMP_PATH mount at /files, /old, /files-volatile, /files-tmp)
 	@mkdir -p $(VOLATILE_PATH) $(TMP_PATH)
 	podman run --replace -d --name $(CONTAINER_NAME) --restart always --stop-timeout 60 \
-		--health-cmd "python3 -m ems.healthcheck" --health-interval 30s --health-timeout 15s --health-start-period 120s \
+		--health-cmd "python3 -m ems.healthcheck" --health-interval 30s --health-timeout 60s --health-retries 5 --health-start-period 120s \
 		--memory $(EMS_MEMORY) --memory-swap $(EMS_MEMORY) \
 		$(GPU_FLAG) --network=host \
 		-e EMS_PORT=$(EMS_PORT) -e EMS_KEY=$(EMS_KEY) \

@@ -9,6 +9,11 @@ op `model_unavailable`, and `podman ps` should say so.
 Run by podman inside the container. `make run` passes it as `--health-cmd` rather than the image
 declaring a HEALTHCHECK, which podman drops when it builds the OCI format. It asks the local port
 with the container's own key; with no key configured authentication is off and none is sent.
+
+Podman gives it 60 s and 5 tries, so unhealthy means EMS has not answered for minutes. A host
+busy with a crawl can stall every container's check at once, the database's `psql` as well as
+this one, on starting the process rather than on the answer (fry, 2026-10-30): a tighter bound
+then marks unhealthy an EMS that serves every request.
 """
 
 from __future__ import annotations
@@ -19,8 +24,9 @@ import urllib.request
 
 from .config import Settings
 
-# Longer than what health itself may wait (`nvidia-smi` twice), and shorter than podman's 15 s.
-TIMEOUT_SECONDS = 12
+# Longer than what health itself may wait (`nvidia-smi` twice) on a loaded host, and shorter than
+# podman's 60 s, so a slow answer still says why.
+TIMEOUT_SECONDS = 45
 
 
 def main() -> int:
