@@ -20,10 +20,16 @@ Crops are cut with `%[fx:…]` geometry, which is why this is `magick` and not t
 against the raster ImageMagick actually decoded — the sensor image for a RAW, the turned
 raster for a HEIF — rather than against dimensions a caller declared, which for those two
 families are not the raster at all. The legacy CLI does not expand escapes in `-crop`.
+
+A JPEG is decoded no larger than the outputs need: `-define jpeg:size=WxH` lets libjpeg scale
+the decode by n/8, never below WxH, so a 24 Mpx photo whose largest output is 2560 px is read at
+3000x2000 and every clone and resize starts from a quarter of the pixels (ein/core#825). The
+frame reported is still the file's own, read from its header.
 """
 
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass
 
@@ -103,9 +109,53 @@ def fit_args(width: int | None, height: int | None, fit: str) -> list[str]:
     return []
 
 
-def pipeline_args(source: str, angle: int, mirror: bool, plans: list[Plan]) -> list[str]:
+def jpeg_size(path: str) -> tuple[int, int] | None:
+    """A JPEG's stored width and height from its header; None for any other file.
+
+    Pillow names a camera's multi-picture JPEG `MPO`; its first image is an ordinary JPEG and
+    the one ImageMagick decodes.
+    """
+    try:
+        from PIL import Image
+
+        with Image.open(path) as image:
+            return image.size if image.format in ("JPEG", "MPO") else None
+    except Exception:
+        return None
+
+
+def plan_scale(plan: Plan, display: tuple[int, int]) -> float:
+    """The fraction of the full-size display frame this output needs to come out unchanged."""
+    width, height = display
+    region_w = width * (plan.crop.width if plan.crop else 1.0)
+    region_h = height * (plan.crop.height if plan.crop else 1.0)
+    if region_w <= 0 or region_h <= 0:
+        return 1.0
+    ratios = [r for r in (plan.width and plan.width / region_w, plan.height and plan.height / region_h) if r]
+    if not ratios:
+        return 1.0
+    # `contain` and a one-sided box shrink to the tighter side; `cover` and `fill` must still
+    # reach the looser one.
+    need = min(ratios) if plan.fit == "contain" or len(ratios) == 1 else max(ratios)
+    return min(1.0, need)
+
+
+def decode_size(stored: tuple[int, int], angle: int, plans: list[Plan]) -> tuple[int, int] | None:
+    """The `jpeg:size` every output can still be cut from, in the file's stored frame.
+
+    None when some output needs more than half the source, the coarsest step that saves anything.
+    """
+    display = (stored[1], stored[0]) if angle % 180 == 90 else stored
+    scale = max((plan_scale(plan, display) for plan in plans), default=1.0)
+    if scale > 0.5:
+        return None
+    return math.ceil(stored[0] * scale), math.ceil(stored[1] * scale)
+
+
+def pipeline_args(source: str, angle: int, mirror: bool, plans: list[Plan], decode: tuple[int, int] | None = None) -> list[str]:
     """Everything after `magick`. Rotation is counter-clockwise, which ImageMagick spells negative."""
-    args = [source, *FILTER_ARGS, *STRIP_ARGS]
+    args = ["-define", f"jpeg:size={decode[0]}x{decode[1]}"] if decode else []
+    args += [source, *FILTER_ARGS, *STRIP_ARGS]
     if angle:
         args += ["-rotate", str(-angle), "+repage"]
     if mirror:
@@ -148,7 +198,12 @@ async def render(source: str, angle: int, mirror: bool, plans: list[Plan], *, ti
     worker's priority a few of them starve a transcription's CPU-side decode and VAD while the
     card waits (ein/core#741).
     """
-    done = await run([require("magick"), *pipeline_args(source, angle, mirror, plans)], timeout=timeout, niceness=BACKGROUND_NICE)
+    stored = jpeg_size(source)
+    decode = decode_size(stored, angle, plans) if stored else None
+    done = await run([require("magick"), *pipeline_args(source, angle, mirror, plans, decode)], timeout=timeout, niceness=BACKGROUND_NICE)
     if done.code != 0:
         raise EmsError(TOOL_FAILED, f"magick failed: {done.tail() or f'exit {done.code}'}")
-    return parse_output(done.stdout.decode(errors="replace"), len(plans))
+    rendered = parse_output(done.stdout.decode(errors="replace"), len(plans))
+    if decode:
+        rendered.frame = (stored[1], stored[0]) if angle % 180 == 90 else stored
+    return rendered
