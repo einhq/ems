@@ -710,7 +710,9 @@ The embedder is the configured one, named in capabilities `models.text_embed` an
 and `document` (the default) for the text it should find; the model embeds them differently. A
 text over `EMS_TEXT_EMBED_MAX_TOKENS` (8192) is `invalid_request`, never cut: the caller chunks.
 Queries run on their own pinned family (`text-query`, on the CPU by default), so a search does not
-wait behind a batch of documents.
+wait behind a batch of documents. So do documents sent with `options.priority: "interactive"`, a
+text someone is saving: embedded as documents, in the query family, so the save does not wait for a
+crawl's batch either.
 
 `model: "current"` is still accepted, as 2.1 callers send it. _3.0_ removed `model: "legacy"`
 (paraphrase-multilingual-MiniLM-L12-v2, 384 dimensions, a 128-token window that cut longer text

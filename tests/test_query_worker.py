@@ -76,6 +76,16 @@ async def test_a_search_query_goes_to_the_query_worker_and_documents_to_the_batc
     assert [request["role"] for request in fake_worker.requests] == ["document"]
 
 
+async def test_an_interactive_document_goes_to_the_query_worker_as_a_document(client, fake_worker, query_fake):
+    query_fake.on("embed_texts", lambda req: {"embeddings": [[1.0]], "model": "jina-embeddings-v5-text-small"})
+
+    r = await client.post("/v0/text/embed", json={"texts": ["Kära Anna"], "options": {"priority": "interactive"}})
+    assert r.json()["result"]["embeddings"] == [[1.0]]
+
+    assert [(request["role"], request["family"]) for request in query_fake.requests] == [("document", "query")]
+    assert fake_worker.requests == []
+
+
 async def test_with_the_query_worker_down_a_search_falls_back_to_the_batch_worker(client, fake_worker, tmp_path):
     client.app.state.ctx.query_worker = Worker("/nonexistent/model_server.py", str(tmp_path / "down.sock"), log=lambda m: None)
     fake_worker.on("embed_texts", lambda req: {"embeddings": [[3.0]], "model": "m"})
