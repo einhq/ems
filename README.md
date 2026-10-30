@@ -64,8 +64,9 @@ Before the first `run GPU=1` on a new host, and again after reinstalling its OS:
    writes it (`unknown field "additionalGids"`), and
    `--device nvidia.com/gpu=all` then finds no GPU. The installer makes the
    refresh unit run `deploy/fix-cdi.sh` after each regeneration and removes any
-   `/etc/cdi/nvidia.yaml`. It ends by listing the card from a throwaway
-   container. It survives reboots and toolkit upgrades.
+   `/etc/cdi/nvidia.yaml`. It ends with the unit's status and a count of the
+   spec's `cdiVersion`, `additionalGids` and `/dev/dri/card` lines. It survives
+   reboots and toolkit upgrades.
 4. `make gpu-check` once EMS runs: every model reports
    the device it bound to.
 
