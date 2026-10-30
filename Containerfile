@@ -176,7 +176,7 @@ RUN python3 -c "from insightface.app import FaceAnalysis; \
 
 ENV INSIGHTFACE_HOME=/opt/insightface
 
-# Where every Hugging Face model — whisper and the text embedder — is baked
+# Where every Hugging Face model — whisper, the text embedder and NeMo's checkpoints — is baked
 # and later read from. This MUST precede the bake layers below, and it is set for exactly
 # the reason INSIGHTFACE_HOME above is.
 #
@@ -229,12 +229,10 @@ RUN pip install --no-cache-dir \
     "nemo_toolkit[asr]==3.0.0" \
     python_speech_features
 
-# NeMo caches pretrained checkpoints under $HOME by default — the same build-time vs run-time
-# HOME split that HF_HOME and INSIGHTFACE_HOME above exist to solve. Point it at /opt.
-ENV NEMO_CACHE_DIR=/opt/nemo
-
 # Bake the two checkpoints so the first diarize / voiceprint in a request does not pull
-# them from NGC / the Hub with no network guarantee — the same rule as WHISPER_MODEL et al.
+# them from the Hub with no network guarantee — the same rule as WHISPER_MODEL et al. They are
+# Hub-hosted .nemo files, so NeMo fetches them into the Hugging Face cache under HF_HOME
+# (/opt/huggingface/hub/models--nvidia--…), not into a NeMo cache of its own.
 # Sortformer = speaker-turn segmentation (handles overlapped speech); TitaNet-large = the
 # 192-dim voiceprint embedding. Sortformer is CC BY-NC 4.0 (non-commercial), TitaNet is
 # CC BY 4.0; both download without a token.
