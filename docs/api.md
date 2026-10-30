@@ -698,7 +698,8 @@ every stored vector's meaning: the caller re-embeds.
 Search text as a vector in the same space: `{ "text": "segelbåt" }` →
 `{ "embedding": [ … ], "dimension": 1152 }`. Multilingual (SigLIP2's Gemma tokenizer); text is
 lower-cased and stripped of punctuation as the model was trained. Meant for the interactive
-path: the text tower is small and pinned where `EMS_MODEL_PINNED` names `siglip-text`.
+path: the text tower is small, and pinned in the query worker (`EMS_QUERY_WORKER`), or where
+`EMS_MODEL_PINNED` names `siglip-text` without it.
 
 ### 4.19 `text.embed` _(implemented)_
 
@@ -915,7 +916,7 @@ Environment only. `EMS_KEYS_FILE` (one key per line) or `EMS_KEY`, `EMS_ROOTS`
 (`/files:ro,/old:ro,/files-volatile:rw,/files-tmp:rw`), `EMS_PORT`, `EMS_HOST`, `EMS_SCRATCH`,
 the admission limits (`EMS_LIMIT_MODELS`, `EMS_LIMIT_TOOLS`, `EMS_LIMIT_ENCODES`,
 `EMS_QUEUE_DEPTH`, `EMS_INTERACTIVE_RESERVE`), `EMS_EXIFTOOL_WORKERS`, `EMS_EXPECT_GPU` (`1`: a card
-is expected, and health warns when none is visible), `EMS_CARD_BUDGET_MB` (the most of the card the models
+is expected, and health lists `what: "gpu"` under `degraded` when none is visible), `EMS_CARD_BUDGET_MB` (the most of the card the models
 treat as there — how a smaller card is rehearsed; 0 is the whole card), `EMS_CARD_SHARE_MB` (the most
 of the card EMS's own processes hold, for a card shared with another service such as the llm: a
 model that would take EMS past it runs on the CPU, even while the rest of the card is free; 0 is

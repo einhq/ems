@@ -35,8 +35,8 @@ class Settings:
     queue_depth: int
     interactive_reserve: int
     # The host is meant to have a card (EMS_EXPECT_GPU=1). Without one EMS still runs, as a host
-    # with no card, and says so in health rather than failing to start: a card lost to a broken
-    # device mapping after a reboot then shows as a warning instead of an outage.
+    # with no card, and says so in health's `degraded` rather than failing to start: a card lost to
+    # a broken device mapping after a reboot then shows as a degradation instead of an outage.
     expect_gpu: bool
     exiftool_workers: int
     # How long a tool may go without using CPU or moving a byte before it is stopped as wedged.

@@ -8,7 +8,7 @@ on the first real kernel launch. InsightFace is worse — it silently falls back
 you only notice via throughput.
 
 So every check here runs an actual computation and inspects what the loaded model/session
-ended up on. Exits non-zero on the first hard failure.
+ended up on. Every check runs, and it exits non-zero if any of them failed.
 
 Run inside the running container with the GPU passed through (`make gpu-check`):
 
