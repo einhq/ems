@@ -32,11 +32,16 @@ class EmbedRequest(WithOptions):
 
 async def embed(ctx: Context, req: EmbedRequest, progress: Progress) -> Outcome:
     texts = req.texts if req.texts is not None else [req.text or ""]
+    # A search query goes to the query family (Context.for_queries), and so do documents someone
+    # is waiting on (`priority: interactive`, a hand edit being saved), which would otherwise
+    # queue behind a crawl's; batch documents go to the batch worker.
+    quick = req.role == "query" or req.options.interactive
     async with model_slot(ctx, req.options):
-        # A search query goes to the query worker, documents to the batch one (Context.for_queries).
-        worker = ctx.for_queries("text-query") if req.role == "query" else ctx.worker
+        worker = ctx.for_queries("text-query") if quick else ctx.worker
         payload: dict = {"texts": texts, "role": req.role}
-        device = ctx.card.document_device() if ctx.card is not None and req.role == "document" else None
+        if quick and req.role == "document":
+            payload["family"] = "query"
+        device = ctx.card.document_device() if ctx.card is not None and not quick else None
         if device is not None:
             payload["device"] = device
         raw = await worker.call("embed_texts", payload, deadline=req.options.deadline)

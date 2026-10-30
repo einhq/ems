@@ -59,6 +59,12 @@ def test_documents_run_in_the_document_family(embedder):
     assert embedder.calls == [(["a", "b"], "document")]
 
 
+def test_documents_someone_waits_on_run_in_the_query_family_as_documents(embedder):
+    ops.embed_texts(["a"], "document", None, "query")
+    assert embedder.loaded == [("text-query", "cpu")]
+    assert embedder.calls == [(["a"], "document")]
+
+
 def test_a_text_over_the_limit_is_refused_not_cut(embedder):
     # "Document: " is one token here, so four words is five.
     with pytest.raises(ValueError, match="text 1 is 5 tokens, over the 4-token limit"):

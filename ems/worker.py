@@ -226,7 +226,7 @@ class Worker:
         *,
         deadline: float | None = None,
     ) -> Any:
-        family = WORKER_OP_FAMILIES.get(op) or (("text-query" if payload.get("role") == "query" else "text-embed") if op == "embed_texts" else None)
+        family = WORKER_OP_FAMILIES.get(op) or (("text-query" if payload.get("role") == "query" or payload.get("family") == "query" else "text-embed") if op == "embed_texts" else None)
         if family:
             note_family(family)
         body = {"op": op, **payload}

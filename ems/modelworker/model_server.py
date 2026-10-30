@@ -13,7 +13,7 @@ response per connection.
 
   -> {"op":"transcribe","path":"/tmp/.../audio.wav"}
   -> {"op":"transcribe_signature"}
-  -> {"op":"embed_texts","texts":["..."],"role":"query"|"document"}
+  -> {"op":"embed_texts","texts":["..."],"role":"query"|"document","family":"query"?}
   -> {"op":"diarize","path":"/tmp/.../audio.wav"}
   -> {"op":"embed_voice_segments","path":"/tmp/.../audio.wav","spans":[{"start":12.48,"end":17.84},...]}
   -> {"op":"active_speaker_score","video":"...","audio":"...","start":12.4,"end":17.8,"track":[...]}
@@ -328,7 +328,7 @@ def handle(request: dict) -> dict:
         texts = request.get("texts")
         if not texts:
             raise ValueError("embed_texts: missing texts")
-        return ops.embed_texts([str(text) for text in texts], str(request.get("role") or "document"), request.get("device"))
+        return ops.embed_texts([str(text) for text in texts], str(request.get("role") or "document"), request.get("device"), request.get("family"))
 
     if op == "unload":
         families = request.get("families")

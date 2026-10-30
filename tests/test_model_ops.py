@@ -13,7 +13,7 @@ async def test_text_embed_round_trip_uses_the_configured_embedder(client, fake_w
     assert r.status_code == 200 and body["ok"]
     assert body["result"] == {"embedding": [0.1, 0.2, 0.3], "dimension": 3}
     assert body["meta"]["producer"] == "jina-embeddings-v5-text-small"
-    assert fake_worker.requests[-1] == {"op": "embed_texts", "texts": ["hello"], "role": "document"}
+    assert fake_worker.requests[-1] == {"op": "embed_texts", "texts": ["hello"], "role": "document", "family": "query"}
 
 
 async def test_text_embed_current_sends_the_role_and_names_the_model(client, fake_worker):

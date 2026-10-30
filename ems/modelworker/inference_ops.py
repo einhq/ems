@@ -1261,23 +1261,25 @@ def _document_device(requested: str | None) -> str:
     return registry.text_embed_device()
 
 
-def embed_texts(texts: list[str], role: str, device: str | None = None) -> dict:
+def embed_texts(texts: list[str], role: str, device: str | None = None, family: str | None = None) -> dict:
     """TEXT_EMBED_MODEL vectors, one per text, in order: queries or documents by `role`.
 
     A text longer than TEXT_EMBED_MAX_TOKENS is refused, not truncated: the caller chunks, and a
     vector for the first part of a chunk would be stored as the whole of it. `device` is for
     documents: `card` puts them on the card when it has room (the front says so while no batch
-    work holds it, ems/card.py).
+    work holds it, ems/card.py). A query runs in TEXT_QUERY, and so do documents given
+    `family="query"`, someone's save, which then need not wait for a batch's copy.
     """
     if role not in ("query", "document"):
         raise ValueError(f"embed_texts: role must be query or document, not {role!r}")
-    family = TEXT_QUERY if role == "query" else TEXT_EMBED
+    quick = role == "query" or family == "query"
+    family = TEXT_QUERY if quick else TEXT_EMBED
     requested = device
 
     def run():
         # Placed here, on the family's thread and inside its lock, as every family is: a family
         # moved between the card and the CPU must not be in use by another request (ein/core#736).
-        device = registry.text_embed_query_device() if role == "query" else _document_device(requested)
+        device = registry.text_embed_query_device() if quick else _document_device(requested)
         model = registry.text_embedder(family, device)
         limit = registry.TEXT_EMBED_MAX_TOKENS
         prefix = model.prompts.get(role, "")
