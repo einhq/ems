@@ -18,6 +18,7 @@ import threading
 import time
 import warnings
 from contextlib import contextmanager
+from typing import Callable
 
 warnings.filterwarnings('ignore')
 os.environ.setdefault('TF_CPP_MIN_LOG_LEVEL', '3')
@@ -816,24 +817,43 @@ def unload(families: list[str] | None = None, device: str | None = None, wait: b
     return unloaded
 
 
-def evict_idle(max_idle: float = IDLE_EVICT_SECONDS, keep: tuple[str, ...] = (), device: str | None = None) -> list[str]:
+def evict_idle(max_idle: float = IDLE_EVICT_SECONDS, keep: tuple[str, ...] = (), device: str | None = None,
+               enough: Callable[[], bool] | None = None) -> list[str]:
     """Unload resident families untouched for `max_idle` seconds, only their copies on `device` if
     given. Returns their keys.
 
     Families in PINNED_FAMILIES are never evicted — see the note there — nor those in `keep`, nor
-    one whose family lock is held or waited on right now.
+    one whose family lock is held or waited on right now. With `enough`, the least recently used
+    go first, one at a time, until it says there is room: a family needing room on the card
+    unloads only what it needs, and the rest stay loaded for their next request (ein/core#777).
     """
     now = time.time()
     with _lock:
-        stale = [
+        stale = sorted((
             k for k, seen in _last_used.items()
             if now - seen > max_idle and _family_of(k) not in PINNED_FAMILIES and _family_of(k) not in keep
             and (device is None or _device_of(k) == device)
-            and not (_family_of(k) in _family_locks and _family_locks[_family_of(k)].busy())
-        ]
-    if stale:
-        _forget(stale)
-    return stale
+            and not _busy(_family_of(k))
+        ), key=lambda k: _last_used[k])
+    if enough is None:
+        if stale:
+            _forget(stale)
+        return stale
+    unloaded: list[str] = []
+    for key in stale:
+        if enough():
+            break
+        if _busy(_family_of(key)):
+            continue
+        _forget([key])
+        unloaded.append(key)
+    return unloaded
+
+
+def _busy(family: str) -> bool:
+    """Whether `family`'s lock is held, waited on or in use (FamilyLock.busy)."""
+    lock = _family_locks.get(family)
+    return lock is not None and lock.busy()
 
 
 def loaded() -> list[str]:
@@ -1197,7 +1217,7 @@ def _short_of_room(family: str, max_idle: float = ROOM_IDLE_SECONDS, keep: tuple
     if make_room and short() is not None:
         # Only copies on the card: a CPU copy gives the card nothing, and in a crawl the language
         # identifier, unloaded this way, cost the next picture up to 105 s to load (ein/core#756).
-        evicted = evict_idle(max_idle, keep=(family, *keep), device="cuda")
+        evicted = evict_idle(max_idle, keep=(family, *keep), device="cuda", enough=lambda: short() is None)
         if evicted:
             print(f"[model-server] {family}: unloaded idle {', '.join(evicted)} to load on the card", file=sys.stderr, flush=True)
     return short()
@@ -1218,9 +1238,9 @@ def _wait_for_card(family: str, keep: tuple[str, ...] = ()) -> None:
     """Raise `CardBusy` unless the card has room for `family` now, or holds it already.
 
     In a crawl the other kinds keep their families in use, so those idle past the grace never
-    leave `family` its room, and it would wait for good (ein/core#736). So it makes room: every
-    family not working right now is unloaded — none pinned, none with a request running or
-    waiting, none in `keep` — and loads again when next asked."""
+    leave `family` its room, and it would wait for good (ein/core#736). So it makes room: families
+    not working right now are unloaded, least recently used first, until it fits — none pinned,
+    none with a request running or waiting, none in `keep` — and load again when next asked."""
     with _lock:
         if any(_family_of(key) == family and _device_of(key) == "cuda" for key in _cache):
             return
@@ -1409,7 +1429,13 @@ def htr_device(family: str = "htr") -> str:
     ~4.5 s on fry's card, and once there in a crawl the claims of the busy families never let it
     back (ein/core#750). It makes room as whisper does, but leaves the photo engine, which the next
     picture needs first. A card too small ever to hold it means the CPU. Runs on the transcriber's
-    own model thread, like `place`."""
+    own model thread, like `place`.
+
+    That is the main transcriber's way, the first in HTR_LANGUAGES. Any other takes the card only
+    from families idle past the grace, never from the main one, and reads on the CPU otherwise,
+    with the same weights: on fry it had a twentieth of the pictures, and each of them unloaded the
+    main transcriber or the faces for a load of ~45 s, which the next picture paid again
+    (ein/core#777)."""
     setting = _HTR[family][1]()
     if setting in ("cpu", "cuda"):
         return setting
@@ -1418,7 +1444,18 @@ def htr_device(family: str = "htr") -> str:
     total = card_total_mb()
     if total is not None and total - CUDA_CONTEXT_MB < CARD_NEED_MB[family]:
         return "cpu"
-    _wait_for_card(family, keep=("ocr",))
+    main = next(iter(HTR_LANGUAGES))
+    if family == main:
+        _wait_for_card(family, keep=("ocr",))
+        return "cuda"
+    with _lock:
+        if any(_family_of(key) == family and _device_of(key) == "cuda" for key in _cache):
+            return "cuda"
+    why = _short_of_room(family, keep=("ocr", main))
+    if why is not None:
+        print(f"[model-server] {family}: {why} — on the CPU", file=sys.stderr, flush=True)
+        return "cpu"
+    forget_copies(family, "cpu")
     return "cuda"
 
 
