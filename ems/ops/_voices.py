@@ -1,7 +1,8 @@
 """Turning windowed diarization back into one speaker per recording.
 
-The diarizer cannot take a whole file — Sortformer is quadratic in input length, so the
-worker feeds it fixed windows (model_registry.DIARIZE_WINDOW_SECONDS). The cost is that its speaker indices restart with every window: the same
+The diarizer does not take a whole file — it tells at most four speakers apart in one call, and
+its memory grows with the input — so the worker feeds it fixed windows
+(model_registry.DIARIZE_WINDOW_SECONDS). The cost is that its speaker indices restart with every window: the same
 person is `w0/speaker_0` in the first window and maybe `w1/speaker_2` in the second, and
 nothing in the output says so. This joins them back up using the voiceprints.
 

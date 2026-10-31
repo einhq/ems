@@ -172,19 +172,28 @@ WHISPER_NO_SPEECH_PROB_MAX = float(os.environ.get('CFG_WHISPER_NO_SPEECH_PROB_MA
 
 # Speaker diarization: who is talking, and between which seconds. Same baked-model rule as
 # WHISPER_MODEL (the Containerfile), at a pinned commit so a rebuild cannot change the turns under
-# stored ones. Sortformer is end-to-end and handles overlapping speech.
-SORTFORMER_MODEL = os.environ.get('CFG_SORTFORMER_MODEL', 'nvidia/diar_sortformer_4spk-v1')
-SORTFORMER_REVISION = os.environ.get('CFG_SORTFORMER_REVISION', '2617bffbd820aa29d8f1fb6ab6f9ed7f0adbc996')
+# stored ones. Streaming Sortformer v2 is end-to-end and handles overlapping speech; it replaced
+# v1, whose weights are non-commercial, after measuring the two on test-content's recordings and
+# 18 hours of an archive's named voices (ein/core#841): no worse at tying a voice to its person,
+# and it never fused two people where v1 did.
+SORTFORMER_MODEL = os.environ.get('CFG_SORTFORMER_MODEL', 'nvidia/diar_streaming_sortformer_4spk-v2')
+SORTFORMER_REVISION = os.environ.get('CFG_SORTFORMER_REVISION', '84edd514b8ef68004c10086918cd62f2148cbd59')
+
+# How the streaming diarizer steps through a window, in its 80 ms frames: the model card's
+# "very high latency" setting, 27 s chunks with 3 s of lookahead and the most context per step.
+# Latency means nothing for a recording on disk; context is what decides who is who. The
+# checkpoint's own default is a low-latency one. Measured with these (ein/core#841).
+SORTFORMER_STREAMING = {
+    "chunk_len": 340, "chunk_right_context": 40, "fifo_len": 40, "spkcache_update_period": 300, "spkcache_len": 188,
+}
 
 # How much audio goes into one diarization call, in seconds.
 #
-# This is not a tuning knob, it is a hard model limit. Sortformer's own training config
-# declares `session_len_sec: 90`, and it is not linear in input length: handed a whole
-# recording it allocates proportionally to the square of the sequence, and a recording of a
-# few minutes asks for more than a 16GB card holds. At 90s a window peaks under 1GB.
-#
-# Raising this does not buy accuracy; it buys an OOM. The cost of windowing is that speaker
-# indices are local to each call, which `diarize` reports rather than hides — see there.
+# The streaming diarizer would take a whole file, but it tells at most four speakers apart in
+# one call, and its card memory grows with the input: on a 49-minute recording, whole, it held
+# 2.9 GB and found 4 speakers where 90 s windows held 1.3 GB and found 11 (ein/core#841). Its
+# training samples were 90 s long. The cost of windowing is that speaker indices are local to
+# each call, which `diarize` reports rather than hides — see there.
 DIARIZE_WINDOW_SECONDS = float(os.environ.get('CFG_DIARIZE_WINDOW_SECONDS', '90'))
 
 # Voiceprint embedding, for matching a speech turn to a person the way a face embedding
@@ -1532,6 +1541,15 @@ def _nemo_checkpoint(repo: str, revision: str) -> str:
     return hf_hub_download(repo, f"{repo.split('/')[-1]}.nemo", revision=revision)
 
 
+def set_streaming(model) -> None:
+    """Give a streaming Sortformer the SORTFORMER_STREAMING steps; an offline one has none."""
+    if not getattr(model, "streaming_mode", False):
+        return
+    for key, value in SORTFORMER_STREAMING.items():
+        setattr(model.sortformer_modules, key, value)
+    model.sortformer_modules._check_streaming_parameters()
+
+
 def sortformer(device: str):
     """Sortformer speaker diarizer named by SORTFORMER_MODEL at SORTFORMER_REVISION.
 
@@ -1546,6 +1564,7 @@ def sortformer(device: str):
         from nemo.collections.asr.models import SortformerEncLabelModel
 
         model = SortformerEncLabelModel.restore_from(_nemo_checkpoint(SORTFORMER_MODEL, SORTFORMER_REVISION), map_location=device)
+        set_streaming(model)
         model.eval()
         return model.to(device)
 

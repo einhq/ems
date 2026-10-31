@@ -21,8 +21,9 @@ The models are provided as is, without warranties of any kind, as their licences
 
 - NVIDIA's TitaNet large, https://huggingface.co/nvidia/speakerverification_en_titanet_large, in
   /opt/huggingface: CC BY 4.0, https://creativecommons.org/licenses/by/4.0/legalcode
-- NVIDIA's Sortformer diar_sortformer_4spk-v1, https://huggingface.co/nvidia/diar_sortformer_4spk-v1,
-  in /opt/huggingface: CC BY-NC 4.0, https://creativecommons.org/licenses/by-nc/4.0/legalcode
+- NVIDIA's Streaming Sortformer diar_streaming_sortformer_4spk-v2,
+  https://huggingface.co/nvidia/diar_streaming_sortformer_4spk-v2, in /opt/huggingface:
+  CC BY 4.0, https://creativecommons.org/licenses/by/4.0/legalcode
 - Jina AI's jina-embeddings-v5-text-small, https://huggingface.co/jinaai/jina-embeddings-v5-text-small,
   in /opt/huggingface: CC BY-NC 4.0, https://creativecommons.org/licenses/by-nc/4.0/legalcode
 

@@ -401,9 +401,9 @@ def diarize(file_path: str) -> dict:
 
     Takes an already-demuxed 16kHz mono WAV, like `transcribe` — the caller owns ffmpeg.
 
-    **Windowed, and the caller must know it.** Sortformer is not linear in input length, so
-    this feeds it registry.DIARIZE_WINDOW_SECONDS at a time rather than the whole file (see
-    the note there). Two consequences leak into the
+    **Windowed, and the caller must know it.** Sortformer tells at most four speakers apart in
+    one call, so this feeds it registry.DIARIZE_WINDOW_SECONDS at a time rather than the whole
+    file (see the note there). Two consequences leak into the
     result and are reported rather than hidden:
 
       - `speaker` is LOCAL TO ITS WINDOW. The label is prefixed with the window index

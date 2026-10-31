@@ -239,14 +239,14 @@ RUN pip install --no-cache-dir \
 # one .nemo file on the Hub, named after its repository, fetched at a pinned commit into the
 # Hugging Face cache under HF_HOME (/opt/huggingface/hub/models--nvidia--…), where the worker
 # finds it by the same commit: a rebuild cannot change the speaker turns or the voiceprints
-# under stored ones. Sortformer = speaker-turn segmentation (handles overlapped speech);
-# TitaNet-large = the 192-dim voiceprint embedding. Sortformer is CC BY-NC 4.0 (non-commercial),
-# TitaNet is CC BY 4.0; both download without a token.
+# under stored ones. Streaming Sortformer v2 = speaker-turn segmentation (handles overlapped
+# speech); TitaNet-large = the 192-dim voiceprint embedding. Both are CC BY 4.0 and download
+# without a token.
 #
 # Loading them checks that NeMo still has the classes their model cards name; if NeMo moves
 # them, this layer fails first.
-ARG SORTFORMER_MODEL=nvidia/diar_sortformer_4spk-v1
-ARG SORTFORMER_REVISION=2617bffbd820aa29d8f1fb6ab6f9ed7f0adbc996
+ARG SORTFORMER_MODEL=nvidia/diar_streaming_sortformer_4spk-v2
+ARG SORTFORMER_REVISION=84edd514b8ef68004c10086918cd62f2148cbd59
 ARG TITANET_MODEL=nvidia/speakerverification_en_titanet_large
 ARG TITANET_REVISION=0dc382f40121a5fbd34db10a2bb04d826c2be6a8
 RUN python3 -c "from huggingface_hub import hf_hub_download; \
