@@ -130,6 +130,15 @@ ocr-spotcheck: ## Read pictures with OCR engines side by side (list.tsv and repo
 		-v $(OCR_SPOTCHECK_CACHE):/bench-cache -e HF_HUB_CACHE=/bench-cache -w /work --entrypoint python3 $(IMAGE_NAME) \
 		scripts/bench/ocr-spotcheck.py --list $(OCR_SPOTCHECK_DIR)/list.tsv --out $(OCR_SPOTCHECK_DIR) $(OCR_SPOTCHECK_ARGS)
 
+DIARIZE_COMPARE_DIR ?= /var/tmp/diarize-compare
+# The diarizers' weights, fetched at their pinned commits and kept between runs, out of the image.
+DIARIZE_COMPARE_CACHE ?= /var/tmp/diarize-compare-cache
+diarize-compare: ## Speaker diarizers side by side (DIARIZE_COMPARE_ARGS="--truth ... --speakers ..."; results in DIARIZE_COMPARE_DIR)
+	mkdir -p $(DIARIZE_COMPARE_DIR) $(DIARIZE_COMPARE_CACHE)
+	podman run --rm $(GPU_FLAG) -v $(PWD):/work:ro -v $(FILES_PATH):/files:ro -v $(OLD_PATH):/old:ro -v $(DIARIZE_COMPARE_DIR):$(DIARIZE_COMPARE_DIR) \
+		-v $(DIARIZE_COMPARE_CACHE):/bench-cache -e HF_HUB_CACHE=/bench-cache -w /work --entrypoint python3 $(IMAGE_NAME) \
+		scripts/bench/diarize-compare.py --out $(DIARIZE_COMPARE_DIR) $(DIARIZE_COMPARE_ARGS)
+
 SHOTS_BENCH_DIR ?= /var/tmp/shots-bench
 # Asks the running EMS (video.shots) on the host's network; ffmpeg in the image cuts the strips.
 shots-bench: ## video.shots against listed cuts and clips without (report.tsv in SHOTS_BENCH_DIR)
@@ -141,4 +150,4 @@ shots-bench: ## video.shots against listed cuts and clips without (report.tsv in
 health: ## Ask the running EMS how it is
 	@curl -s -H "Authorization: Bearer $(EMS_KEY)" http://localhost:$(EMS_PORT)/v0/health | python3 -m json.tool
 
-.PHONY: help venv test serve build run stop logs shell gpu-check health whisper-coverage ocr-spotcheck shots-bench
+.PHONY: help venv test serve build run stop logs shell gpu-check health whisper-coverage ocr-spotcheck diarize-compare shots-bench

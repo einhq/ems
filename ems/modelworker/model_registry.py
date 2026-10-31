@@ -171,8 +171,10 @@ def whisper_vad_parameters() -> dict:
 WHISPER_NO_SPEECH_PROB_MAX = float(os.environ.get('CFG_WHISPER_NO_SPEECH_PROB_MAX', '0.8'))
 
 # Speaker diarization: who is talking, and between which seconds. Same baked-model rule as
-# WHISPER_MODEL (the Containerfile). Sortformer is end-to-end and handles overlapping speech.
+# WHISPER_MODEL (the Containerfile), at a pinned commit so a rebuild cannot change the turns under
+# stored ones. Sortformer is end-to-end and handles overlapping speech.
 SORTFORMER_MODEL = os.environ.get('CFG_SORTFORMER_MODEL', 'nvidia/diar_sortformer_4spk-v1')
+SORTFORMER_REVISION = os.environ.get('CFG_SORTFORMER_REVISION', '2617bffbd820aa29d8f1fb6ab6f9ed7f0adbc996')
 
 # How much audio goes into one diarization call, in seconds.
 #
@@ -186,10 +188,11 @@ SORTFORMER_MODEL = os.environ.get('CFG_SORTFORMER_MODEL', 'nvidia/diar_sortforme
 DIARIZE_WINDOW_SECONDS = float(os.environ.get('CFG_DIARIZE_WINDOW_SECONDS', '90'))
 
 # Voiceprint embedding, for matching a speech turn to a person the way a face embedding
-# matches a photo to one. Same baked-model rule as WHISPER_MODEL.
+# matches a photo to one. Same baked-model rule as WHISPER_MODEL, pinned like SORTFORMER_MODEL.
 TITANET_MODEL = os.environ.get(
     'CFG_TITANET_MODEL', 'nvidia/speakerverification_en_titanet_large',
 )
+TITANET_REVISION = os.environ.get('CFG_TITANET_REVISION', '0dc382f40121a5fbd34db10a2bb04d826c2be6a8')
 
 # 'auto' (default) puts the voiceprint model on the GPU when there is one; 'cpu' keeps it off.
 #
@@ -1518,8 +1521,19 @@ def whisper(device: str, compute_type: str):
     return _get(key, load)
 
 
+def _nemo_checkpoint(repo: str, revision: str) -> str:
+    """The path of a Hub repository's `.nemo` file at a commit, named after the repository.
+
+    The Containerfile bakes it into the Hugging Face cache; asked by commit, the cache answers
+    without the network.
+    """
+    from huggingface_hub import hf_hub_download
+
+    return hf_hub_download(repo, f"{repo.split('/')[-1]}.nemo", revision=revision)
+
+
 def sortformer(device: str):
-    """Sortformer speaker diarizer named by SORTFORMER_MODEL.
+    """Sortformer speaker diarizer named by SORTFORMER_MODEL at SORTFORMER_REVISION.
 
     Same baked-model rule as WHISPER_MODEL: this MUST match the Containerfile or the first
     diarization pulls the checkpoint at runtime, with no network guarantee. End-to-end, and it models overlapping speech rather than assuming one voice
@@ -1531,7 +1545,7 @@ def sortformer(device: str):
     def load():
         from nemo.collections.asr.models import SortformerEncLabelModel
 
-        model = SortformerEncLabelModel.from_pretrained(SORTFORMER_MODEL)
+        model = SortformerEncLabelModel.restore_from(_nemo_checkpoint(SORTFORMER_MODEL, SORTFORMER_REVISION), map_location=device)
         model.eval()
         return model.to(device)
 
@@ -1539,13 +1553,13 @@ def sortformer(device: str):
 
 
 def titanet(device: str):
-    """TitaNet speaker-verification model named by TITANET_MODEL. 192-dim embeddings."""
+    """TitaNet speaker-verification model named by TITANET_MODEL at TITANET_REVISION. 192-dim embeddings."""
     key = f"titanet:{device}"
 
     def load():
         from nemo.collections.asr.models import EncDecSpeakerLabelModel
 
-        model = EncDecSpeakerLabelModel.from_pretrained(TITANET_MODEL)
+        model = EncDecSpeakerLabelModel.restore_from(_nemo_checkpoint(TITANET_MODEL, TITANET_REVISION), map_location=device)
         model.eval()
         return model.to(device)
 
