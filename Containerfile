@@ -170,6 +170,11 @@ RUN pip uninstall -y onnxruntime \
         print('onnxruntime providers:', ps); \
         assert 'CUDAExecutionProvider' in ps, 'CPU wheel still shadows onnxruntime-gpu: %r' % (ps,)"
 
+# The models baked from here on are passed on with the image, unmodified, and some licences ask
+# something of that: CC BY and CC BY-NC a credit and a link to the licence, Apache-2.0 a copy of
+# it. notice/NOTICE.md, copied in at the end as /usr/share/doc/ein-ems/ so an edit to it rebuilds
+# no model layer, gives those and points to einhq.eu/docs/ems/#models-and-their-licences, which
+# lists every model. A model added, dropped or swapped here changes both, in the same session.
 RUN python3 -c "from insightface.app import FaceAnalysis; \
     app = FaceAnalysis(name='buffalo_l', root='/opt/insightface', providers=['CPUExecutionProvider']); \
     app.prepare(ctx_id=0, det_size=(640, 640))"
@@ -423,7 +428,8 @@ WORKDIR /opt/ems
 COPY ems ems
 COPY scripts scripts
 COPY docs docs
-COPY pyproject.toml README.md ./
+COPY pyproject.toml README.md LICENSE ./
+COPY notice /usr/share/doc/ein-ems
 
 # Compile once so the first request does not.
 RUN python3 -m compileall -q ems scripts
