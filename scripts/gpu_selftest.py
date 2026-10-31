@@ -447,6 +447,7 @@ def main() -> int:
 
     @check('NeMo diarization / voiceprint')
     def _voice():
+        import os
         import subprocess
         import tempfile
 
