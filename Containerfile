@@ -235,18 +235,29 @@ RUN pip install --no-cache-dir \
     python_speech_features
 
 # Bake the two checkpoints so the first diarize / voiceprint in a request does not pull
-# them from the Hub with no network guarantee — the same rule as WHISPER_MODEL et al. They are
-# Hub-hosted .nemo files, so NeMo fetches them into the Hugging Face cache under HF_HOME
-# (/opt/huggingface/hub/models--nvidia--…), not into a NeMo cache of its own.
-# Sortformer = speaker-turn segmentation (handles overlapped speech); TitaNet-large = the
-# 192-dim voiceprint embedding. Sortformer is CC BY-NC 4.0 (non-commercial), TitaNet is
-# CC BY 4.0; both download without a token.
+# them from the Hub with no network guarantee — the same rule as WHISPER_MODEL et al. Each is
+# one .nemo file on the Hub, named after its repository, fetched at a pinned commit into the
+# Hugging Face cache under HF_HOME (/opt/huggingface/hub/models--nvidia--…), where the worker
+# finds it by the same commit: a rebuild cannot change the speaker turns or the voiceprints
+# under stored ones. Sortformer = speaker-turn segmentation (handles overlapped speech);
+# TitaNet-large = the 192-dim voiceprint embedding. Sortformer is CC BY-NC 4.0 (non-commercial),
+# TitaNet is CC BY 4.0; both download without a token.
 #
-# Class names follow the NeMo model cards for nvidia/diar_sortformer_4spk-v1 and
-# nvidia/speakerverification_en_titanet_large; if NeMo moves them, this layer fails first.
-RUN python3 -c "from nemo.collections.asr.models import SortformerEncLabelModel, EncDecSpeakerLabelModel; \
-    SortformerEncLabelModel.from_pretrained('nvidia/diar_sortformer_4spk-v1'); \
-    EncDecSpeakerLabelModel.from_pretrained('nvidia/speakerverification_en_titanet_large')"
+# Loading them checks that NeMo still has the classes their model cards name; if NeMo moves
+# them, this layer fails first.
+ARG SORTFORMER_MODEL=nvidia/diar_sortformer_4spk-v1
+ARG SORTFORMER_REVISION=2617bffbd820aa29d8f1fb6ab6f9ed7f0adbc996
+ARG TITANET_MODEL=nvidia/speakerverification_en_titanet_large
+ARG TITANET_REVISION=0dc382f40121a5fbd34db10a2bb04d826c2be6a8
+RUN python3 -c "from huggingface_hub import hf_hub_download; \
+    from nemo.collections.asr.models import SortformerEncLabelModel, EncDecSpeakerLabelModel; \
+    nemo = lambda repo, revision: hf_hub_download(repo, repo.split('/')[-1] + '.nemo', revision=revision); \
+    SortformerEncLabelModel.restore_from(nemo('${SORTFORMER_MODEL}', '${SORTFORMER_REVISION}'), map_location='cpu'); \
+    EncDecSpeakerLabelModel.restore_from(nemo('${TITANET_MODEL}', '${TITANET_REVISION}'), map_location='cpu')"
+ENV CFG_SORTFORMER_MODEL=${SORTFORMER_MODEL}
+ENV CFG_SORTFORMER_REVISION=${SORTFORMER_REVISION}
+ENV CFG_TITANET_MODEL=${TITANET_MODEL}
+ENV CFG_TITANET_REVISION=${TITANET_REVISION}
 
 # LR-ASD (active speaker detection, IJCV 2025). MIT-licensed; the two ~3.4MB weight files are
 # committed in the repo, so there is nothing to download separately and no gate. Fetched as a

@@ -453,9 +453,14 @@ def main() -> int:
         import torch
         from nemo.collections.asr.models import EncDecSpeakerLabelModel, SortformerEncLabelModel
 
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'ems', 'modelworker'))
+        import model_registry
+
         # Loading is not the test — NeMo sits on lightning/hydra and on the same torch the
         # rest of the image uses, so what can break is an import or a kernel, not a download.
-        diarizer = SortformerEncLabelModel.from_pretrained('nvidia/diar_sortformer_4spk-v1')
+        diarizer = SortformerEncLabelModel.restore_from(
+            model_registry._nemo_checkpoint(model_registry.SORTFORMER_MODEL, model_registry.SORTFORMER_REVISION),
+        )
         diarizer.eval().to('cuda')
         device = next(diarizer.parameters()).device
         print('sortformer on:', device)
@@ -481,8 +486,8 @@ def main() -> int:
             # On the card, where `auto` runs it (ein/core#472), and on the CPU, where
             # EMS_TITANET_DEVICE=cpu and a host without a card run it. The two must agree:
             # voiceprints from either are matched against each other.
-            embedder = EncDecSpeakerLabelModel.from_pretrained(
-                'nvidia/speakerverification_en_titanet_large',
+            embedder = EncDecSpeakerLabelModel.restore_from(
+                model_registry._nemo_checkpoint(model_registry.TITANET_MODEL, model_registry.TITANET_REVISION),
             )
             vectors = {}
             for device in ('cuda', 'cpu'):
