@@ -461,6 +461,7 @@ def main() -> int:
         diarizer = SortformerEncLabelModel.restore_from(
             model_registry._nemo_checkpoint(model_registry.SORTFORMER_MODEL, model_registry.SORTFORMER_REVISION),
         )
+        model_registry.set_streaming(diarizer)
         diarizer.eval().to('cuda')
         device = next(diarizer.parameters()).device
         print('sortformer on:', device)

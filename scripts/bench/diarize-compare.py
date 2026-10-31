@@ -6,8 +6,8 @@ the windows stitched by voiceprint (ems/ops/_voices.py), touching turns merged a
 one pooled voiceprint per speaker — so what is compared is what the archive would store
 (ein/core#841). The diarizers:
 
-- `v1`: `diar_sortformer_4spk-v1` in DIARIZE_WINDOW_SECONDS windows, as EMS runs it;
-- `v2-window`: `diar_streaming_sortformer_4spk-v2` in the same windows;
+- `v1`: `diar_sortformer_4spk-v1` in DIARIZE_WINDOW_SECONDS windows, the offline model before it;
+- `v2-window`: `diar_streaming_sortformer_4spk-v2` in the same windows, as EMS runs it;
 - `v2`: the streaming model over the whole file in one call; its speaker cache carries the
   speakers across the file, so there is one window and nothing to stitch.
 
@@ -90,7 +90,7 @@ def diarizer(version: str):
         from nemo.collections.asr.models import SortformerEncLabelModel
 
         repo, revision = MODELS[version]
-        model = SortformerEncLabelModel.restore_from(nemo_file(repo, revision), map_location="cuda", strict=False)
+        model = SortformerEncLabelModel.restore_from(nemo_file(repo, revision), map_location="cuda")
         model.eval()
         if version == "v2":
             for key, value in STREAMING.items():
