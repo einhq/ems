@@ -149,6 +149,43 @@ def test_htr_set_to_the_cpu_stays_there(monkeypatch):
     assert registry.htr_device() == "cpu"
 
 
+def test_making_room_unloads_only_what_it_needs_least_recently_used_first(monkeypatch):
+    free = [1200.0]
+    _crawl(monkeypatch, free)
+    now = registry.time.time()
+    registry._cache.update({"sscd:cuda": object(), "insightface": object()})
+    registry._last_used.update({"siglip-visual:cuda": now - 5, "sscd:cuda": now - 20, "insightface": now - 1})
+    monkeypatch.setattr(registry, "_devices", {"insightface": "cuda"})
+    monkeypatch.setattr(registry, "_own_card_mb", lambda: None)     # free memory alone decides
+    assert registry.htr_device() == "cuda"
+    # sscd's 2600 MB here are enough: siglip-visual and the faces stay for their next request.
+    assert "sscd:cuda" not in registry._cache
+    assert "siglip-visual:cuda" in registry._cache and "insightface" in registry._cache
+
+
+def test_the_english_transcriber_reads_on_the_cpu_rather_than_unload_the_main_one(monkeypatch):
+    free = [1200.0]
+    _crawl(monkeypatch, free)
+    monkeypatch.setattr(registry, "HTR_EN_DEVICE", "auto")
+    registry._cache["htr:cuda"] = object()
+    registry._last_used["htr:cuda"] = 0.0          # idle long past the grace
+    registry._last_used["siglip-visual:cuda"] = registry.time.time()
+    assert registry.htr_device("htr-en") == "cpu"
+    assert "htr:cuda" in registry._cache and "siglip-visual:cuda" in registry._cache
+
+
+def test_the_english_transcriber_takes_the_card_from_families_idle_past_the_grace(monkeypatch):
+    free = [1200.0]
+    _crawl(monkeypatch, free)
+    monkeypatch.setattr(registry, "HTR_EN_DEVICE", "auto")
+    registry._cache["htr-en:cpu"] = object()
+    registry._last_used["htr-en:cpu"] = registry.time.time()
+    registry._last_used["siglip-visual:cuda"] = 0.0
+    assert registry.htr_device("htr-en") == "cuda"
+    assert "siglip-visual:cuda" not in registry._cache
+    assert "htr-en:cpu" not in registry._cache     # its CPU copy is unloaded for the card's
+
+
 def _crowded_card(monkeypatch):
     """A card whose room only an idle siglip-visual, used long ago, can give; unloading it frees 2600 MB."""
     free = [600.0]
