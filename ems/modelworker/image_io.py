@@ -6,7 +6,8 @@ HEIC travels all the way to the model call before failing, as `cannot identify i
 
 Two packages close it:
 
-  - **pillow-heif** registers a HEIF opener into PIL, so `.heic` behaves like any other file.
+  - **pi-heif** (pillow-heif without its encoders) registers a HEIF opener into PIL, so `.heic`
+    behaves like any other file.
   - **rawpy** (LibRaw) reads RAW. `extract_thumb()` returns the embedded full-size JPEG — the
     same image the out-of-process path (ems/tools/decode.py) pulls with exiftool, and the one
     whose dimensions match what exiftool reports for the file, since those come from the
@@ -20,13 +21,13 @@ cannot identify. A format table here would be one more list of RAW formats, free
 
   - **RAW comes back unrotated.** rawpy hands over the embedded preview as stored — a RAF
     tagged `Rotate 270 CW` opens landscape.
-  - **HEIF comes back rotated.** pillow-heif *is* libheif, and it applies the container's
+  - **HEIF comes back rotated.** pi-heif *is* libheif, and it applies the container's
     `irot`/`imir` on decode: a 4032x3024 file opens 3024x4032. It also rewrites the
     EXIF orientation to 1 and keeps no record of what it did — there is no
     `original_orientation`, and no option to turn the transform off.
 
 So HEIF arrives already in the display frame and everything else arrives in the stored frame.
-That difference is *not* resolved here, because it cannot be: pillow-heif rewrites the EXIF
+That difference is *not* resolved here, because it cannot be: pi-heif rewrites the EXIF
 orientation to 1 and keeps no record of what it applied, so the rotation it did is unrecoverable
 from this side. The caller passes a **residual** angle instead — what the display frame needs minus
 what the decoder already did, worked out where the file's own tag can still be read. In the
@@ -55,7 +56,7 @@ def _register_heif() -> None:
         return
     _heif_registered = True
     try:
-        from pillow_heif import register_heif_opener
+        from pi_heif import register_heif_opener
         register_heif_opener()
     except ImportError:
         pass

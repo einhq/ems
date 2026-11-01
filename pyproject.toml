@@ -14,7 +14,7 @@ dependencies = [
 # reasons for each are written beside the RUN lines.
 tools = [
   "Pillow",
-  "pillow-heif",
+  "pi-heif",
   "rawpy",
   "pypdfium2",
   "python-docx",

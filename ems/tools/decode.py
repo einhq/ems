@@ -1,6 +1,6 @@
 """Formats the model readers cannot open, decoded into something they can.
 
-PIL with pillow-heif and rawpy reads almost everything the archive holds; this is the fallback
+PIL with pi-heif and rawpy reads almost everything the archive holds; this is the fallback
 for the rest, and for a running EMS whose readers turn out to be missing a format. It runs only
 when the reader has said it could not identify the file.
 

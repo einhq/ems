@@ -62,7 +62,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libimage-exiftool-perl \
     imagemagick \
     libheif-plugin-aomenc \
-    ffmpeg \
     libchromaprint-tools \
     curl \
     xz-utils \
@@ -130,7 +129,7 @@ RUN pip install --no-cache-dir \
     nvidia-cublas-cu12 \
     opencv-python-headless \
     Pillow \
-    pillow-heif \
+    pi-heif \
     rawpy \
     pypdfium2 \
     python-docx \
@@ -398,7 +397,11 @@ ENV CFG_HTR_EN_ROOT=/opt/htr/trocr-large-handwritten
 # The language of read text (text_language.py): lingua, every language's models in its wheel. ~290 MB.
 RUN pip install --no-cache-dir lingua-language-detector==2.2.0
 
-# ffmpeg 9.0.1, from BtbN's static builds, shadowing the distro package on PATH.
+# ffmpeg 9.0.1, from BtbN's static LGPL builds. The image installs no distro ffmpeg.
+#
+# The LGPL build, not the GPL one: EMS encodes AV1 only, so it needs none of what --enable-gpl
+# adds (libx264, libx265, xvid and GPL-only filters such as vidstab, frei0r and hqdn3d, none of
+# which EMS calls), and an image carrying GPL binaries would have to carry their source too.
 #
 # The base image cannot supply this: Debian stable (trixie) carries ffmpeg 7.1.x, 8.1 is only in
 # sid and 9.0 only in experimental — so no base-image bump gets us here, and apt-pinning
@@ -411,23 +414,24 @@ RUN pip install --no-cache-dir lingua-language-detector==2.2.0
 # This follows upstream's n9.0 release branch, not git master. Pin via the dated release tag,
 # whose asset name records the exact release-branch commit; the `latest` tag's `n9.0-latest`
 # asset is a moving target. BtbN keeps only month-end dated builds long-term, so prefer one of
-# those whenever the branch has one, or return to the distro package once backports ships 9.x.
+# those whenever the branch has one. Debian's own ffmpeg is a GPL build, so it is no way back.
 #
 # HOST DRIVER REQUIREMENT: this build wants nvenc API 13.1, i.e. **NVIDIA driver >= 610.00**.
 # On an older driver EVERY nvenc encoder fails to open with "Driver does not support the
-# required nvenc API version", even where the distro ffmpeg encodes. Nothing breaks (the
+# required nvenc API version", even where Debian's ffmpeg would encode. Nothing breaks (the
 # transcode falls back to the CPU chain) but the GPU encode is silently unused, so check
 # `make gpu-check` after any driver change.
 #
-# The distro ffmpeg stays installed and PATH decides which one runs: the tools are spawned by
-# name (ems/tools/run.py), so one PATH entry keeps every caller on the same binary.
+# The tools are spawned by name (ems/tools/run.py), so one PATH entry keeps every caller on this
+# binary.
 ARG FFMPEG_BUILD=autobuild-2026-08-31-13-27
-ARG FFMPEG_ASSET=ffmpeg-n9.0.1-11-ge47273f4d9-linux64-gpl-9.0
+ARG FFMPEG_ASSET=ffmpeg-n9.0.1-11-ge47273f4d9-linux64-lgpl-9.0
 RUN curl -fsSL "https://github.com/BtbN/FFmpeg-Builds/releases/download/${FFMPEG_BUILD}/${FFMPEG_ASSET}.tar.xz" \
     | tar -xJ -C /opt \
     && mv "/opt/${FFMPEG_ASSET}" /opt/ffmpeg \
     && rm -f /opt/ffmpeg/bin/ffplay \
-    && /opt/ffmpeg/bin/ffmpeg -hide_banner -filters | grep -q transpose_cuda
+    && /opt/ffmpeg/bin/ffmpeg -hide_banner -filters | grep -q transpose_cuda \
+    && ! /opt/ffmpeg/bin/ffmpeg -hide_banner -buildconf | grep -q -- --enable-gpl
 ENV PATH="/opt/ffmpeg/bin:$PATH"
 
 # ── EMS ─────────────────────────────────────────────────────────────────────────────────────

@@ -5,7 +5,7 @@ This is the fact the display-frame convention (docs/api.md §3.3) rests on for t
 the caller states the turn owed and EMS applies only that, so a wrong or stale tag cannot make
 two ops disagree. ImageMagick, by contrast, applies the `irot` (and only the `irot`).
 
-Needs ImageMagick with an AVIF encoder, exiftool, pillow-heif and numpy, so it runs in the
+Needs ImageMagick with an AVIF encoder, exiftool, pi-heif and numpy, so it runs in the
 container and skips elsewhere.
 """
 
@@ -32,7 +32,7 @@ def _avif_encoder_present() -> bool:
 def _readers_present() -> bool:
     try:
         import numpy  # noqa: F401
-        import pillow_heif  # noqa: F401
+        import pi_heif  # noqa: F401
     except ImportError:
         return False
     return True
@@ -40,7 +40,7 @@ def _readers_present() -> bool:
 
 needs = pytest.mark.skipif(
     not (_avif_encoder_present() and shutil.which("exiftool") and _readers_present()),
-    reason="needs ImageMagick with AVIF, exiftool, pillow-heif and numpy (the container has them)",
+    reason="needs ImageMagick with AVIF, exiftool, pi-heif and numpy (the container has them)",
 )
 
 

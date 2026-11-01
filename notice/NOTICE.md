@@ -47,3 +47,24 @@ The licence's text is Apache-2.0, beside this file.
   /opt/transnet
 
 The Python packages in /opt/venv carry their own licences in their dist-info folders.
+
+## Under the GPL
+
+The image's ffmpeg, in /opt/ffmpeg, is BtbN's LGPL build of FFmpeg 9.0.1
+(https://github.com/BtbN/FFmpeg-Builds, its build ffmpeg-n9.0.1-11-ge47273f4d9-linux64-lgpl-9.0);
+its source is that tag's FFmpeg, https://github.com/FFmpeg/FFmpeg/tree/e47273f4d9, and BtbN's
+scripts. Two parts of the image carry GPL code all the same, and this is where the source of each
+is:
+
+- The Debian packages under /usr: the image is built on Debian 13 (trixie) and carries its
+  packages unmodified. `dpkg-query -W` in the image lists each with its version; its source is
+  Debian's, at https://sources.debian.org/ and, for the exact version, at
+  https://snapshot.debian.org/. Among them are libavcodec61 and its siblings (FFmpeg 7.1.5,
+  7:7.1.5-0+deb13u1), libx264-164, libx265-215, libxvidcore4 and libpostproc58, which
+  chromaprint's fpcalc links; EMS uses fpcalc to fingerprint audio.
+- PyAV 18.1.0, in /opt/venv (av.libs), which faster-whisper decodes audio with. Its wheel bundles
+  FFmpeg 8.1.2 built with x264 and x265, as PyAV's own build publishes it; the source is PyAV's,
+  https://pypi.org/project/av/18.1.0/#files, and its FFmpeg build's,
+  https://github.com/PyAV-Org/pyav-ffmpeg.
+
+The image modifies none of them.
