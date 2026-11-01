@@ -1256,7 +1256,7 @@ def _wait_for_card(family: str, keep: tuple[str, ...] = ()) -> None:
     with _lock:
         if any(_family_of(key) == family and _device_of(key) == "cuda" for key in _cache):
             return
-    why = _short_of_room(family)
+    why = _short_of_room(family, keep=keep)
     if why is not None:
         why = _short_of_room(family, max_idle=0, keep=keep)
     if why is not None:
@@ -1443,11 +1443,11 @@ def htr_device(family: str = "htr") -> str:
     picture needs first. A card too small ever to hold it means the CPU. Runs on the transcriber's
     own model thread, like `place`.
 
-    That is the main transcriber's way, the first in HTR_LANGUAGES. Any other takes the card only
-    from families idle past the grace, never from the main one, and reads on the CPU otherwise,
-    with the same weights: on fry it had a twentieth of the pictures, and each of them unloaded the
-    main transcriber or the faces for a load of ~45 s, which the next picture paid again
-    (ein/core#777)."""
+    Any other transcriber than the main one, the first in HTR_LANGUAGES, waits for the card too,
+    and unloads the main one only when nothing else gives it room: on fry it had a twentieth of
+    the pictures, and each of them that unloaded the main transcriber cost a load of ~45 s, which
+    the next picture paid again (ein/core#777). On the CPU beside a crawl it took up to 30 min a
+    page, and the model server's CPU it held stalled every other kind (ein/core#851)."""
     setting = _HTR[family][1]()
     if setting in ("cpu", "cuda"):
         return setting
@@ -1457,17 +1457,12 @@ def htr_device(family: str = "htr") -> str:
     if total is not None and total - CUDA_CONTEXT_MB < CARD_NEED_MB[family]:
         return "cpu"
     main = next(iter(HTR_LANGUAGES))
-    if family == main:
+    try:
+        _wait_for_card(family, keep=("ocr",) if family == main else ("ocr", main))
+    except CardBusy:
+        if family == main:
+            raise
         _wait_for_card(family, keep=("ocr",))
-        return "cuda"
-    with _lock:
-        if any(_family_of(key) == family and _device_of(key) == "cuda" for key in _cache):
-            return "cuda"
-    why = _short_of_room(family, keep=("ocr", main))
-    if why is not None:
-        print(f"[model-server] {family}: {why} — on the CPU", file=sys.stderr, flush=True)
-        return "cpu"
-    forget_copies(family, "cpu")
     return "cuda"
 
 

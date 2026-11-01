@@ -163,27 +163,43 @@ def test_making_room_unloads_only_what_it_needs_least_recently_used_first(monkey
     assert "siglip-visual:cuda" in registry._cache and "insightface" in registry._cache
 
 
-def test_the_english_transcriber_reads_on_the_cpu_rather_than_unload_the_main_one(monkeypatch):
+def test_the_english_transcriber_makes_room_from_other_families_before_the_main_one(monkeypatch):
     free = [1200.0]
     _crawl(monkeypatch, free)
+    monkeypatch.setattr(registry, "_own_card_mb", lambda: None)     # free memory alone decides
+    monkeypatch.setattr(registry, "HTR_EN_DEVICE", "auto")
+    now = registry.time.time()
+    registry._cache["htr:cuda"] = object()
+    registry._last_used["htr:cuda"] = now - 60     # used longer ago than siglip-visual
+    registry._last_used["siglip-visual:cuda"] = now
+    assert registry.htr_device("htr-en") == "cuda"
+    assert "htr:cuda" in registry._cache and "siglip-visual:cuda" not in registry._cache
+
+
+def test_the_english_transcriber_unloads_the_main_one_when_nothing_else_gives_room(monkeypatch):
+    free = [1200.0]
+    _crawl(monkeypatch, free)
+    monkeypatch.setattr(registry, "_own_card_mb", lambda: None)     # free memory alone decides
     monkeypatch.setattr(registry, "HTR_EN_DEVICE", "auto")
     registry._cache["htr:cuda"] = object()
-    registry._last_used["htr:cuda"] = 0.0          # idle long past the grace
-    registry._last_used["siglip-visual:cuda"] = registry.time.time()
-    assert registry.htr_device("htr-en") == "cpu"
-    assert "htr:cuda" in registry._cache and "siglip-visual:cuda" in registry._cache
+    registry._last_used["htr:cuda"] = registry.time.time()
+    lock = registry.FamilyLock()
+    registry._family_locks["siglip-visual"] = lock
+    with lock:
+        assert registry.htr_device("htr-en") == "cuda"
+    assert "htr:cuda" not in registry._cache and "siglip-visual:cuda" in registry._cache
 
 
-def test_the_english_transcriber_takes_the_card_from_families_idle_past_the_grace(monkeypatch):
+def test_the_english_transcriber_waits_for_the_card_rather_than_go_to_the_cpu(monkeypatch):
     free = [1200.0]
     _crawl(monkeypatch, free)
     monkeypatch.setattr(registry, "HTR_EN_DEVICE", "auto")
-    registry._cache["htr-en:cpu"] = object()
-    registry._last_used["htr-en:cpu"] = registry.time.time()
-    registry._last_used["siglip-visual:cuda"] = 0.0
-    assert registry.htr_device("htr-en") == "cuda"
-    assert "siglip-visual:cuda" not in registry._cache
-    assert "htr-en:cpu" not in registry._cache     # its CPU copy is unloaded for the card's
+    lock = registry.FamilyLock()
+    registry._family_locks["siglip-visual"] = lock
+    with lock:
+        with pytest.raises(registry.CardBusy, match="htr-en waits for the card"):
+            registry.htr_device("htr-en")
+    assert "ocr:cuda" in registry._cache and "siglip-visual:cuda" in registry._cache
 
 
 def _crowded_card(monkeypatch):
