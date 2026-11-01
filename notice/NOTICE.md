@@ -4,7 +4,7 @@ EMS's own code is under the MIT licence, in /opt/ems/LICENSE. The image
 also carries models and tools made by others, each under its own licence. Every one of them, its
 maker, its model card and its licence, is listed at
 
-https://einhq.eu/docs/ems/#models-and-their-licences
+https://einhq.eu/docs/ems/#models-tools-and-their-licences
 
 which EiN also shows offline, among its docs.
 
@@ -35,8 +35,6 @@ The licence's text is Apache-2.0, beside this file.
 
 - Google's SigLIP 2 So400m/16-384, as Immich exports it,
   https://huggingface.co/immich-app/ViT-SO400M-16-SigLIP2-384__webli, in /opt/image-embed
-- Qwen3-0.6B-Base, https://huggingface.co/Qwen/Qwen3-0.6B-Base, which jina-embeddings-v5-text-small
-  is built on
 - PaddleOCR's PP-OCRv6, https://github.com/PaddlePaddle/PaddleOCR, as RapidOCR publishes it, in
   /opt/ocr
 - The National Archives of Finland's multicentury-ppocrv6-medium,

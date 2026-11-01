@@ -12,7 +12,7 @@ It is a keyed service on identically mounted volumes, and it keeps no cache: the
 caller decides where results live.
 
 EMS's code is MIT; the models and tools in its image are under their own licences,
-listed in [Models and their licences](https://einhq.eu/docs/ems/#models-and-their-licences).
+listed in [Models, tools and their licences](https://einhq.eu/docs/ems/#models-tools-and-their-licences).
 The image carries [notice/NOTICE.md](notice/NOTICE.md), the credits and licence
 texts they ask for, as `/usr/share/doc/ein-ems/NOTICE.md`.
 

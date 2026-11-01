@@ -172,7 +172,7 @@ RUN pip uninstall -y onnxruntime \
 # The models baked from here on are passed on with the image, unmodified, and some licences ask
 # something of that: CC BY and CC BY-NC a credit and a link to the licence, Apache-2.0 a copy of
 # it. notice/NOTICE.md, copied in at the end as /usr/share/doc/ein-ems/ so an edit to it rebuilds
-# no model layer, gives those and points to einhq.eu/docs/ems/#models-and-their-licences, which
+# no model layer, gives those and points to einhq.eu/docs/ems/#models-tools-and-their-licences, which
 # lists every model. A model added, dropped or swapped here changes both, in the same session.
 RUN python3 -c "from insightface.app import FaceAnalysis; \
     app = FaceAnalysis(name='buffalo_l', root='/opt/insightface', providers=['CPUExecutionProvider']); \
@@ -377,10 +377,10 @@ RUN python3 -c "from huggingface_hub import snapshot_download; \
     && test -s /opt/htr/multicentury-htr-model/pytorch_model.bin
 ENV CFG_HTR_ROOT=/opt/htr/multicentury-htr-model
 
-# The English handwriting transcriber (htr.py): Microsoft's TrOCR-large fine-tuned on IAM, at a pinned
+# The English handwriting transcriber (htr.py): Microsoft's TrOCR large handwritten, at a pinned
 # revision. Its RoBERTa tokenizer comes as vocab.json and merges.txt, which transformers 5 turns into
 # a fast tokenizer only through sentencepiece; it is written out as tokenizer.json here instead. The
-# model card names no licence (TrOCR's code is MIT; IAM's terms are non-commercial research). ~2.2 GB.
+# model card names no licence for the weights; TrOCR's code is MIT. ~2.2 GB.
 ARG HTR_EN_MODEL=microsoft/trocr-large-handwritten
 ARG HTR_EN_REVISION=e68501f437cd2587ae5d68ee457964cac824ddee
 RUN python3 -c "from huggingface_hub import snapshot_download; \
