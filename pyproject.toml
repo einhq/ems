@@ -16,7 +16,7 @@ tools = [
   "Pillow",
   "pillow-heif",
   "rawpy",
-  "PyMuPDF",
+  "pypdfium2",
   "python-docx",
   "odfpy",
 ]

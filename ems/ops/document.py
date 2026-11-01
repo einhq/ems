@@ -1,6 +1,6 @@
 """`document.extract` — the text of a PDF, DOCX, ODT, picture or plain-text file.
 
-A scanned PDF has no text layer, so `get_text()` returns "" for every page and the document
+A scanned PDF has no text layer, so its text layer is "" for every page and the document
 would be indexed as empty — no error, simply never findable. `ocr: auto` rasterizes any page
 that yields (almost) nothing and reads it with the text reader, the model family `ocr` behind
 `ocr.read` (PP-OCRv6); `always` reads every page; `never` reads only the text layer. A picture is
@@ -37,8 +37,7 @@ MAX_OCR_PAGES = int(os.environ.get("EMS_OCR_MAX_PAGES", "40"))
 # costs no imports; deliberately narrow — anything unrecognised stays transient and loud.
 PERMANENT_ERRORS = frozenset([
     "PIL.UnidentifiedImageError",
-    "pymupdf.FileDataError",
-    "pymupdf.EmptyFileError",
+    "pypdfium2._helpers.misc.PdfiumError",
     "zipfile.BadZipFile",
 ])
 
@@ -53,10 +52,16 @@ def is_permanent(exc: Exception) -> bool:
     return f"{type(exc).__module__}.{type(exc).__name__}" in PERMANENT_ERRORS
 
 
-def _pixmap_png(page) -> bytes:
-    import fitz
+def _render_png(page, path: str) -> None:
+    page.render(scale=OCR_DPI / 72).to_pil().save(path, "PNG")
 
-    return page.get_pixmap(matrix=fitz.Matrix(OCR_DPI / 72, OCR_DPI / 72)).tobytes("png")
+
+def _page_text(page) -> str:
+    textpage = page.get_textpage()
+    try:
+        return textpage.get_text_range().strip()
+    finally:
+        textpage.close()
 
 
 class Reader:
@@ -74,16 +79,14 @@ class Reader:
         return str(raw.get("text") or "").strip()
 
 
-async def _ocr_page(page, reader: Reader, scratch: str) -> str:
+async def _ocr_page(page, number: int, reader: Reader, scratch: str) -> str:
     """A page rasterized and read. A page the reader cannot open has no text; a reader that is
     busy or down fails the request, so the document is not stored as empty."""
+    source = os.path.join(scratch, f"page-{number}.png")
     try:
-        png = await asyncio.to_thread(_pixmap_png, page)
+        await asyncio.to_thread(_render_png, page, source)
     except Exception:  # noqa: BLE001 - a page that will not render has no text to read
         return ""
-    source = os.path.join(scratch, f"page-{page.number}.png")
-    with open(source, "wb") as handle:
-        handle.write(png)
     try:
         return await reader.read(source, "image/png", 0, False)
     except EmsError as exc:
@@ -98,21 +101,25 @@ async def _ocr_page(page, reader: Reader, scratch: str) -> str:
 
 
 async def extract_pdf(path: str, ocr: str, reader: Reader, scratch: str) -> tuple[str, int, str]:
-    import fitz
+    import pypdfium2
 
-    doc = await asyncio.to_thread(fitz.open, path)
+    doc = await asyncio.to_thread(pypdfium2.PdfDocument, path)
     pages = len(doc)
     parts: list[str] = []
     ocr_pages = 0
     try:
-        for page in doc:
-            text = (await asyncio.to_thread(page.get_text)).strip() if ocr != "always" else ""
-            wants_ocr = ocr == "always" or (ocr == "auto" and len(text) < MIN_PAGE_TEXT_CHARS)
-            if wants_ocr and ocr_pages < MAX_OCR_PAGES:
-                recognised = await _ocr_page(page, reader, scratch)
-                if len(recognised) > len(text):
-                    text = recognised
-                    ocr_pages += 1
+        for number in range(pages):
+            page = doc[number]
+            try:
+                text = await asyncio.to_thread(_page_text, page) if ocr != "always" else ""
+                wants_ocr = ocr == "always" or (ocr == "auto" and len(text) < MIN_PAGE_TEXT_CHARS)
+                if wants_ocr and ocr_pages < MAX_OCR_PAGES:
+                    recognised = await _ocr_page(page, number, reader, scratch)
+                    if len(recognised) > len(text):
+                        text = recognised
+                        ocr_pages += 1
+            finally:
+                page.close()
             if text:
                 parts.append(text)
     finally:

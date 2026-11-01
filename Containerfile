@@ -132,7 +132,7 @@ RUN pip install --no-cache-dir \
     Pillow \
     pillow-heif \
     rawpy \
-    PyMuPDF \
+    pypdfium2 \
     python-docx \
     odfpy \
     transformers==5.16.1 \

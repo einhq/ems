@@ -37,12 +37,12 @@ async def test_ocr_never_reads_no_picture(client, fake_worker, roots):
 
 def _scanned_pdf(path, pages: int):
     """A PDF whose pages are pictures with no text layer, as a scanner writes one."""
-    fitz = pytest.importorskip("fitz")
-    doc = fitz.open()
-    for _ in range(pages):
-        page = doc.new_page(width=200, height=200)
-        page.draw_rect(fitz.Rect(20, 20, 180, 60), color=(0, 0, 0), fill=(0.2, 0.2, 0.2))
-    doc.save(str(path))
+    pytest.importorskip("pypdfium2")
+    image = pytest.importorskip("PIL.Image")
+    scans = [image.new("L", (200, 200), 255) for _ in range(pages)]
+    for scan in scans:
+        scan.paste(50, (20, 20, 180, 60))
+    scans[0].save(str(path), "PDF", save_all=True, append_images=scans[1:])
 
 
 async def test_a_scanned_pdf_is_read_page_by_page(client, fake_worker, roots):
@@ -67,3 +67,11 @@ async def test_a_busy_reader_fails_the_document_rather_than_store_it_empty(clien
     fake_worker.on("read_text", busy)
     body = (await client.post("/v0/document/extract", json={"file": {"path": str(ro / "scan.pdf"), "mimetype": "application/pdf"}})).json()
     assert body["ok"] is False and body["error"]["permanent"] is False
+
+
+async def test_a_broken_pdf_fails_permanently(client, roots):
+    pytest.importorskip("pypdfium2")
+    ro, _ = roots
+    (ro / "broken.pdf").write_bytes(b"%PDF-1.4 not really")
+    body = (await client.post("/v0/document/extract", json={"file": {"path": str(ro / "broken.pdf"), "mimetype": "application/pdf"}})).json()
+    assert body["ok"] is False and body["error"]["permanent"] is True
