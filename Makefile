@@ -115,39 +115,7 @@ shell: ## A bash shell inside the running container
 gpu-check: ## Real inference on every model inside the running container (what device each bound to)
 	podman exec $(CONTAINER_NAME) python3 scripts/gpu_selftest.py $(GPU_CHECK_ARGS)
 
-# The whisper diagnostic, run against the image with the archive mounted read-only at the same
-# paths the service sees (/files with its symlinks into /old).
-whisper-coverage: ## Compare whisper decodes (WHISPER_COVERAGE_ARGS="--file /files/..." or "--sweep --file ... --silent ...")
-	podman run --rm $(GPU_FLAG) -v $(PWD):/work:ro -v $(FILES_PATH):/files:ro -v $(OLD_PATH):/old:ro -w /work --entrypoint python3 $(IMAGE_NAME) \
-		scripts/bench/whisper-coverage.py $(WHISPER_COVERAGE_ARGS)
-
-OCR_SPOTCHECK_DIR ?= /var/tmp/ocr-spotcheck
-# Weights a bench engine fetches (PaddleOCR-VL), kept between runs and out of the image.
-OCR_SPOTCHECK_CACHE ?= /var/tmp/ocr-spotcheck-cache
-ocr-spotcheck: ## Read pictures with OCR engines side by side (list.tsv and report.html in OCR_SPOTCHECK_DIR)
-	mkdir -p $(OCR_SPOTCHECK_DIR) $(OCR_SPOTCHECK_CACHE)
-	podman run --rm $(GPU_FLAG) -v $(PWD):/work:ro -v $(FILES_PATH):/files:ro -v $(OLD_PATH):/old:ro -v $(OCR_SPOTCHECK_DIR):$(OCR_SPOTCHECK_DIR) \
-		-v $(OCR_SPOTCHECK_CACHE):/bench-cache -e HF_HUB_CACHE=/bench-cache -w /work --entrypoint python3 $(IMAGE_NAME) \
-		scripts/bench/ocr-spotcheck.py --list $(OCR_SPOTCHECK_DIR)/list.tsv --out $(OCR_SPOTCHECK_DIR) $(OCR_SPOTCHECK_ARGS)
-
-DIARIZE_COMPARE_DIR ?= /var/tmp/diarize-compare
-# The diarizers' weights, fetched at their pinned commits and kept between runs, out of the image.
-DIARIZE_COMPARE_CACHE ?= /var/tmp/diarize-compare-cache
-diarize-compare: ## Speaker diarizers side by side (DIARIZE_COMPARE_ARGS="--truth ... --speakers ..."; results in DIARIZE_COMPARE_DIR)
-	mkdir -p $(DIARIZE_COMPARE_DIR) $(DIARIZE_COMPARE_CACHE)
-	podman run --rm $(GPU_FLAG) -v $(PWD):/work:ro -v $(FILES_PATH):/files:ro -v $(OLD_PATH):/old:ro -v $(DIARIZE_COMPARE_DIR):$(DIARIZE_COMPARE_DIR) \
-		-v $(DIARIZE_COMPARE_CACHE):/bench-cache -e HF_HUB_CACHE=/bench-cache -w /work --entrypoint python3 $(IMAGE_NAME) \
-		scripts/bench/diarize-compare.py --out $(DIARIZE_COMPARE_DIR) $(DIARIZE_COMPARE_ARGS)
-
-SHOTS_BENCH_DIR ?= /var/tmp/shots-bench
-# Asks the running EMS (video.shots) on the host's network; ffmpeg in the image cuts the strips.
-shots-bench: ## video.shots against listed cuts and clips without (report.tsv in SHOTS_BENCH_DIR)
-	mkdir -p $(SHOTS_BENCH_DIR)
-	podman run --rm --network=host -e EMS_KEY=$(EMS_KEY) -e EMS_PORT=$(EMS_PORT) -v $(PWD):/work:ro -v $(FILES_PATH):/files:ro -v $(OLD_PATH):/old:ro \
-		-v $(VOLATILE_PATH):/files-volatile:ro -v $(SHOTS_BENCH_DIR):$(SHOTS_BENCH_DIR) -w /work --entrypoint python3 $(IMAGE_NAME) \
-		scripts/bench/shots-bench.py --out $(SHOTS_BENCH_DIR) $(SHOTS_BENCH_ARGS)
-
 health: ## Ask the running EMS how it is
 	@curl -s -H "Authorization: Bearer $(EMS_KEY)" http://localhost:$(EMS_PORT)/v0/health | python3 -m json.tool
 
-.PHONY: help venv test serve build run stop logs shell gpu-check health whisper-coverage ocr-spotcheck diarize-compare shots-bench
+.PHONY: help venv test serve build run stop logs shell gpu-check health

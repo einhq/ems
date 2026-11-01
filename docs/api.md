@@ -400,9 +400,9 @@ Where a video cuts from one shot to the next: the starts of its chapters.
     distance of median 8×8×8 RGB histograms), which a flash or a flicker does not;
   - cuts under `merge` seconds apart are one, the stronger;
   - no shot is shorter than `min_shot` seconds: the weaker cut of a short one goes.
-- The defaults are the ones measured on the archive's own film and tape transfers and phone clips
-  (`scripts/bench/shots-bench.py`): every cut of an edited 8 mm transfer, frame-exact, and none
-  on 26 of 28 phone clips.
+- The defaults are the ones measured on the archive's own film and tape transfers and phone clips,
+  with a bench kept in EiN's way-of-working repository: every cut of an edited 8 mm transfer,
+  frame-exact, and none on 26 of 28 phone clips.
 - Without a card the CPU decodes the file only when the whole decode fits the CPU budget a
   transcode is held to (§4.6); a file over it is **`refused`**, permanent at that budget.
 
