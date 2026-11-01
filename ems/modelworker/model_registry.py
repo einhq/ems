@@ -29,7 +29,7 @@ os.environ.setdefault('ORT_LOGGING_LEVEL', '3')
 #
 # Long enough that a working crawl never evicts — a cold load costs more than the memory it frees
 # for a moment — and short enough that a machine left alone overnight gives the card back. VRAM
-# pressure is handled by measurement rather than by a clock: `reset_insightface_if_low` releases
+# pressure is handled by measurement rather than by a clock: `reset_faces_if_low` releases
 # onnxruntime's arenas, and a family that does not fit the card runs on the CPU (`place`).
 IDLE_EVICT_SECONDS = float(os.environ.get('CFG_MODEL_IDLE_EVICT', '21600'))
 
@@ -227,13 +227,20 @@ LR_ASD_WEIGHTS = os.environ.get('CFG_LR_ASD_WEIGHTS', 'finetuning_TalkSet.model'
 # about 40x faster at it than the CPU.
 LR_ASD_DEVICE = os.environ.get('CFG_LR_ASD_DEVICE', 'auto')
 
-# Ceiling for InsightFace's onnxruntime CUDA arena. Group photos are the driver — det_size is
-# fixed but the recognition batch scales with the number of faces — and half this exhausts the
-# arena mid-inference ("Available memory of … is smaller than requested bytes of …"). 6144
-# leaves room on a 16GB card for the embedders and the CUDA contexts. See insightface() for why
-# a ceiling is needed at all.
-INSIGHTFACE_GPU_MEM_LIMIT_BYTES = int(
-    os.environ.get('CFG_INSIGHTFACE_GPU_MEM_MB', '6144')
+# The face models (face_models.py): RetinaFace's and TransFace's ONNX files, baked by the
+# Containerfile into FACES_ROOT and checked there against their sha256.
+FACES_ROOT = os.environ.get('CFG_FACES_ROOT', '/opt/faces')
+FACE_DETECTOR_FILE = 'retinaface_r34.onnx'
+FACE_RECOGNISER_FILE = 'transface.onnx'
+# What the faces ops write as their producer; a change is a re-detection of every file for the caller.
+FACES_MODEL = 'retinaface-r34+transface'
+# 'auto' (default) puts the family on the card when it has room, 'cpu' keeps it off.
+FACES_DEVICE = os.environ.get('CFG_FACES_DEVICE', 'auto')
+
+# Ceiling for each face model's onnxruntime CUDA arena, a backstop well above the ~1-2 GB they
+# need: the arena never returns memory, and `reset_faces_if_low` is what bounds it in practice.
+FACES_GPU_MEM_LIMIT_BYTES = int(
+    os.environ.get('CFG_FACES_GPU_MEM_MB', '4096')
 ) * 1024 * 1024
 
 # The image-text embedder (see image_embed.py): an Immich ONNX export baked as a plain directory
@@ -333,10 +340,10 @@ TEXT_EMBED_QUERY_DEVICE = os.environ.get('CFG_TEXT_EMBED_QUERY_DEVICE', 'cpu')
 # 16 at up to 8192 tokens. An estimate, not a measurement.
 TEXT_EMBED_MIN_FREE_MB = float(os.environ.get('CFG_TEXT_EMBED_MIN_FREE_MB', '2500'))
 
-# Free-VRAM floor below which InsightFace's sessions are recreated to release their arenas
-# (see reset_insightface_if_low): the arena is what fills the card during a crawl, so the reset
-# is usually the whole fix.
-INSIGHTFACE_RESET_FREE_MB = float(os.environ.get('CFG_INSIGHTFACE_RESET_FREE_MB', '2500'))
+# Free-VRAM floor below which the face models' sessions are recreated to release their arenas
+# (see reset_faces_if_low): the arena is what fills the card during a crawl, so the reset is
+# usually the whole fix.
+FACES_RESET_FREE_MB = float(os.environ.get('CFG_FACES_RESET_FREE_MB', '2500'))
 
 # A family untouched this long, and not in use, is unloaded to make room for another on the card
 # before that one is sent to the CPU (`_short_of_room`).
@@ -383,12 +390,9 @@ _lock = threading.Lock()
 # wall-clock because a person reads them. A cold load takes up to minutes, and without
 # `_loading` it is indistinguishable from a worker that has hung; `_unloading` covers the
 # reclaim after an eviction, which is what decides when the card is actually free again.
-# `_devices` is where a key's model really went when the key does not say so (`insightface`
-# picks its provider at load time).
 _loading: dict[str, float] = {}
 _unloading: dict[str, float] = {}
 _loaded_at: dict[str, float] = {}
-_devices: dict[str, str] = {}
 # What a key cost when it last loaded, kept after it is unloaded so a family that is not resident
 # still says how big it is: `vram_mb` is the card's free memory before less after (device-wide, so
 # onnxruntime and CTranslate2 count, and the first CUDA load pays for the context too), `ram_mb`
@@ -785,7 +789,6 @@ def _forget(keys: list[str]) -> None:
         with _lock:
             for key in keys:
                 _unloading.pop(key, None)
-                _devices.pop(key, None)
         _forget_own_card_reading()
 
 
@@ -881,8 +884,8 @@ def catalog() -> dict[str, dict]:
     `cuda`), not a probe: answering it must not import torch.
     """
     return {
-        "insightface": {
-            "model": "insightface/buffalo_l", "device": "auto",
+        "faces": {
+            "model": FACES_MODEL, "device": FACES_DEVICE,
             "purpose": "Finds faces in photos and video frames and turns each into a fingerprint, so the same person "
                        "can be recognised across the archive.",
             "ops": ["faces.detect", "faces.detect_video", "faces.embed", "speech.active_speakers"],
@@ -970,15 +973,15 @@ def catalog() -> dict[str, dict]:
 
 
 def _device_of(key: str) -> str | None:
-    """`cuda` or `cpu` from a `family:device[:compute]` key, or what its loader recorded."""
+    """`cuda` or `cpu` from a `family:device[:compute]` key, None for a key that names none."""
     parts = key.split(':')
-    return parts[1] if len(parts) > 1 else _devices.get(key)
+    return parts[1] if len(parts) > 1 else None
 
 
 def family_states() -> dict[str, dict]:
     """Every family in `catalog()`, and any other this worker holds, with each resident copy.
 
-    A family can have more than one copy (`insightface` beside `insightface:cpu` after a CUDA OOM), so
+    A family can have more than one copy (`faces:cuda` beside `faces:cpu` after a CUDA OOM), so
     the state is per copy: `loading`, `loaded` or `unloading`, since when, and when it was last
     used. No copies means not loaded. `running` is a request holding the family's lock and
     `waiting` how many queue behind it — the difference between a model that is resident and
@@ -1020,12 +1023,6 @@ def family_states() -> dict[str, dict]:
 
 
 # --- Model families -------------------------------------------------------------
-
-def evict_insightface() -> None:
-    """Drop the InsightFace session so the next call re-creates it (CUDA OOM retry)."""
-    evict("insightface")
-    evict("insightface:cpu")
-
 
 # The most of the card this worker treats as there, in MB; 0 means the whole card. A smaller
 # number makes it behave as it would on a smaller card — how an 8 or 12 GB card is rehearsed on a
@@ -1112,7 +1109,7 @@ def card_total_mb() -> float | None:
 # What a family needs free on the card to load and work there, in MB: what it holds plus its
 # working memory, measured on fry (wow notes/host-and-runtime-limits.md).
 CARD_NEED_MB = {
-    "insightface": INSIGHTFACE_RESET_FREE_MB,
+    "faces": FACES_RESET_FREE_MB,
     "siglip-visual": SIGLIP_VISUAL_MIN_FREE_MB,
     "sscd": SSCD_MIN_FREE_MB,
     "transnet": TRANSNET_MIN_FREE_MB,
@@ -1263,73 +1260,40 @@ def _wait_for_card(family: str, keep: tuple[str, ...] = ()) -> None:
         raise CardBusy(f"{family} waits for the card: {why}")
 
 
-def reset_insightface_if_low() -> float | None:
-    """Recreate InsightFace's sessions when the device is short on VRAM.
+def reset_faces_if_low() -> float | None:
+    """Recreate the face models' sessions when the device is short on VRAM.
 
-    onnxruntime's CUDA arena grows and never returns memory, and `gpu_mem_limit` cannot
-    bound it usefully here: the limit is per-session and buffalo_l loads five of them, so a
-    cap large enough for each is five times too large in aggregate, while a cap small enough
-    in aggregate starves one session mid-inference. The arenas grow by tens of MB per image
-    until the card is full, at which point a CUDA OOM evicts the other models *and* drops
-    InsightFace onto the CPU provider, and indexing slows to a fraction with the GPU idle.
-
-    Dropping the sessions frees every arena at once; the next call rebuilds them in ~1-2s,
-    which amortises to nothing over the hundreds of images between resets. Returns the free
-    VRAM that triggered a reset, or None when nothing was done.
+    onnxruntime's CUDA arena grows and never returns memory, and every picture is read at its own
+    size, so the arenas grow by tens of MB per picture until the card is full; a CUDA OOM then
+    sends the family to the CPU, and indexing slows to a fraction with the card idle. Dropping the
+    sessions frees every arena at once; the next call rebuilds them in a second or two, which
+    amortises to nothing over the hundreds of pictures between resets. Returns the free VRAM that
+    triggered a reset, or None when nothing was done.
     """
     free_mb = free_vram_mb()
-    if free_mb is None or free_mb >= INSIGHTFACE_RESET_FREE_MB:
+    if free_mb is None or free_mb >= FACES_RESET_FREE_MB:
         return None
     # Hold the family lock so no request is mid-inference on a session being dropped.
-    with family_lock("insightface"):
-        if "insightface" not in loaded() and "insightface:cpu" not in loaded():
+    with family_lock("faces"):
+        if "faces:cuda" not in loaded():
             return None
-        evict_insightface()
+        evict("faces:cuda")
     cleanup_torch()
     return free_mb
 
 
-def insightface(force_cpu: bool = False):
-    """InsightFace buffalo_l analyser (512-dim embeddings).
+def faces_device() -> str:
+    return place("faces", FACES_DEVICE)
 
-    `force_cpu` pins it to the CPU provider — used after a CUDA OOM.
-    """
-    key = "insightface:cpu" if force_cpu else "insightface"
+
+def faces(device: str):
+    """RetinaFace and TransFace on `device` (face_models.Faces)."""
+    key = f"faces:{device}"
 
     def load():
-        import sys
-        import onnxruntime
-        from insightface.app import FaceAnalysis
-
-        # Prefer the GPU execution provider when onnxruntime-gpu finds CUDA, always keep
-        # CPU as fallback. ctx_id selects the GPU device (>= 0) or CPU (< 0).
-        use_cuda = not force_cpu and 'CUDAExecutionProvider' in onnxruntime.get_available_providers()
-        # Bound the CUDA arena. onnxruntime defaults to kNextPowerOfTwo with no limit and
-        # never returns the memory, so sustained face detection walks the card, tens of MB per
-        # image. At the top it OOMs, which evicts the other models *and* reloads InsightFace on
-        # the CPU provider — one arena taking down both.
-        # kSameAsRequested stops the doubling; the cap is a backstop well above the ~1-2GB
-        # this model actually needs.
-        cuda_opts = {
-            'arena_extend_strategy': 'kSameAsRequested',
-            'gpu_mem_limit': str(INSIGHTFACE_GPU_MEM_LIMIT_BYTES),
-        }
-        providers = ([('CUDAExecutionProvider', cuda_opts)] if use_cuda else []) + ['CPUExecutionProvider']
-        ctx_id = 0 if use_cuda else -1
-        root = os.environ.get('INSIGHTFACE_HOME', os.path.expanduser('~/.insightface'))
-
-        # FaceAnalysis prints "Applied providers..." to stdout; keep it out of the worker's output.
-        original_stdout = sys.stdout
-        sys.stdout = open(os.devnull, 'w')
-        try:
-            app = FaceAnalysis(name='buffalo_l', root=root, providers=providers)
-            app.prepare(ctx_id=ctx_id, det_size=(640, 640))
-        finally:
-            sys.stdout.close()
-            sys.stdout = original_stdout
-        with _lock:
-            _devices[key] = "cuda" if use_cuda else "cpu"
-        return app
+        from face_models import Faces
+        return Faces(os.path.join(FACES_ROOT, FACE_DETECTOR_FILE), os.path.join(FACES_ROOT, FACE_RECOGNISER_FILE),
+                     device, FACES_GPU_MEM_LIMIT_BYTES)
 
     return _get(key, load)
 
@@ -1592,10 +1556,6 @@ def lr_asd_device() -> str:
 
 def sortformer_device() -> str:
     return place("sortformer")
-
-
-def insightface_device() -> str:
-    return place("insightface")
 
 
 def lr_asd(device: str):

@@ -9,7 +9,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# The tool ops. The models' own stack (torch, transformers, insightface, faster-whisper, nemo…)
+# The tool ops. The models' own stack (torch, transformers, onnxruntime, faster-whisper, nemo…)
 # is installed by the Containerfile, not here: those pins are architecture-specific and the
 # reasons for each are written beside the RUN lines.
 tools = [

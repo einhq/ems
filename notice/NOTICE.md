@@ -29,6 +29,15 @@ The models are provided as is, without warranties of any kind, as their licences
 
 CC BY-NC 4.0 allows no commercial use.
 
+## Under the MIT licence
+
+The licence's text, with the copyright notice it asks to be kept, is MIT, beside this file.
+
+- RetinaFace ResNet-34 from yakhyo/retinaface-pytorch, its v0.0.1 release,
+  https://github.com/yakhyo/retinaface-pytorch, in /opt/faces/retinaface_r34.onnx
+- Alibaba DAMO Academy's TransFace, https://www.modelscope.cn/models/iic/cv_vit_face-recognition,
+  in /opt/faces/transface.onnx: MIT as its model card gives it, which names no copyright holder
+
 ## Under Apache-2.0
 
 The licence's text is Apache-2.0, beside this file.

@@ -18,6 +18,7 @@ from ..tools.run import run, which
 from ..tools.versions import tool_version
 from ..worker import Worker
 from . import transcode
+from .faces import PRODUCER as FACES_PRODUCER
 
 TOOLS = ("exiftool", "ffprobe", "ffmpeg", "fpcalc", "magick")
 
@@ -322,7 +323,8 @@ def register(router: APIRouter, ctx: Context) -> None:
                 # text vector for the caller.
                 "text_embed": (env.get("EMS_TEXT_EMBED_MODEL") or env.get("CFG_TEXT_EMBED_MODEL") or "jinaai/jina-embeddings-v5-text-small").split("/")[-1],
                 "whisper": env.get("EMS_WHISPER_MODEL") or env.get("CFG_WHISPER_MODEL") or "large-v3",
-                "faces": "insightface/buffalo_l",
+                # What the faces ops write as their producer; a change is a re-detection for the caller.
+                "faces": FACES_PRODUCER,
                 # What vision.embed writes as its producer; a change is a re-embed for the caller.
                 "image_embed": env.get("EMS_IMAGE_EMBED_MODEL") or env.get("CFG_IMAGE_EMBED_MODEL") or "ViT-SO400M-16-SigLIP2-384__webli",
                 # What ocr.read writes as its producer; a change is a re-read for the caller.

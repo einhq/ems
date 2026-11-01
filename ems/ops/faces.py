@@ -1,5 +1,5 @@
-"""`faces.detect`, `faces.detect_video` and `faces.embed` — InsightFace, boxes as fractions of the
-display frame."""
+"""`faces.detect`, `faces.detect_video` and `faces.embed` — RetinaFace and TransFace, boxes as
+fractions of the display frame."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from ..tools import decode as decode_tool
 from ..tools import ffprobe as ffprobe_tool
 from ._models import model_slot
 
-PRODUCER = "insightface/buffalo_l"
+PRODUCER = "retinaface-r34+transface"
 
 
 class DetectRequest(WithOptions):

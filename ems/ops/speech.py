@@ -17,6 +17,7 @@ from ..context import Context
 from ..schemas import Box, FileRef, Strict, WithOptions
 from ..streaming import Outcome, Progress, run_op
 from ._models import model_slot
+from .faces import PRODUCER as FACES_PRODUCER
 from ._voices import merge_adjacent, speakers_of, stitch_windows
 
 # Shortest turn worth a voiceprint, in seconds.
@@ -246,7 +247,7 @@ async def active_speakers(ctx: Context, req: ActiveSpeakersRequest, progress: Pr
             )
     return Outcome(
         {"speakers": raw.get("speakers") or [], "windows": int(raw.get("windows") or 0), "frames": int(raw.get("frames") or 0)},
-        producer="lr-asd+insightface",
+        producer=f"lr-asd+{FACES_PRODUCER}",
     )
 
 

@@ -2,7 +2,7 @@
 
 WHY IMMICH'S EXPORT. It is the file set Immich's own published benchmarks ran, split into a
 visual and a textual ONNX model with the preprocessing written down beside them, and onnxruntime
-is already in this image for InsightFace — no open_clip, no timm.
+is already in this image for the face models — no open_clip, no timm.
 
 ONE PRECISION ON EVERY HOST. float32, on the card and on the CPU alike. A CPU-only host must
 write the same vectors as a host with a card so a database moves between them without a
@@ -49,7 +49,7 @@ def l2norm(x):
 def providers(device: str, mem_limit_bytes: int) -> list:
     """CUDA first when asked for, CPU always as the fallback.
 
-    The arena is bounded the way InsightFace's is (see model_registry.insightface): onnxruntime's
+    The arena is bounded the way the face models' is (face_models._providers): onnxruntime's
     default doubling never returns memory, and this card is shared.
     """
     if device != "cuda":

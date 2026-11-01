@@ -142,7 +142,7 @@ def open_display(path: str, angle=0, mirror=False, min_side: int = 0):
 
 
 def open_display_bgr(path: str, angle=0, mirror=False):
-    """The display frame as a BGR numpy array — what InsightFace and the rest of cv2 expect."""
+    """The display frame as a BGR numpy array — what the face models and the rest of cv2 expect."""
     import numpy as np
 
     return np.asarray(open_display(path, angle, mirror))[:, :, ::-1].copy()

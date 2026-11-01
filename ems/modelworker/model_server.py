@@ -605,13 +605,13 @@ def _evict_loop(stop: threading.Event) -> None:
             # cheap when there is nothing cached to free.
             registry.cleanup_torch()
 
-            # onnxruntime's CUDA arena never gives memory back, so InsightFace walks the
-            # card under sustained face work until a CUDA OOM drops the other families and
-            # InsightFace itself onto the CPU. Recreating its sessions releases every arena; the reload
-            # costs ~1-2s against the hundreds of images between resets.
-            freed_at = registry.reset_insightface_if_low()
+            # onnxruntime's CUDA arena never gives memory back, so the face models walk the
+            # card under sustained face work until a CUDA OOM sends them to the CPU. Recreating
+            # their sessions releases every arena; the reload costs ~1-2s against the hundreds of
+            # images between resets.
+            freed_at = registry.reset_faces_if_low()
             if freed_at is not None:
-                log(f"reset insightface sessions to release onnxruntime arenas "
+                log(f"reset the face models' sessions to release onnxruntime arenas "
                     f"(free VRAM was {freed_at:.0f}MB)")
         except Exception as exc:  # noqa: BLE001
             log(f"eviction failed: {exc}")

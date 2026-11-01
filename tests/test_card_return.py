@@ -11,8 +11,8 @@ def _card(monkeypatch, free_mb):
     monkeypatch.setattr(registry, "free_vram_mb", lambda: free_mb[0])
     monkeypatch.setattr(registry, "_own_card_mb", lambda: 0.0)
     monkeypatch.setattr(registry, "cleanup_torch", lambda: None)
-    monkeypatch.setattr(registry, "_cache", {"insightface:cpu": object()})
-    monkeypatch.setattr(registry, "_last_used", {"insightface:cpu": 0.0})
+    monkeypatch.setattr(registry, "_cache", {"faces:cpu": object()})
+    monkeypatch.setattr(registry, "_last_used", {"faces:cpu": 0.0})
     monkeypatch.setattr(registry, "_card_return_at", {})
     monkeypatch.setattr(registry, "CARD_RETURN_SECONDS", 60.0)
 
@@ -20,27 +20,27 @@ def _card(monkeypatch, free_mb):
 def test_a_family_on_the_cpu_stays_there_while_the_card_has_no_room(monkeypatch):
     free = [600.0]
     _card(monkeypatch, free)
-    assert registry.place("insightface") == "cpu"
-    assert "insightface:cpu" in registry._cache
+    assert registry.place("faces") == "cpu"
+    assert "faces:cpu" in registry._cache
 
 
 def test_a_family_on_the_cpu_goes_back_to_the_card_once_it_has_room(monkeypatch):
     free = [600.0]
     _card(monkeypatch, free)
-    assert registry.place("insightface") == "cpu"
+    assert registry.place("faces") == "cpu"
     free[0] = 9000.0
-    registry._card_return_at["insightface"] -= 120     # the next look is due
-    assert registry.place("insightface") == "cuda"
-    assert "insightface:cpu" not in registry._cache   # its CPU copy is unloaded for the card's
+    registry._card_return_at["faces"] -= 120     # the next look is due
+    assert registry.place("faces") == "cuda"
+    assert "faces:cpu" not in registry._cache   # its CPU copy is unloaded for the card's
 
 
 def test_a_family_on_the_cpu_looks_again_only_once_a_while(monkeypatch):
     free = [600.0]
     _card(monkeypatch, free)
-    assert registry.place("insightface") == "cpu"
+    assert registry.place("faces") == "cpu"
     free[0] = 9000.0
-    assert registry.place("insightface") == "cpu"     # the last look was just now
-    assert "insightface:cpu" in registry._cache
+    assert registry.place("faces") == "cpu"     # the last look was just now
+    assert "faces:cpu" in registry._cache
 
 
 def test_a_family_set_to_the_cpu_stays_there(monkeypatch):
@@ -153,14 +153,13 @@ def test_making_room_unloads_only_what_it_needs_least_recently_used_first(monkey
     free = [1200.0]
     _crawl(monkeypatch, free)
     now = registry.time.time()
-    registry._cache.update({"sscd:cuda": object(), "insightface": object()})
-    registry._last_used.update({"siglip-visual:cuda": now - 5, "sscd:cuda": now - 20, "insightface": now - 1})
-    monkeypatch.setattr(registry, "_devices", {"insightface": "cuda"})
+    registry._cache.update({"sscd:cuda": object(), "faces:cuda": object()})
+    registry._last_used.update({"siglip-visual:cuda": now - 5, "sscd:cuda": now - 20, "faces:cuda": now - 1})
     monkeypatch.setattr(registry, "_own_card_mb", lambda: None)     # free memory alone decides
     assert registry.htr_device() == "cuda"
     # sscd's 2600 MB here are enough: siglip-visual and the faces stay for their next request.
     assert "sscd:cuda" not in registry._cache
-    assert "siglip-visual:cuda" in registry._cache and "insightface" in registry._cache
+    assert "siglip-visual:cuda" in registry._cache and "faces:cuda" in registry._cache
 
 
 def test_the_english_transcriber_makes_room_from_other_families_before_the_main_one(monkeypatch):

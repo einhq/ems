@@ -25,7 +25,8 @@ FROM docker.io/library/debian:trixie-20261005-slim
 # image is available for execution on the device". Beyond that, the two ML runtimes disagree
 # about which CUDA major they want, and BOTH failure modes are silent:
 #
-#   - onnxruntime-gpu (InsightFace) needs CUDA 13 (libcublasLt.so.13) from 1.24 onward. Given
+#   - onnxruntime-gpu (the face models, the picture embedder, the text reader) needs CUDA 13
+#     (libcublasLt.so.13) from 1.24 onward. Given
 #     CUDA 12 it drops to CPUExecutionProvider with only a warning. Pinning it back to the
 #     last CUDA 12 line (1.23.0) is NOT a way out: that build binds CUDAExecutionProvider
 #     happily and then fails on the first inference with cudaErrorNoKernelImageForDevice,
@@ -86,7 +87,7 @@ ENV PATH="/opt/venv/bin:$PATH"
 # torch and torchvision come from the $TORCH_CUDA wheel index (see the ARG above). These wheels
 # bundle their own CUDA runtime + cuDNN 9 as nvidia-* packages, so no CUDA base image is needed —
 # only the host driver, exposed via the NVIDIA container toolkit (podman --device nvidia.com/gpu=all).
-# onnxruntime-gpu (InsightFace) and CTranslate2 (faster-whisper) reuse those bundled libs at
+# onnxruntime-gpu and CTranslate2 (faster-whisper) reuse those bundled libs at
 # runtime via the dynamic linker (registered with ldconfig below). With no GPU device passed,
 # everything falls back to CPU automatically — see the model registry's device selection.
 #
@@ -120,11 +121,10 @@ RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/${TO
 # accelerate is here for peft (the text embedder's LoRA adapters), which is installed without its
 # dependencies below.
 #
-# insightface, faster-whisper and av are pinned at the versions the stored face vectors and
-# transcripts were made with, so a rebuild of this layer cannot move them: av 19 dropped the
-# `metadata_errors` argument faster-whisper 1.2.1 passes to it, and failed the whisper bake below.
+# faster-whisper and av are pinned at the versions the stored transcripts were made with, so a
+# rebuild of this layer cannot move them: av 19 dropped the `metadata_errors` argument
+# faster-whisper 1.2.1 passes to it, and failed the whisper bake below.
 RUN pip install --no-cache-dir \
-    insightface==2.0 \
     onnxruntime-gpu==1.28.0 \
     nvidia-cublas-cu12 \
     opencv-python-headless \
@@ -140,11 +140,11 @@ RUN pip install --no-cache-dir \
     faster-whisper==1.2.1 \
     av==18.1.0
 
-# insightface and faster-whisper both declare a hard dependency on `onnxruntime` (the CPU
-# wheel), so pip installs it alongside onnxruntime-gpu. Both provide the same `onnxruntime`
-# module and the CPU wheel wins at import time — CUDAExecutionProvider then never shows up in
-# get_available_providers() and InsightFace silently runs on CPU even with the GPU passed
-# through. Drop the CPU wheel (two layers down); onnxruntime-gpu satisfies the same import.
+# faster-whisper declares a hard dependency on `onnxruntime` (the CPU wheel), so pip installs it
+# alongside onnxruntime-gpu. Both provide the same `onnxruntime` module and the CPU wheel wins at
+# import time — CUDAExecutionProvider then never shows up in get_available_providers() and every
+# ONNX model silently runs on CPU even with the GPU passed through. Drop the CPU wheel (two layers
+# down); onnxruntime-gpu satisfies the same import.
 #
 # Expose the torch-bundled NVIDIA libs (cuDNN, cuBLAS, cuda_runtime, ...) to the dynamic
 # linker so onnxruntime-gpu and CTranslate2 (faster-whisper) can find them at runtime. torch
@@ -161,7 +161,7 @@ RUN python3 -c 'import glob, os, nvidia; print("\n".join(sorted({d for base in n
 # Both wheels install into the same `onnxruntime` package directory, and each one's RECORD
 # lists those shared files — so uninstalling the CPU wheel deletes files onnxruntime-gpu is
 # still using, leaving an `onnxruntime` that imports but has no get_available_providers().
-# Reinstalling the GPU wheel afterwards puts them back; --no-deps keeps insightface's
+# Reinstalling the GPU wheel afterwards puts them back; --no-deps keeps faster-whisper's
 # dependency on the CPU wheel from dragging it straight back in.
 RUN pip uninstall -y onnxruntime \
     && pip install --no-cache-dir --force-reinstall --no-deps onnxruntime-gpu==1.28.0 \
@@ -174,22 +174,33 @@ RUN pip uninstall -y onnxruntime \
 # it. notice/NOTICE.md, copied in at the end as /usr/share/doc/ein-ems/ so an edit to it rebuilds
 # no model layer, gives those and points to einhq.eu/docs/ems/#models-tools-and-their-licences, which
 # lists every model. A model added, dropped or swapped here changes both, in the same session.
-RUN python3 -c "from insightface.app import FaceAnalysis; \
-    app = FaceAnalysis(name='buffalo_l', root='/opt/insightface', providers=['CPUExecutionProvider']); \
-    app.prepare(ctx_id=0, det_size=(640, 640))"
-
-ENV INSIGHTFACE_HOME=/opt/insightface
+#
+# The face models (ems/modelworker/face_models.py), both MIT: RetinaFace's ResNet-34 export from
+# yakhyo/retinaface-pytorch's v0.0.1 release (~89 MB), which finds the faces and their five
+# points, and TransFace from ModelScope's iic/cv_vit_face-recognition at its v1.2 tag (~498 MB),
+# which makes each face's vector. Checked against their sha256, as the copy detector is, so a
+# rebuild cannot change the vectors under stored ones.
+ARG RETINAFACE_SHA256=bd0263dc2a465d32859555cb1741f2d98991eb0053696e8ee33fec583d30e630
+ARG TRANSFACE_REVISION=v1.2
+ARG TRANSFACE_SHA256=b8e8af9be676f6817d8529e58f5b6d265576e9342ffa0401ea5490bc4b0c127c
+RUN mkdir -p /opt/faces \
+    && curl -fsSL -o /opt/faces/retinaface_r34.onnx \
+        "https://github.com/yakhyo/retinaface-pytorch/releases/download/v0.0.1/retinaface_r34.onnx" \
+    && echo "${RETINAFACE_SHA256}  /opt/faces/retinaface_r34.onnx" | sha256sum -c - \
+    && curl -fsSL -o /opt/faces/transface.onnx \
+        "https://www.modelscope.cn/models/iic/cv_vit_face-recognition/resolve/${TRANSFACE_REVISION}/model.onnx" \
+    && echo "${TRANSFACE_SHA256}  /opt/faces/transface.onnx" | sha256sum -c -
+ENV CFG_FACES_ROOT=/opt/faces
 
 # Where every Hugging Face model — whisper, the text embedder and NeMo's checkpoints — is baked
-# and later read from. This MUST precede the bake layers below, and it is set for exactly
-# the reason INSIGHTFACE_HOME above is.
+# and later read from. This MUST precede the bake layers below.
 #
 # Without it the cache follows $HOME, and $HOME need not be the same at build time as at run
 # time: the build runs as root, and a model server running as another user would find nothing
 # and re-download every model from the Hub inside a request, on every container recreate.
 #
 # /opt rather than either home directory: it belongs to neither user, and it is the same shape
-# as /opt/insightface.
+# as /opt/faces.
 ENV HF_HOME=/opt/huggingface
 
 ENV CFG_WHISPER_MODEL=${WHISPER_MODEL}
@@ -227,7 +238,7 @@ RUN python3 -c "import os, tempfile, wave; \
 #   - transformers is left unpinned by NeMo, so the exact 5.16.1 from above wins. NeMo 3.0.0
 #     is not known to be tested against transformers 5.x — a NeMo import breaking on it is the
 #     first thing to bisect.
-#   - `make gpu-check` (torch / InsightFace / the embedders / whisper / NeMo / LR-ASD must
+#   - `make gpu-check` (torch / the face models / the embedders / whisper / NeMo / LR-ASD must
 #     all still load and compute) is mandatory after any change here.
 RUN pip install --no-cache-dir \
     "nemo_toolkit[asr]==3.0.0" \
@@ -263,7 +274,7 @@ ENV CFG_TITANET_REVISION=${TITANET_REVISION}
 # pinned-commit tarball via curl, as ffmpeg is — `git` is not in the image and adding it to the
 # apt layer above would invalidate every model bake after it.
 # Only the core model (model/*.py + the weights) is used at runtime; the repo's own S3FD face
-# detector and scenedetect demo path are not — face tracks come from InsightFace instead.
+# detector and scenedetect demo path are not — face tracks come from the face models instead.
 ARG LR_ASD_COMMIT=1b6dcd2d8fc2895683de6508ec6294ec47d388ca
 RUN curl -fsSL "https://github.com/Junhua-Liao/LR-ASD/archive/${LR_ASD_COMMIT}.tar.gz" \
     | tar -xz -C /opt \

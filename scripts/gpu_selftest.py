@@ -4,8 +4,8 @@
 The Containerfile's build-time check only asserts that CUDAExecutionProvider is *listed*.
 That says nothing about whether kernels exist for the host's compute capability: on a
 Blackwell card (sm_120) a cu124 torch imports fine, reports cuda available, and then dies
-on the first real kernel launch. InsightFace is worse — it silently falls back to CPU and
-you only notice via throughput.
+on the first real kernel launch. onnxruntime is worse — the face models silently fall back to
+the CPU and you only notice via throughput.
 
 So every check here runs an actual computation and inspects what the loaded model/session
 ended up on. Every check runs, and it exits non-zero if any of them failed.
@@ -14,7 +14,7 @@ Run inside the running container with the GPU passed through (`make gpu-check`):
 
     podman exec ems python3 scripts/gpu_selftest.py
 
---allow-cpu-faces downgrades a CPU-bound InsightFace from failure to warning (some
+--allow-cpu-faces downgrades CPU-bound face models from failure to warning (some
 onnxruntime-gpu builds ship no sm_120 kernels; faces still work, just slower).
 """
 
@@ -73,7 +73,7 @@ def synthetic_face_image() -> np.ndarray:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument('--allow-cpu-faces', action='store_true',
-                        help='treat an InsightFace CPU fallback as a warning, not a failure')
+                        help='treat the face models falling back to the CPU as a warning, not a failure')
     parser.add_argument('--only', default='',
                         help='comma-separated substrings of check names to run (e.g. "nemo,lr-asd"); '
                              'this is how one model is verified on a card that is already busy')
@@ -109,32 +109,46 @@ def main() -> int:
         print(f'cuda matmul OK (checksum {result:.3f})')
         print(f'VRAM total: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB')
 
-    @check('onnxruntime / InsightFace')
-    def _insightface():
+    @check('onnxruntime / faces (RetinaFace + TransFace, card against CPU)')
+    def _faces():
+        import os
+        import sys
+
         import onnxruntime as ort
-        from insightface.app import FaceAnalysis
 
         providers = ort.get_available_providers()
         print('onnxruntime:', ort.__version__, '| providers:', providers)
         if 'CUDAExecutionProvider' not in providers:
             raise RuntimeError(f'CUDAExecutionProvider missing — CPU wheel shadowing? {providers}')
 
-        app = FaceAnalysis(name='buffalo_l', root='/opt/insightface',
-                           providers=['CUDAExecutionProvider', 'CPUExecutionProvider'])
-        app.prepare(ctx_id=0, det_size=(640, 640))
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'ems', 'modelworker'))
+        import model_registry
+        from face_models import Faces
+
+        paths = (os.path.join(model_registry.FACES_ROOT, model_registry.FACE_DETECTOR_FILE),
+                 os.path.join(model_registry.FACES_ROOT, model_registry.FACE_RECOGNISER_FILE))
+        card, cpu = Faces(*paths, 'cuda', 2 << 30), Faces(*paths, 'cpu', 0)
 
         # Ask the loaded sessions what they actually bound to, rather than trusting the
         # requested provider list — this is where a silent CPU fallback shows up.
-        bound = {name: model.session.get_providers()[0] for name, model in app.models.items()}
-        for name, provider in sorted(bound.items()):
-            print(f'  {name}: {provider}')
-
-        faces = app.get(synthetic_face_image())
+        print('  detector:', card.detector.session.get_providers()[0], '| recogniser:', card.recogniser.session.get_providers()[0])
+        img = synthetic_face_image()
+        faces = card.get(img)
         print(f'detection ran, {len(faces)} face(s) on the synthetic image')
 
-        cpu_only = [n for n, p in bound.items() if p != 'CUDAExecutionProvider']
+        # The recogniser on the same crop on both devices: the vectors must agree, or the card's
+        # kernels compute something else than the weights do.
+        kps = [[200, 215], [280, 215], [240, 265], [205, 320], [275, 320]]
+        a, b = card.recogniser(img, kps), cpu.recogniser(img, kps)
+        cosine = float(np.dot(a, b))
+        print(f'dimension: {len(a)} | card·CPU cosine: {cosine:.5f}')
+        if cosine < 0.999:
+            raise RuntimeError(f'the card and the CPU disagree on a face vector (cosine {cosine:.5f})')
+
+        cpu_only = [name for name, sess in (('detector', card.detector.session), ('recogniser', card.recogniser.session))
+                    if sess.get_providers()[0] != 'CUDAExecutionProvider']
         if cpu_only:
-            msg = f'InsightFace models on CPU: {cpu_only} (no sm_120 kernels in this onnxruntime-gpu build?)'
+            msg = f'face models on CPU: {cpu_only} (no sm_120 kernels in this onnxruntime-gpu build?)'
             if args.allow_cpu_faces:
                 WARNINGS.append(msg)
                 print('WARN:', msg)

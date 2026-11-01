@@ -17,7 +17,7 @@ import time
 import model_registry as registry
 from whisper_credits import is_credit_line
 
-INSIGHTFACE = "insightface"
+FACES = "faces"
 WHISPER = "whisper"
 SORTFORMER = "sortformer"
 TITANET = "titanet"
@@ -734,8 +734,8 @@ def active_speakers(video_path: str, audio_path: str, speakers: list, angle=0, m
     Returns `{"speakers": [{"id", "score", "t", "box", "embedding", "confidence"}], "windows",
     "frames"}`: per speaker the best-scoring face over its scored windows — `score` the mean
     probability (0..1) that the face is the one speaking, `box` in fractions of the display
-    frame at `t` seconds, `embedding` InsightFace's 512-dim vector of that face for the caller
-    to recognise. A speaker with no face to score is left out; how high a score has to be to
+    frame at `t` seconds, `embedding` the 512-dim vector of that face for the caller to
+    recognise. A speaker with no face to score is left out; how high a score has to be to
     count is the caller's call.
     """
     try:
@@ -771,14 +771,14 @@ def active_speakers(video_path: str, audio_path: str, speakers: list, angle=0, m
             def detect(frames=frames):
                 found = []
                 for index in range(0, len(frames), ASD_DETECT_EVERY):
-                    for face in _insightface_get(frames[index]):
-                        x0, y0, x1, y1 = (float(v) for v in face.bbox)
-                        found.append({"frame": index, "box": (x0, y0, x1, y1), "score": float(face.det_score),
-                                      "embedding": face.embedding})
+                    for face in _faces_get(frames[index]):
+                        x0, y0, x1, y1 = face["box"]
+                        found.append({"frame": index, "box": (x0, y0, x1, y1), "score": face["score"],
+                                      "embedding": face["embedding"]})
                 return found
 
-            with registry.family_lock(INSIGHTFACE):
-                detections = registry.run_on_model_thread(INSIGHTFACE, detect)
+            with registry.family_lock(FACES):
+                detections = registry.run_on_model_thread(FACES, detect)
 
             samples = _asd_samples(soundfile, audio_path, start, end, rate)
 
@@ -838,16 +838,17 @@ def active_speakers(video_path: str, audio_path: str, speakers: list, angle=0, m
 
 # --- faces through a video ------------------------------------------------------------------
 #
-# Who a video shows, and when (ein/core#410): a frame every `interval` seconds, InsightFace on
-# each, and the detections followed and grouped into the file's faces by `face_tracks`.
+# Who a video shows, and when (ein/core#410): a frame every `interval` seconds, the face models
+# on each, and the detections followed and grouped into the file's faces by `face_tracks`.
 
 # The most frames sampled from one video; a longer one is sampled more sparsely instead.
 VIDEO_FACES_MAX_SAMPLES = 1800
 # Frames detected per hold of the model. The next ones are decoded outside it, so another
 # request for the family waits for one batch at most.
 VIDEO_FACES_BATCH = 16
-# Longer side a frame is cut down to before detection. The detector reads it at 640 and each
-# face is read from the frame itself, so a 4K frame buys a small face little but memory.
+# Longer side a frame is cut down to before detection. The detector reads it at
+# face_models.DETECT_EDGE and each face is read from the frame itself, so a 4K frame buys a small
+# face little but memory.
 VIDEO_FACES_MAX_EDGE = 1920
 
 
@@ -903,20 +904,19 @@ def detect_video_faces(video_path: str, angle=0, mirror=False, interval: float =
             height, width = frame.shape[:2]
             shorter = min(width, height)
             found = []
-            for face in _insightface_get(frame):
-                x0, y0, x1, y1 = (float(v) for v in face.bbox)
-                if min(x1 - x0, y1 - y0) < min_size * shorter or float(face.det_score) < min_confidence:
+            for face in _faces_get(frame):
+                x0, y0, x1, y1 = face["box"]
+                if min(x1 - x0, y1 - y0) < min_size * shorter or face["score"] < min_confidence:
                     continue
                 detection = {
                     "box": (x0, y0, x1, y1),
                     "frame": (width, height),
-                    "confidence": float(face.det_score),
-                    "unit": face.normed_embedding.tolist(),
-                    "landmarks": face.kps.tolist() if face.kps is not None else None,
+                    "confidence": face["score"],
+                    "unit": face["embedding"].tolist(),
+                    "landmarks": face["kps"],
                 }
-                pose = _pose_of(face)
-                if pose is not None:
-                    detection["pose"] = pose
+                if face["pose"] is not None:
+                    detection["pose"] = face["pose"]
                 found.append(detection)
             out.append({"index": index, "t": t, "faces": found})
         return out
@@ -926,8 +926,8 @@ def detect_video_faces(video_path: str, angle=0, mirror=False, interval: float =
             return
         batch = list(pending)
         pending.clear()
-        with registry.family_lock(INSIGHTFACE):
-            samples.extend(registry.run_on_model_thread(INSIGHTFACE, lambda: detect(batch)))
+        with registry.family_lock(FACES):
+            samples.extend(registry.run_on_model_thread(FACES, lambda: detect(batch)))
 
     decoded, next_t = 0, 0.0
     try:
@@ -1295,26 +1295,26 @@ def embed_texts(texts: list[str], role: str, device: str | None = None, family: 
     return {"embeddings": vectors, "model": registry.TEXT_EMBED_MODEL.split("/")[-1]}
 
 
-def _insightface_get(img) -> list:
-    """InsightFace's faces in `img`, on the device `registry.place` chooses.
+def _faces_get(img, **options) -> list:
+    """The faces in `img` (face_models.Faces.get), on the device `registry.place` chooses.
 
     A card that runs out of memory anyway — another process grew under it — gets the same weights
     on the CPU for this image, only slower; nothing else on the card is touched for it. Load and
     run are both inside the guard: on a full card even creating the CUDA session can run out.
     """
-    device = registry.insightface_device()
+    device = registry.faces_device()
     try:
-        return registry.insightface(force_cpu=device == "cpu").get(img)
+        return registry.faces(device).get(img, **options)
     except Exception as exc:
         if device == "cpu" or not _is_cuda_oom(exc):
             raise
-        registry.evict_insightface()
+        registry.evict(f"faces:{device}")
         registry.cleanup_torch()
-        return registry.insightface(force_cpu=True).get(img)
+        return registry.faces("cpu").get(img, **options)
 
 
 def detect_faces(image_path: str, angle=0, mirror=False) -> dict:
-    """Detect faces in an image using InsightFace. Returns boxes + 512-dim embeddings.
+    """Every face in an image: box, confidence, the five points, the 512-dim vector and the pose.
 
     Detection runs on the *display* frame (see `_read_upright`), so `frame` is reported
     alongside the pixel boxes: the caller normalizes against it and stores fractions.
@@ -1326,59 +1326,42 @@ def detect_faces(image_path: str, angle=0, mirror=False) -> dict:
     frame_h, frame_w = img.shape[:2]
 
     def run():
-        """Load and run InsightFace, pinned to one thread — see registry.run_on_model_thread."""
-        faces = _insightface_get(img)
-
+        """Load and run the face models, pinned to one thread — see registry.run_on_model_thread."""
         results = []
-        for i, face in enumerate(faces):
-            bbox = face.bbox.astype(int).tolist()
+        for i, face in enumerate(_faces_get(img)):
+            x0, y0, x1, y1 = (int(v) for v in face["box"])
             result = {
                 "index": i,
-                "box": {
-                    "x": bbox[0],
-                    "y": bbox[1],
-                    "width": bbox[2] - bbox[0],
-                    "height": bbox[3] - bbox[1],
-                },
-                "confidence": float(face.det_score),
-                "embedding": face.embedding.tolist(),  # 512-dim vector
+                "box": {"x": x0, "y": y0, "width": x1 - x0, "height": y1 - y0},
+                "confidence": face["score"],
+                "embedding": face["embedding"].tolist(),
+                "landmarks": face["kps"],
             }
-            # Add landmarks if available (5 facial keypoints)
-            if face.kps is not None:
-                result["landmarks"] = face.kps.tolist()
-            pose = _pose_of(face)
-            if pose is not None:
-                result["pose"] = pose
+            if face["pose"] is not None:
+                result["pose"] = face["pose"]
             results.append(result)
         return results
 
-    with registry.family_lock(INSIGHTFACE):
-        results = registry.run_on_model_thread(INSIGHTFACE, run)
+    with registry.family_lock(FACES):
+        results = registry.run_on_model_thread(FACES, run)
 
     return {"frame": {"width": frame_w, "height": frame_h}, "faces": results}
 
 
-def _pose_of(face) -> dict | None:
-    """Head pose in degrees, from buffalo_l's 3D landmark model: `pitch` (up/down), `yaw`
-    (left/right turn), `roll` (tilt). All 0 is a face looking straight into the camera.
-    `FaceAnalysis` computes it for every face whether or not anyone reads it; None when the
-    pack was loaded without the 3D landmark model."""
-    pose = getattr(face, "pose", None)
-    if pose is None or len(pose) != 3:
-        return None
-    pitch, yaw, roll = (float(v) for v in pose)
-    return {"pitch": pitch, "yaw": yaw, "roll": roll}
+# The edge a hand-drawn box's crop is read at: a small face is scaled up to where the detector
+# finds it, as it would be in a picture of its own.
+EMBED_FACE_EDGE = 640
 
 
 def embed_face(image_path: str, box: dict, angle=0, mirror=False) -> dict | None:
-    """Embed a single already-located face using InsightFace.
+    """Embed a single already-located face.
 
     `box` is fractional (0..1) and in the display frame, like every box in the API — the
     caller never has to know the image's dimensions. Crops the padded bounding box and runs
-    detection on the crop so the returned 512-dim vector is properly aligned (InsightFace
-    aligns from its own landmarks), which is what a face located by hand needs. Returns
-    {"embedding": [...], "confidence": float, "pose"?: {…}}, or None when no face is found
-    inside the box (e.g. a mistaken tag or a face too small to detect).
+    detection on the crop so the returned 512-dim vector is aligned on the face's own five
+    points, which is what a face located by hand needs. Returns {"embedding": [...],
+    "confidence": float, "pose"?: {…}}, or None when no face is found inside the box (e.g. a
+    mistaken tag or a face too small to detect).
     """
     if not os.path.exists(image_path):
         raise FileNotFoundError(f"Image not found: {image_path}")
@@ -1396,18 +1379,16 @@ def embed_face(image_path: str, box: dict, angle=0, mirror=False) -> dict | None
     crop = img[y0:y1, x0:x1]
 
     def run():
-        """Load and run InsightFace, pinned to one thread — see registry.run_on_model_thread."""
-        faces = _insightface_get(crop)
-
+        """Load and run the face models, pinned to one thread — see registry.run_on_model_thread."""
+        faces = _faces_get(crop, edge=EMBED_FACE_EDGE, upscale=True)
         if not faces:
             return None
         # The tagged face is the dominant one in the crop.
-        face = max(faces, key=lambda f: (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1]))
-        result = {"embedding": face.embedding.tolist(), "confidence": float(face.det_score)}
-        pose = _pose_of(face)
-        if pose is not None:
-            result["pose"] = pose
+        face = max(faces, key=lambda f: (f["box"][2] - f["box"][0]) * (f["box"][3] - f["box"][1]))
+        result = {"embedding": face["embedding"].tolist(), "confidence": face["score"]}
+        if face["pose"] is not None:
+            result["pose"] = face["pose"]
         return result
 
-    with registry.family_lock(INSIGHTFACE):
-        return registry.run_on_model_thread(INSIGHTFACE, run)
+    with registry.family_lock(FACES):
+        return registry.run_on_model_thread(FACES, run)

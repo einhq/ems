@@ -3,7 +3,7 @@
 EMS (EiN Media Service) is a stateless service that answers questions about media bytes and
 produces media bytes: probing, renditions, transcodes, fingerprints, face detection, speech,
 image-text embeddings, text embeddings, document text extraction. It owns the tools (ffmpeg,
-ImageMagick, exiftool, chromaprint) and the models (SigLIP2, InsightFace, a text
+ImageMagick, exiftool, chromaprint) and the models (SigLIP2, RetinaFace and TransFace, a text
 embedder (jina-v5-text), PP-OCRv6, whisper, NeMo diarization and voiceprints, LR-ASD) so that a caller never
 depends on which tool or model answers.
 
@@ -514,9 +514,14 @@ fingerprint, under about two and a half seconds, yields no `chromaprint` entry r
 
 `min_size` is the smallest face to report, as a fraction of the frame's shorter side.
 
-`pose` is the head's orientation in degrees, from buffalo_l's 3D landmark model, in the display
+Faces are found by RetinaFace (ResNet-34) with the picture's longer side at most 1024 px, and
+reported from confidence 0.5. The five `landmarks` are the eyes, the nose tip and the mouth
+corners, and `embedding` is TransFace's unit-length vector of the face aligned on them; the
+producer is `retinaface-r34+transface`, and vectors of another producer are not comparable.
+
+`pose` is the head's orientation in degrees, estimated from the five landmarks, in the display
 frame: `pitch` up/down, `yaw` left/right turn, `roll` tilt; all three 0 is a face looking straight
-into the camera. Omitted when the model pack provides none. It says nothing about occlusion —
+into the camera. Omitted when the landmarks give none. It says nothing about occlusion —
 `confidence` is the nearest signal for a face partly hidden.
 
 ### 4.11a `faces.detect_video` _long_ _(implemented)_
@@ -660,7 +665,7 @@ order in one pass over the video, in the display frame the caller's `angle`/`mir
 are detected on every fifth frame and followed by overlap; each face seen long enough is scored
 against the window's sound, prepared as LR-ASD's own pipeline prepares it — the lower face cropped
 square from the smoothed track, and MFCCs of the 16-bit samples. Per speaker the best-scoring face is answered, with its clearest
-detection: `box` in fractions of the display frame at `t` seconds and `embedding`, InsightFace's
+detection: `box` in fractions of the display frame at `t` seconds and `embedding`, `faces.detect`'s
 512-dim vector, for the caller to recognise. `score` is the mean probability (0..1) that the face
 is the one speaking; what counts as enough is the caller's call. A speaker with no face to score
 is left out. A file with no sound answers `speakers: []`.
@@ -805,7 +810,7 @@ Liveness and what is loaded:
                  "copies": [ { "key": "whisper:cuda:float16", "state": "loaded", "since": 1780000000.0, "last_used": 1780003600.0,
                                "device": "cuda", "worker": "batch", "vram_mb": 3616, "ram_mb": 17, "load_seconds": 119.6 } ],
                  "measured": { "whisper:cuda:float16": { "vram_mb": 3616, "ram_mb": 17, "load_seconds": 119.6 } } },
-    "insightface": { "model": "insightface/buffalo_l", "device": "auto", "pinned": false, "copies": [] } },
+    "faces": { "model": "retinaface-r34+transface", "device": "auto", "pinned": false, "copies": [] } },
   "requests": [ { "op": "speech.transcribe", "lane": "models", "interactive": false,
                   "queued": 1780003590.0, "started": 1780003595.0, "family": "whisper" } ],
   "build": { "version": "0.1.0", "commit": "e737f1d", "date": "2026-10-04T06:51:28+02:00" },
@@ -819,7 +824,7 @@ Liveness and what is loaded:
 holds, the device it is configured for (`auto`, `cpu` or `cuda` — a setting, not a probe), whether
 it is pinned, and each copy in memory with its `state` (`loading`, `loaded` or `unloading`), the
 wall-clock `since`, `last_used`, the `device` it is on and the `worker` (`batch`, `query`) holding
-it. No copies means not loaded. A family can have two copies, `insightface` beside `insightface:cpu`
+it. No copies means not loaded. A family can have two copies, `faces:cuda` beside `faces:cpu`
 after a CUDA OOM. `running` is a request holding the family right now and `waiting` how many queue
 behind it — resident and working are different things. Absent while the worker is down.
 
@@ -877,7 +882,7 @@ What this EMS can do, for a caller to check before it relies on it:
 { "api": "3.3.0", "ops": [ "media.probe", "faces.detect", … ],
   "roots": [ { "path": "/files", "mode": "ro" }, { "path": "/files-volatile", "mode": "rw" } ],
   "tools": { "exiftool": "13.10", "ffprobe": "9.0.1", "ffmpeg": "9.0.1", "fpcalc": "1.5.1", "magick": "7.1.1" },
-  "models": { "text_embed": "jina-embeddings-v5-text-small", "whisper": "large-v3", "faces": "insightface/buffalo_l",
+  "models": { "text_embed": "jina-embeddings-v5-text-small", "whisper": "large-v3", "faces": "retinaface-r34+transface",
               "image_embed": "ViT-SO400M-16-SigLIP2-384__webli", "ocr": "PP-OCRv6_medium+multicentury-ppocrv6-medium+multicentury-htr-model+trocr-large-handwritten" },
   "limits": { "models": 8, "tools": 6, "encodes": 2, "queue_depth": 64, "interactive_reserve": 1 },
   "encode": { "video_encoder": "av1_nvenc", "cpu_budget": "4000/170/64" },

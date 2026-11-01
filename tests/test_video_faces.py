@@ -297,12 +297,8 @@ class FakeCapture:
         pass
 
 
-class FakeFace:
-    def __init__(self, x: float, vector):
-        self.bbox = [x, 100.0, x + 80.0, 180.0]
-        self.det_score = 0.9
-        self.normed_embedding = Vectors(vector)
-        self.kps = None
+def fake_face(x: float, vector) -> dict:
+    return {"box": [x, 100.0, x + 80.0, 180.0], "score": 0.9, "kps": None, "embedding": Vectors(vector), "pose": None}
 
 
 class Vectors(list):
@@ -323,16 +319,16 @@ def test_the_worker_samples_a_frame_an_interval_and_answers_fractions(monkeypatc
     monkeypatch.setattr(registry, "run_on_model_thread", lambda family, fn: fn())
     looked_at = []
 
-    def insightface(frame):
+    def faces(frame):
         looked_at.append(frame.t)
         # Anna throughout; Berit only for the frame at two seconds, and too small to keep.
-        found = [FakeFace(64.0, ANNA)]
+        found = [fake_face(64.0, ANNA)]
         if frame.t == 2.0:
-            found.append(FakeFace(400.0, BERIT))
-            found[-1].bbox = [400.0, 100.0, 404.0, 104.0]
+            found.append(fake_face(400.0, BERIT))
+            found[-1]["box"] = [400.0, 100.0, 404.0, 104.0]
         return found
 
-    monkeypatch.setattr(ops, "_insightface_get", insightface)
+    monkeypatch.setattr(ops, "_faces_get", faces)
     result = ops.detect_video_faces("/files/v.mp4", interval=1.0, duration=4.9, min_size=0.05)
     assert looked_at == [0.0, 1.0, 2.0, 3.0, 4.0]
     assert result["samples"] == 5 and result["frames"] == 50 and result["interval"] == 1.0
@@ -357,7 +353,7 @@ def test_samples_keep_to_a_grid_of_the_interval_when_it_is_no_whole_number_of_fr
     monkeypatch.setattr(ops.os.path, "exists", lambda path: True)
     monkeypatch.setattr(registry, "run_on_model_thread", lambda family, fn: fn())
     looked_at = []
-    monkeypatch.setattr(ops, "_insightface_get", lambda frame: looked_at.append(frame.t) or [])
+    monkeypatch.setattr(ops, "_faces_get", lambda frame: looked_at.append(frame.t) or [])
     ops.detect_video_faces("/files/v.mp4", interval=0.25, duration=2.0)
     # The first frame at or after each quarter second: 0.3 and 0.8 stand in for 0.25 and 0.75,
     # and the grid goes on from 0.5 and 1.0, not from the frames taken.

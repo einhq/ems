@@ -57,11 +57,11 @@ async def test_path_outside_roots(client):
 
 
 async def test_health_reports_worker_and_queues(client, fake_worker):
-    fake_worker.on("health", lambda req: {"loaded": ["text-query:cuda", "insightface"], "uptime": 5, "rss_mb": 100, "max_rss_mb": 200, "recycles": 1})
+    fake_worker.on("health", lambda req: {"loaded": ["text-query:cuda", "faces"], "uptime": 5, "rss_mb": 100, "max_rss_mb": 200, "recycles": 1})
     r = await client.get("/v0/health")
     body = r.json()
     assert body["ok"] and body["worker"]["running"] is True
-    assert body["models"] == {"text-query": {"loaded": True, "device": "cuda"}, "insightface": {"loaded": True}}
+    assert body["models"] == {"text-query": {"loaded": True, "device": "cuda"}, "faces": {"loaded": True}}
     assert body["process"]["recycles"] == 1
     assert body["degraded"] == []
     assert body["queues"]["models"]["limit"] == 2

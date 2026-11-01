@@ -10,7 +10,7 @@ from ems.ops.system import _families_from_workers
 
 
 def _fresh_registry(monkeypatch):
-    for name in ("_cache", "_last_used", "_loading", "_unloading", "_loaded_at", "_devices", "_sizes", "_family_locks"):
+    for name in ("_cache", "_last_used", "_loading", "_unloading", "_loaded_at", "_sizes", "_family_locks"):
         monkeypatch.setattr(registry, name, {})
     monkeypatch.setattr(registry, "PINNED_FAMILIES", {"text-query"})
     monkeypatch.setattr(registry, "cleanup_torch", lambda: None)
@@ -83,18 +83,6 @@ def test_a_family_in_use_is_running_with_its_queue(monkeypatch):
     assert state["running"] is True and state["waiting"] == 1
     lock.release()
     waiter.join(2)
-
-
-def test_insightface_reports_the_device_its_loader_chose(monkeypatch):
-    _fresh_registry(monkeypatch)
-
-    def loader():
-        registry._devices["insightface"] = "cpu"
-        return "app"
-
-    registry._get("insightface", loader)
-    [copy] = registry.family_states()["insightface"]["copies"]
-    assert copy["device"] == "cpu"
 
 
 def test_both_workers_copies_are_listed_under_one_family():
