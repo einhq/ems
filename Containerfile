@@ -16,7 +16,7 @@
 # every layer after it. The ~30 GB of wheels and baked weights come first, the pins that move
 # (ffmpeg, then EMS's own code) last.
 
-FROM docker.io/library/debian:trixie-20261005-slim
+FROM docker.io/library/debian:trixie-20261027-slim
 
 # CUDA wheel index for torch, and effectively for the whole image: torch's bundled nvidia-*
 # packages are what every other GPU library resolves against at runtime.
