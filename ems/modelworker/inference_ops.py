@@ -850,6 +850,9 @@ VIDEO_FACES_BATCH = 16
 # face_models.DETECT_EDGE and each face is read from the frame itself, so a 4K frame buys a small
 # face little but memory.
 VIDEO_FACES_MAX_EDGE = 1920
+# Frames in a row the decoder may fail to read before the video counts as ended. One it cannot
+# read, such as a damaged first access unit, is skipped; past the stream's end every read fails.
+VIDEO_FACES_MAX_MISSES = 30
 
 
 class Undecodable(Exception):
@@ -929,9 +932,15 @@ def detect_video_faces(video_path: str, angle=0, mirror=False, interval: float =
         with registry.family_lock(FACES):
             samples.extend(registry.run_on_model_thread(FACES, lambda: detect(batch)))
 
-    decoded, next_t = 0, 0.0
+    decoded, next_t, misses = 0, 0.0, 0
     try:
-        while capture.grab():
+        while True:
+            if not capture.grab():
+                misses += 1
+                if misses > VIDEO_FACES_MAX_MISSES:
+                    break
+                continue
+            misses = 0
             decoded += 1
             t = capture.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
             # A container without timestamps reports 0 throughout; its frames are counted instead.

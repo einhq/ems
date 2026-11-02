@@ -5,6 +5,8 @@ import math
 import os
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "ems", "modelworker"))
 
 import face_tracks  # noqa: E402
@@ -269,10 +271,12 @@ class Frame:
 
 
 class FakeCapture:
-    """`cv2.VideoCapture` over a list of frame times, 10 a second."""
+    """`cv2.VideoCapture` over a list of frame times, 10 a second; the frames at `unreadable`
+    positions are ones the decoder cannot read."""
 
-    def __init__(self, times):
+    def __init__(self, times, unreadable=()):
         self.times = times
+        self.unreadable = set(unreadable)
         self.position = -1
 
     def isOpened(self):
@@ -288,7 +292,7 @@ class FakeCapture:
 
     def grab(self):
         self.position += 1
-        return self.position < len(self.times)
+        return self.position < len(self.times) and self.position not in self.unreadable
 
     def retrieve(self):
         return True, Frame(self.times[self.position])
@@ -358,6 +362,31 @@ def test_samples_keep_to_a_grid_of_the_interval_when_it_is_no_whole_number_of_fr
     # The first frame at or after each quarter second: 0.3 and 0.8 stand in for 0.25 and 0.75,
     # and the grid goes on from 0.5 and 1.0, not from the frames taken.
     assert looked_at == [0.0, 0.3, 0.5, 0.8, 1.0, 1.3, 1.5, 1.8, 2.0]
+
+
+def test_a_frame_the_decoder_cannot_read_is_skipped(monkeypatch):
+    import types
+
+    import inference_ops as ops
+    import model_registry as registry
+
+    # A damaged first frame, and a damaged stretch shorter than the misses that end a video.
+    seconds = [i / 10 for i in range(60)]
+    unreadable = {0, *range(11, 11 + ops.VIDEO_FACES_MAX_MISSES)}
+    cv2 = types.SimpleNamespace(CAP_PROP_FPS="fps", CAP_PROP_POS_MSEC="msec", VideoCapture=lambda path: FakeCapture(seconds, unreadable))
+    monkeypatch.setitem(sys.modules, "cv2", cv2)
+    monkeypatch.setattr(ops.os.path, "exists", lambda path: True)
+    monkeypatch.setattr(registry, "run_on_model_thread", lambda family, fn: fn())
+    looked_at = []
+    monkeypatch.setattr(ops, "_faces_get", lambda frame: looked_at.append(frame.t) or [])
+    result = ops.detect_video_faces("/files/v.mp4", interval=1.0, duration=6.0)
+    assert looked_at == [0.1, 1.0, 4.1, 5.0]
+    assert result["frames"] == 60 - len(unreadable)
+
+    # A video no frame of which can be read is still undecodable.
+    cv2.VideoCapture = lambda path: FakeCapture(seconds, range(len(seconds)))
+    with pytest.raises(ops.Undecodable):
+        ops.detect_video_faces("/files/v.mp4", interval=1.0, duration=3.0)
 
 
 def test_a_long_video_is_sampled_more_sparsely():
