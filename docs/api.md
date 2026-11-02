@@ -497,8 +497,8 @@ name; a video gets one per keyframe (eight, `keyframe-0`…, as `video.frames` `
 picks them over the whole picture), labelled in order. The producer is the
 model's name, with the tools that ran. `chromaprint` (_3.6_) is
 the whole recording's raw chromaprint, with Chromaprint's default algorithm (TEST2), from ffmpeg's
-`chromaprint` muxer; it is what `fpcalc -raw -length 0` gives. One unsigned 32-bit
-value per 1365/11025 s (about 0.124 s). It is not a vector: two copies of a recording match once
+`chromaprint` muxer (Chromaprint's `fpcalc -raw -length 0` before it: the two agree but for a few bits, and at
+times a last value or few). One unsigned 32-bit value per 1365/11025 s (about 0.124 s). It is not a vector: two copies of a recording match once
 aligned, by the bit error rate over their overlap at the best offset. An audio too short to
 fingerprint, under about two and a half seconds, yields no `chromaprint` entry rather than an error.
 

@@ -72,7 +72,7 @@ def parse_raw_fingerprint(raw: bytes) -> list[int]:
 
 
 async def chromaprint(ctx: Context, path: str) -> list[dict]:
-    # The whole recording, with Chromaprint's default algorithm: what `fpcalc -raw -length 0` gives.
+    # The whole recording, with Chromaprint's default algorithm, as `fpcalc -raw -length 0` takes it.
     done = await run(
         [require("ffmpeg"), "-nostdin", "-v", "error", "-i", path, "-f", "chromaprint", "-fp_format", "raw", "-"],
         timeout=ctx.settings.tool_stall_seconds,
