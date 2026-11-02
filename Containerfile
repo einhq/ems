@@ -59,11 +59,13 @@ ARG WHISPER_MODEL=large-v3
 #
 # curl + xz-utils are for the ffmpeg fetch below, ca-certificates for every download; tzdata is
 # what TZ names; tini is PID 1 (ENTRYPOINT below). The slim base has none of them.
+#
+# No package here brings Debian's FFmpeg libraries: the image's one FFmpeg is the LGPL build
+# below, which also fingerprints audio, with its chromaprint muxer.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libimage-exiftool-perl \
     imagemagick \
     libheif-plugin-aomenc \
-    libchromaprint-tools \
     curl \
     xz-utils \
     python3 \
@@ -118,9 +120,12 @@ RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/${TO
 # must not move. Every text vector in the caller's index came from it, so a change in its pooling
 # or normalisation silently invalidates the whole search index without failing anything.
 #
-# faster-whisper and av are pinned at the versions the stored transcripts were made with, so a
-# rebuild of this layer cannot move them: av 19 dropped the `metadata_errors` argument
-# faster-whisper 1.2.1 passes to it, and failed the whisper bake below.
+# faster-whisper is pinned at the version the stored transcripts were made with, so a rebuild of
+# this layer cannot move it. It goes in without its dependencies, which are listed here instead,
+# all but two: PyAV, whose wheel bundles an FFmpeg built with x264 and x265 and which it decodes a
+# path with (EMS hands it samples, and model_registry.faster_whisper imports it without PyAV), and
+# the CPU `onnxruntime`, whose module of the same name would shadow onnxruntime-gpu's and leave
+# every ONNX model on the CPU.
 RUN pip install --no-cache-dir \
     onnxruntime-gpu==1.28.0 \
     nvidia-cublas-cu12 \
@@ -133,37 +138,26 @@ RUN pip install --no-cache-dir \
     odfpy \
     transformers==5.16.1 \
     sentence-transformers==5.7.0 \
-    faster-whisper==1.2.1 \
-    av==18.1.0
+    "ctranslate2>=4.0,<5" \
+    "huggingface-hub>=0.21" \
+    "tokenizers>=0.13,<1" \
+    tqdm \
+    && pip install --no-cache-dir --no-deps faster-whisper==1.2.1
 
-# faster-whisper declares a hard dependency on `onnxruntime` (the CPU wheel), so pip installs it
-# alongside onnxruntime-gpu. Both provide the same `onnxruntime` module and the CPU wheel wins at
-# import time — CUDAExecutionProvider then never shows up in get_available_providers() and every
-# ONNX model silently runs on CPU even with the GPU passed through. Drop the CPU wheel (two layers
-# down); onnxruntime-gpu satisfies the same import.
-#
 # Expose the torch-bundled NVIDIA libs (cuDNN, cuBLAS, cuda_runtime, ...) to the dynamic
 # linker so onnxruntime-gpu and CTranslate2 (faster-whisper) can find them at runtime. torch
 # loads its own copies via RPATH, but those two resolve via the system linker. Register the
 # nvidia/*/lib dirs through ldconfig (robust against the python minor version in the path).
 #
-# This MUST precede the onnxruntime check below: that step imports onnxruntime-gpu, which
-# resolves libcudart via the system linker. Run it first and the import fails with
-# "libcudart.so.13: cannot open shared object file" even though the lib is present.
+# This MUST precede the onnxruntime check: it imports onnxruntime-gpu, which resolves libcudart
+# via the system linker. Run it first and the import fails with "libcudart.so.13: cannot open
+# shared object file" even though the lib is present.
 RUN python3 -c 'import glob, os, nvidia; print("\n".join(sorted({d for base in nvidia.__path__ for d in glob.glob(os.path.join(base, "*", "lib"))})))' \
         > /etc/ld.so.conf.d/nvidia-python.conf \
-    && ldconfig
-
-# Both wheels install into the same `onnxruntime` package directory, and each one's RECORD
-# lists those shared files — so uninstalling the CPU wheel deletes files onnxruntime-gpu is
-# still using, leaving an `onnxruntime` that imports but has no get_available_providers().
-# Reinstalling the GPU wheel afterwards puts them back; --no-deps keeps faster-whisper's
-# dependency on the CPU wheel from dragging it straight back in.
-RUN pip uninstall -y onnxruntime \
-    && pip install --no-cache-dir --force-reinstall --no-deps onnxruntime-gpu==1.28.0 \
+    && ldconfig \
     && python3 -c "import onnxruntime as ort; ps = ort.get_available_providers(); \
         print('onnxruntime providers:', ps); \
-        assert 'CUDAExecutionProvider' in ps, 'CPU wheel still shadows onnxruntime-gpu: %r' % (ps,)"
+        assert 'CUDAExecutionProvider' in ps, 'a CPU onnxruntime shadows onnxruntime-gpu: %r' % (ps,)"
 
 # The models baked from here on are passed on with the image, unmodified, and some licences ask
 # something of that: CC BY and CC BY-NC a credit and a link to the licence, Apache-2.0 a copy of
@@ -205,16 +199,14 @@ ENV CFG_WHISPER_MODEL=${WHISPER_MODEL}
 # Silero VAD is a separate ONNX asset that faster-whisper fetches on the first transcribe
 # asking for it — which in this system is inside a request, with no network guarantee.
 # That is the same failure the WHISPER_MODEL note warns about, one layer down. Running a
-# real transcribe here pulls it at build time instead. Over generated silence, so it costs
-# nothing: the VAD finds no speech and no decode ever runs.
-RUN python3 -c "import os, tempfile, wave; \
+# real transcribe here pulls it at build time instead. Over a second of silence, so it costs
+# nothing: the VAD finds no speech and no decode ever runs. EMS's code is not in the image yet,
+# so the empty `av` model_registry.faster_whisper imports faster-whisper with is lent here too.
+RUN python3 -c "import sys, types; sys.modules['av'] = types.ModuleType('av'); \
+    import numpy; \
     from faster_whisper import WhisperModel; \
     model = WhisperModel('${WHISPER_MODEL}', device='cpu', compute_type='int8'); \
-    path = os.path.join(tempfile.mkdtemp(), 'silence.wav'); \
-    handle = wave.open(path, 'wb'); \
-    handle.setnchannels(1); handle.setsampwidth(2); handle.setframerate(16000); \
-    handle.writeframes(b'\x00' * 32000); handle.close(); \
-    segments, _info = model.transcribe(path, vad_filter=True, condition_on_previous_text=False); \
+    segments, _info = model.transcribe(numpy.zeros(16000, numpy.float32), vad_filter=True, condition_on_previous_text=False); \
     list(segments); \
     print('whisper and vad prewarmed')"
 
@@ -441,6 +433,10 @@ ENV PATH="/opt/ffmpeg/bin:$PATH"
 
 # The HTTP front. Pinned floors only; the model stack above is what decides compatibility.
 RUN pip install --no-cache-dir "fastapi>=0.115" "uvicorn[standard]>=0.30"
+
+# Nothing installed above brought back PyAV, the CPU onnxruntime or Debian's FFmpeg libraries.
+RUN ! pip show av 2>/dev/null && ! pip show onnxruntime 2>/dev/null \
+    && ! ldconfig -p | grep -q libavcodec
 
 WORKDIR /opt/ems
 COPY ems ems

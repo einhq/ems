@@ -81,16 +81,32 @@ def _detection_signature() -> str:
 
 
 def decode_speech_audio(model, file_path: str):
-    """The file's audio as whisper reads it: mono float samples at the model's sampling rate."""
-    from faster_whisper.audio import decode_audio
+    """The WAV's samples as whisper reads them: mono floats in [-1, 1) at the model's sampling rate.
 
-    return decode_audio(file_path, sampling_rate=model.feature_extractor.sampling_rate)
+    The front's ffmpeg has already made the file a 16-bit mono PCM WAV at that rate
+    (tools.ffmpeg.extract_audio), so this only scales its samples, the way faster-whisper's own
+    decode scales what it resamples to the same format.
+    """
+    import wave
+
+    import numpy as np
+
+    rate = model.feature_extractor.sampling_rate
+    with wave.open(file_path, "rb") as handle:
+        channels, width, framerate = handle.getnchannels(), handle.getsampwidth(), handle.getframerate()
+        if (channels, width, framerate) != (1, 2, rate):
+            raise ValueError(
+                f"{file_path}: whisper takes 16-bit mono PCM at {rate} Hz, "
+                f"not {8 * width}-bit with {channels} channels at {framerate} Hz"
+            )
+        frames = handle.readframes(handle.getnframes())
+    return np.frombuffer(frames, dtype="<i2").astype(np.float32) / 32768.0
 
 
 def language_votes(model, audio, vad_params: dict, windows: int) -> list:
     """Whisper's language probabilities for up to `windows` 30-second windows of the speech.
 
-    `audio` is the file decoded at the model's sampling rate (`decode_audio`). It is
+    `audio` is the file's samples at the model's sampling rate (`decode_speech_audio`). It is
     VAD-filtered the way `transcribe` will do it, so what is judged
     is the speech the decoder will hear, not the file's opening — a clip that starts on
     wind noise or a doorbell gets judged on what is said after it. The windows are spread
@@ -104,13 +120,14 @@ def language_votes(model, audio, vad_params: dict, windows: int) -> list:
     import math
 
     import numpy as np
-    from faster_whisper.vad import VadOptions, collect_chunks, get_speech_timestamps
+
+    vad = registry.faster_whisper().vad
 
     rate = model.feature_extractor.sampling_rate
-    chunks = get_speech_timestamps(audio, VadOptions(**vad_params))
+    chunks = vad.get_speech_timestamps(audio, vad.VadOptions(**vad_params))
     if not chunks:
         return []
-    speech = np.concatenate(collect_chunks(audio, chunks)[0])
+    speech = np.concatenate(vad.collect_chunks(audio, chunks)[0])
 
     per_window = model.feature_extractor.n_samples
     count = max(1, math.ceil(len(speech) / per_window))
@@ -293,11 +310,10 @@ def transcribe(file_path: str, language: str | None = None, min_silence_ms: int 
         # if it were pinned, so every window is decoded in the same language.
         started = time.monotonic()
         detected = None
-        # Detection needs the decoded audio, and the decoder then takes that array rather than
-        # the path, so a file is decoded once. Under a pinned language the decoder reads the file.
-        source = file_path
+        # The decoder takes the samples, never the path: faster-whisper would read a path with
+        # PyAV, which the image does not carry. Detection reads the same samples.
+        source = decode_speech_audio(model, file_path)
         if not lang_hint:
-            source = decode_speech_audio(model, file_path)
             votes = language_votes(model, source, vad_params, registry.WHISPER_LANGUAGE_WINDOWS)
             detected = choose_language(votes, registry.WHISPER_LANGUAGES, registry.WHISPER_LANGUAGE_FLOOR)
             if detected and detected["language"] != detected["detected"]:
@@ -308,8 +324,8 @@ def transcribe(file_path: str, language: str | None = None, min_silence_ms: int 
                     file=sys.stderr, flush=True,
                 )
         voted = time.monotonic()
-        # segments is a generator — consume it before releasing the model. The call decodes the
-        # audio, runs the VAD and computes the features; the loop below runs the decoder.
+        # segments is a generator — consume it before releasing the model. The call runs the VAD
+        # and computes the features; the loop below runs the decoder.
         segments, info = model.transcribe(
             source,
             beam_size=5,

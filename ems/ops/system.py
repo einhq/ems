@@ -20,7 +20,7 @@ from ..worker import Worker
 from . import transcode
 from .faces import PRODUCER as FACES_PRODUCER
 
-TOOLS = ("exiftool", "ffprobe", "ffmpeg", "fpcalc", "magick")
+TOOLS = ("exiftool", "ffprobe", "ffmpeg", "magick")
 
 
 # The whole card, as `nvidia-smi` reports it: what every process on the card is doing, not what

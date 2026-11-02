@@ -1481,13 +1481,34 @@ def siglip_text(device: str):
     return _get(key, load)
 
 
+def faster_whisper():
+    """The `faster_whisper` package, imported without PyAV.
+
+    faster-whisper decodes a path it is given with PyAV, whose wheel bundles an FFmpeg built with
+    x264 and x265. EMS gives it samples instead (inference_ops.decode_speech_audio), and the image
+    installs it without PyAV, so its `audio` module's `import av` gets an empty module for the
+    length of the import. A path reaching faster-whisper's own decode then fails rather than
+    decoding, and anything else importing `av` finds no such module.
+    """
+    if "faster_whisper" not in sys.modules:
+        import types
+
+        stub = types.ModuleType("av")
+        sys.modules.setdefault("av", stub)
+        try:
+            import faster_whisper  # noqa: F401
+        finally:
+            if sys.modules.get("av") is stub:
+                del sys.modules["av"]
+    return sys.modules["faster_whisper"]
+
+
 def whisper(device: str, compute_type: str):
     """faster-whisper model named by WHISPER_MODEL."""
     key = f"whisper:{device}:{compute_type}"
 
     def load():
-        from faster_whisper import WhisperModel
-        return WhisperModel(WHISPER_MODEL, device=device, compute_type=compute_type)
+        return faster_whisper().WhisperModel(WHISPER_MODEL, device=device, compute_type=compute_type)
 
     return _get(key, load)
 

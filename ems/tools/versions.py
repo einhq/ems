@@ -21,7 +21,7 @@ async def _first_line(args: list[str]) -> str:
 
 
 async def tool_version(name: str) -> str:
-    """`exiftool` → `13.10`, `ffprobe` → `9.0.1`, `fpcalc` → `1.5.1`; `absent` when not installed."""
+    """`exiftool` → `13.10`, `ffprobe` → `9.0.1`, `magick` → `7.1.1`; `absent` when not installed."""
     async with _lock:
         if name in _cache:
             return _cache[name]
@@ -33,10 +33,6 @@ async def tool_version(name: str) -> str:
         elif name in ("ffmpeg", "ffprobe"):
             line = await _first_line([name, "-version"])
             m = re.search(r"version\s+(\S+)", line)
-            version = m.group(1) if m else line
-        elif name == "fpcalc":
-            line = await _first_line(["fpcalc", "-version"])
-            m = re.search(r"(\d+\.\d+(?:\.\d+)?)", line)
             version = m.group(1) if m else line
         elif name in ("convert", "magick"):
             line = await _first_line([name, "-version"])

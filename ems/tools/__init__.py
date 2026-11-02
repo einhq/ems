@@ -1,1 +1,1 @@
-"""The tools EMS spawns: exiftool, ffprobe, ffmpeg, fpcalc, ImageMagick."""
+"""The tools EMS spawns: exiftool, ffprobe, ffmpeg, ImageMagick."""

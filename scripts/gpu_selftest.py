@@ -389,12 +389,16 @@ def main() -> int:
 
     @check('faster-whisper transcribe')
     def _whisper():
+        import os
         import subprocess
         import tempfile
 
-        from faster_whisper import WhisperModel
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'ems', 'modelworker'))
+        import inference_ops
+        import model_registry
 
-        model = WhisperModel('base', device='cuda', compute_type='float16')
+        # Imported and fed the way the worker does it: without PyAV, given samples.
+        model = model_registry.faster_whisper().WhisperModel('base', device='cuda', compute_type='float16')
         print('whisper base loaded on cuda')
 
         # Constructing the model is NOT enough: CTranslate2 resolves cuBLAS/cuDNN through the
@@ -413,7 +417,7 @@ def main() -> int:
             # — the Silero VAD ONNX — which the image prewarms separately; if that asset is
             # missing this is where it shows, rather than inside a request with no network. A sine tone has no speech, so the VAD is expected to return nothing.
             segments, info = model.transcribe(
-                wav,
+                inference_ops.decode_speech_audio(model, wav),
                 beam_size=1,
                 vad_filter=True,
                 condition_on_previous_text=False,
@@ -434,7 +438,7 @@ def main() -> int:
             # returns is what inference_ops.transcribe passes on as each segment's `words`,
             # and a silent change to it would only surface far downstream.
             timed, _timed_info = model.transcribe(
-                speech, beam_size=1, condition_on_previous_text=False, word_timestamps=True,
+                inference_ops.decode_speech_audio(model, speech), beam_size=1, condition_on_previous_text=False, word_timestamps=True,
             )
             timed = list(timed)
             for segment in timed:

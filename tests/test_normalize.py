@@ -1,7 +1,7 @@
-"""Pure functions: probe normalization, fpcalc output, face boxes."""
+"""Pure functions: probe normalization, chromaprint output, face boxes."""
 
 from ems.ops.faces import to_fractions
-from ems.ops.fingerprint import parse_fpcalc
+from ems.ops.fingerprint import parse_raw_fingerprint
 from ems.ops.media import kind_of, normalize
 from ems.tools.ffprobe import Probe, fraction, ratio
 from ems.worker import classify, worker_env
@@ -59,9 +59,9 @@ def test_ffprobe_helpers():
     assert ratio("4:3") == 4 / 3 and ratio("1:1") is None and ratio("0:1") is None
 
 
-def test_fpcalc_values():
-    assert parse_fpcalc("DURATION=10\nFINGERPRINT=1,2,4294967295\n") == [1, 2, 4294967295]
-    assert parse_fpcalc("DURATION=10\n") == []
+def test_raw_chromaprint_values():
+    assert parse_raw_fingerprint(bytes([1, 0, 0, 0, 2, 0, 0, 0, 255, 255, 255, 255])) == [1, 2, 4294967295]
+    assert parse_raw_fingerprint(b"") == []
 
 
 def test_face_fraction_conversion_filters_small_faces():

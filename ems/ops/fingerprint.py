@@ -9,6 +9,7 @@ caller's to do.
 from __future__ import annotations
 
 import shutil
+import struct
 from typing import Literal
 
 from fastapi import APIRouter, Request
@@ -28,9 +29,8 @@ DEFAULT_KINDS = {"image": ["sscd-image"], "video": ["sscd-video"], "audio": ["ch
 VIDEO_KEYFRAMES = 8
 
 # Chromaprint stacks FFT frames before it emits anything, so a clip below its window, about
-# two and a half seconds, has no acoustic fingerprint at all and never will: fpcalc exits with
-# "Empty fingerprint" or answers no values. Both mean nothing to store, and neither is an error.
-FPCALC_EMPTY_MARKER = "Empty fingerprint"
+# two and a half seconds, has no acoustic fingerprint at all and never will: ffmpeg's chromaprint
+# muxer then writes nothing and exits 0. That means nothing to store, and is not an error.
 
 
 class FingerprintRequest(WithOptions):
@@ -66,21 +66,20 @@ async def sscd_video(ctx: Context, req: FingerprintRequest, path: str, progress:
     return [_entry("sscd-video", v, f"keyframe-{i}") for i, v in enumerate(vectors)], str(raw.get("model") or "copy-detect")
 
 
-def parse_fpcalc(stdout: str) -> list[int]:
-    for line in stdout.splitlines():
-        if line.startswith("FINGERPRINT="):
-            return [int(x) for x in line[len("FINGERPRINT="):].split(",") if x]
-    return []
+def parse_raw_fingerprint(raw: bytes) -> list[int]:
+    """The chromaprint muxer's `raw` output: one little-endian unsigned 32-bit value after another."""
+    return list(struct.unpack(f"<{len(raw) // 4}I", raw[: len(raw) // 4 * 4]))
 
 
 async def chromaprint(ctx: Context, path: str) -> list[dict]:
-    # `-length 0` takes the whole recording rather than fpcalc's first two minutes.
-    done = await run([require("fpcalc"), "-raw", "-length", "0", path], timeout=ctx.settings.tool_stall_seconds)
+    # The whole recording, with Chromaprint's default algorithm: what `fpcalc -raw -length 0` gives.
+    done = await run(
+        [require("ffmpeg"), "-nostdin", "-v", "error", "-i", path, "-f", "chromaprint", "-fp_format", "raw", "-"],
+        timeout=ctx.settings.tool_stall_seconds,
+    )
     if done.code != 0:
-        if FPCALC_EMPTY_MARKER in done.stderr_text:
-            return []
-        raise EmsError(TOOL_FAILED, f"fpcalc failed: {done.tail()}")
-    values = parse_fpcalc(done.stdout.decode(errors="replace"))
+        raise EmsError(TOOL_FAILED, f"ffmpeg chromaprint failed: {done.tail()}")
+    values = parse_raw_fingerprint(done.stdout)
     if not values:
         return []
     return [{"kind": "chromaprint", "label": "primary", "fingerprint": values}]
@@ -112,7 +111,7 @@ async def compute(ctx: Context, req: FingerprintRequest, progress: Progress) -> 
             async with ctx.admission.slot("tools", interactive=req.options.interactive):
                 prints = await chromaprint(ctx, path)
             model = None
-            tools.append("fpcalc")
+            tools.append("ffmpeg")
         fingerprints += prints
         if model and model not in models:
             models.append(model)

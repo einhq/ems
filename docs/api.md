@@ -496,7 +496,8 @@ photo of the same scene. A picture's is taken in the display frame `file.angle`/
 name; a video gets one per keyframe (eight, `keyframe-0`…, as `video.frames` `representative`
 picks them over the whole picture), labelled in order. The producer is the
 model's name, with the tools that ran. `chromaprint` (_3.6_) is
-the whole recording's raw chromaprint (`fpcalc -raw -length 0`, algorithm 2): one unsigned 32-bit
+the whole recording's raw chromaprint, with Chromaprint's default algorithm (TEST2), from ffmpeg's
+`chromaprint` muxer; it is what `fpcalc -raw -length 0` gives. One unsigned 32-bit
 value per 1365/11025 s (about 0.124 s). It is not a vector: two copies of a recording match once
 aligned, by the bit error rate over their overlap at the best offset. An audio too short to
 fingerprint, under about two and a half seconds, yields no `chromaprint` entry rather than an error.
@@ -881,7 +882,7 @@ What this EMS can do, for a caller to check before it relies on it:
 ```json
 { "api": "3.3.0", "ops": [ "media.probe", "faces.detect", … ],
   "roots": [ { "path": "/files", "mode": "ro" }, { "path": "/files-volatile", "mode": "rw" } ],
-  "tools": { "exiftool": "13.10", "ffprobe": "9.0.1", "ffmpeg": "9.0.1", "fpcalc": "1.5.1", "magick": "7.1.1" },
+  "tools": { "exiftool": "13.10", "ffprobe": "9.0.1", "ffmpeg": "9.0.1", "magick": "7.1.1" },
   "models": { "text_embed": "bge-m3", "whisper": "large-v3", "faces": "retinaface-r34+transface",
               "image_embed": "ViT-SO400M-16-SigLIP2-384__webli", "ocr": "PP-OCRv6_medium+multicentury-ppocrv6-medium+multicentury-htr-model+trocr-large-handwritten" },
   "limits": { "models": 8, "tools": 6, "encodes": 2, "queue_depth": 64, "interactive_reserve": 1 },

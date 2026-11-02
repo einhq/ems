@@ -1,6 +1,7 @@
-"""`fingerprint.compute` against the scripted worker, with ffmpeg and fpcalc stubbed."""
+"""`fingerprint.compute` against the scripted worker, with ffmpeg stubbed."""
 
 import os
+import struct
 
 from ems.ops import fingerprint
 from ems.tools import decode as decode_tool
@@ -80,7 +81,8 @@ async def test_a_recording_gets_its_chromaprint_and_no_model_runs(client, fake_w
     (ro / "a.m4a").write_bytes(b"m4a")
 
     async def fake_run(args, *, timeout):
-        return Completed(args, 0, b"DURATION=10\nFINGERPRINT=1,2,3\n", b"")
+        assert args[0] == "ffmpeg" and args[args.index("-f") + 1] == "chromaprint"
+        return Completed(args, 0, struct.pack("<3I", 1, 2, 3), b"")
 
     async def fake_producer(*names):
         return "+".join(f"{n}/1" for n in names)
@@ -92,7 +94,7 @@ async def test_a_recording_gets_its_chromaprint_and_no_model_runs(client, fake_w
     body = r.json()
     assert r.status_code == 200, body
     assert body["result"] == {"fingerprints": [{"kind": "chromaprint", "label": "primary", "fingerprint": [1, 2, 3]}]}
-    assert body["meta"]["producer"] == "fpcalc/1"
+    assert body["meta"]["producer"] == "ffmpeg/1"
     assert fake_worker.requests == []
 
 

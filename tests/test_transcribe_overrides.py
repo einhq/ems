@@ -118,10 +118,10 @@ def test_a_pin_skips_detection(stubbed, monkeypatch):
     path, calls = stubbed
     monkeypatch.setattr(registry, "WHISPER_LANGUAGE", "sv")
     monkeypatch.setattr(ops, "language_votes", lambda *a: pytest.fail("detection ran under a pin"))
-    monkeypatch.setattr(ops, "decode_speech_audio", lambda *a: pytest.fail("decoded ahead of a pinned decode"))
     ops.transcribe(path)
     assert calls[0]["language"] == "sv"
-    assert calls[0]["source"] == path
+    # The decoder is handed samples under a pin too, never the path.
+    assert calls[0]["source"] == f"audio of {path}"
     assert ops.transcribe_signature().endswith(",lang=sv,words=0")
 
 
