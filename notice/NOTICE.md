@@ -61,11 +61,8 @@ its source is that tag's FFmpeg, https://github.com/FFmpeg/FFmpeg/tree/e47273f4d
 scripts. Two parts of the image carry GPL code all the same, and this is where the source of each
 is:
 
-- The Debian packages under /usr: the image is built on Debian 13 (trixie) and carries its
-  packages unmodified. `dpkg-query -W` in the image lists each with its version; its source is
-  Debian's, at https://sources.debian.org/ and, for the exact version, at
-  https://snapshot.debian.org/. Among them are libavcodec61 and its siblings (FFmpeg 7.1.5,
-  7:7.1.5-0+deb13u1), libx264-164, libx265-215, libxvidcore4 and libpostproc58, which
+- Debian's packages, as Debian below says. Among them are libavcodec61 and its siblings (FFmpeg
+  7.1.5, 7:7.1.5-0+deb13u1), libx264-164, libx265-215, libxvidcore4 and libpostproc58, which
   chromaprint's fpcalc links; EMS uses fpcalc to fingerprint audio.
 - PyAV 18.1.0, in /opt/venv (av.libs), which faster-whisper decodes audio with. Its wheel bundles
   FFmpeg 8.1.2 built with x264 and x265, as PyAV's own build publishes it; the source is PyAV's,
@@ -73,3 +70,11 @@ is:
   https://github.com/PyAV-Org/pyav-ffmpeg.
 
 The image modifies none of them.
+
+## Debian
+
+The image is built on Debian 13 (trixie) and carries Debian's packages unmodified, each under its
+own licence, many of them the GPL or the LGPL; each package's is in
+/usr/share/doc/<package>/copyright. `dpkg-query -W` in the image lists every package with its
+version. Their source is Debian's, at https://sources.debian.org/ and, for the exact version, at
+https://snapshot.debian.org/.
