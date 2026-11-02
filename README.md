@@ -4,7 +4,7 @@ A stateless service that answers questions about media bytes and produces media
 bytes: probing, renditions, transcodes, fingerprints, face detection, speech,
 image-text embeddings, text embeddings, document text. It owns the tools
 (ffmpeg, ImageMagick, exiftool, chromaprint) and the models (SigLIP2,
-RetinaFace and TransFace, a text embedder (jina-v5-text), PP-OCRv6, whisper, NeMo diarization and
+RetinaFace and TransFace, a text embedder (bge-m3), PP-OCRv6, whisper, NeMo diarization and
 voiceprints, LR-ASD) behind one HTTP API, so a caller never depends on which
 tool or model answers. **The contract is [docs/api.md](docs/api.md).**
 

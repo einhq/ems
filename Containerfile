@@ -118,9 +118,6 @@ RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/${TO
 # must not move. Every text vector in the caller's index came from it, so a change in its pooling
 # or normalisation silently invalidates the whole search index without failing anything.
 #
-# accelerate is here for peft (the text embedder's LoRA adapters), which is installed without its
-# dependencies below.
-#
 # faster-whisper and av are pinned at the versions the stored transcripts were made with, so a
 # rebuild of this layer cannot move them: av 19 dropped the `metadata_errors` argument
 # faster-whisper 1.2.1 passes to it, and failed the whisper bake below.
@@ -135,7 +132,6 @@ RUN pip install --no-cache-dir \
     python-docx \
     odfpy \
     transformers==5.16.1 \
-    accelerate \
     sentence-transformers==5.7.0 \
     faster-whisper==1.2.1 \
     av==18.1.0
@@ -321,19 +317,15 @@ RUN mkdir -p /opt/transnet \
     && echo "${TRANSNET_SHA256}  /opt/transnet/transnetv2-pytorch-weights.pth" | sha256sum -c -
 ENV CFG_TRANSNET_ROOT=/opt/transnet
 
-# The text embedder (text.embed with `model: current`): jina-embeddings-v5-text-small. Its remote
-# code puts LoRA task adapters on a Qwen3-0.6B, so it needs peft, which nothing else here uses;
-# --no-deps because everything peft wants (torch, transformers, accelerate, safetensors) is
-# already pinned above and must not move. peft and the revision are pinned so a rebuild cannot
-# change stored vectors. Loading it
-# here fetches the remote code as well as the weights, and checks the adapter and the dimension
-# the caller's vector table is sized for. ~1.2 GB.
-ARG TEXT_EMBED_MODEL=jinaai/jina-embeddings-v5-text-small
-ARG TEXT_EMBED_REVISION=dd76d535f5447ca3897a9c893fb1e612ead98192
-RUN pip install --no-cache-dir --no-deps peft==0.21.0 \
-    && python3 -c "from sentence_transformers import SentenceTransformer; \
-    m = SentenceTransformer('${TEXT_EMBED_MODEL}', revision='${TEXT_EMBED_REVISION}', trust_remote_code=True, \
-        device='cpu', model_kwargs={'default_task': 'retrieval'}); \
+# The text embedder (text.embed with `model: current`): BAAI/bge-m3 (MIT), at a pinned revision so
+# a rebuild cannot change stored vectors, read from that revision's own weights file
+# (use_safetensors=False, as model_registry loads it). Loading it here fetches the weights and
+# checks the dimension the caller's vector table is sized for. ~2.3 GB.
+ARG TEXT_EMBED_MODEL=BAAI/bge-m3
+ARG TEXT_EMBED_REVISION=5617a9f61b028005a4858fdac845db406aefb181
+RUN python3 -c "from sentence_transformers import SentenceTransformer; \
+    m = SentenceTransformer('${TEXT_EMBED_MODEL}', revision='${TEXT_EMBED_REVISION}', device='cpu', \
+        model_kwargs={'use_safetensors': False}); \
     v = m.encode(['en segelbåt'], prompt_name='query', normalize_embeddings=True); \
     assert v.shape == (1, 1024), v.shape"
 ENV CFG_TEXT_EMBED_MODEL=${TEXT_EMBED_MODEL}

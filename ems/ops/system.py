@@ -321,7 +321,7 @@ def register(router: APIRouter, ctx: Context) -> None:
             "models": {
                 # What text.embed writes as its producer; a change is a re-embed of every stored
                 # text vector for the caller.
-                "text_embed": (env.get("EMS_TEXT_EMBED_MODEL") or env.get("CFG_TEXT_EMBED_MODEL") or "jinaai/jina-embeddings-v5-text-small").split("/")[-1],
+                "text_embed": (env.get("EMS_TEXT_EMBED_MODEL") or env.get("CFG_TEXT_EMBED_MODEL") or "BAAI/bge-m3").split("/")[-1],
                 "whisper": env.get("EMS_WHISPER_MODEL") or env.get("CFG_WHISPER_MODEL") or "large-v3",
                 # What the faces ops write as their producer; a change is a re-detection for the caller.
                 "faces": FACES_PRODUCER,

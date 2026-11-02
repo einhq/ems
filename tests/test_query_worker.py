@@ -61,9 +61,9 @@ def test_without_a_query_worker_the_batch_worker_keeps_everything():
 
 
 async def test_a_search_query_goes_to_the_query_worker_and_documents_to_the_batch_one(client, fake_worker, query_fake):
-    query_fake.on("embed_texts", lambda req: {"embeddings": [[1.0]], "model": "jina-embeddings-v5-text-small"})
+    query_fake.on("embed_texts", lambda req: {"embeddings": [[1.0]], "model": "bge-m3"})
     query_fake.on("embed_image_texts", lambda req: {"embeddings": [[1.0]], "model": "siglip2"})
-    fake_worker.on("embed_texts", lambda req: {"embeddings": [[2.0]], "model": "jina-embeddings-v5-text-small"})
+    fake_worker.on("embed_texts", lambda req: {"embeddings": [[2.0]], "model": "bge-m3"})
 
     r = await client.post("/v0/text/embed", json={"text": "segelbåt", "role": "query"})
     assert r.json()["result"]["embedding"] == [1.0]
@@ -77,7 +77,7 @@ async def test_a_search_query_goes_to_the_query_worker_and_documents_to_the_batc
 
 
 async def test_an_interactive_document_goes_to_the_query_worker_as_a_document(client, fake_worker, query_fake):
-    query_fake.on("embed_texts", lambda req: {"embeddings": [[1.0]], "model": "jina-embeddings-v5-text-small"})
+    query_fake.on("embed_texts", lambda req: {"embeddings": [[1.0]], "model": "bge-m3"})
 
     r = await client.post("/v0/text/embed", json={"texts": ["Kära Anna"], "options": {"priority": "interactive"}})
     assert r.json()["result"]["embeddings"] == [[1.0]]

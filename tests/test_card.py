@@ -53,13 +53,13 @@ async def setup(client, fake_worker, tmp_path, roots):
 
     card_fake.on("health", lambda req: {"loaded": [f"{family}:cuda" for family in card.starts[-1].split(",") if family]})
     for fake, vector in ((query_fake, [1.0]), (card_fake, [9.0])):
-        fake.on("embed_texts", lambda req, v=vector: {"embeddings": [v], "model": "jina"})
+        fake.on("embed_texts", lambda req, v=vector: {"embeddings": [v], "model": "bge-m3"})
         fake.on("embed_image_texts", lambda req, v=vector: {"embeddings": [v], "model": "siglip2"})
     fake_worker.on("unload", lambda req: (order.append(f"unload {req.get('families') or 'all'}"), {"unloaded": []})[1])
     fake_worker.on("embed_images", lambda req: (order.append("embed"), {"embeddings": [[1.0]], "model": "siglip2"})[1])
     ro, _ = roots
     (ro / "a.jpg").write_bytes(b"jpeg")
-    fake_worker.on("embed_texts", lambda req: {"embeddings": [[2.0]], "model": "jina"})
+    fake_worker.on("embed_texts", lambda req: {"embeddings": [[2.0]], "model": "bge-m3"})
 
     arbiter = ctx.card
 

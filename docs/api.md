@@ -4,7 +4,7 @@ EMS (EiN Media Service) is a stateless service that answers questions about medi
 produces media bytes: probing, renditions, transcodes, fingerprints, face detection, speech,
 image-text embeddings, text embeddings, document text extraction. It owns the tools (ffmpeg,
 ImageMagick, exiftool, chromaprint) and the models (SigLIP2, RetinaFace and TransFace, a text
-embedder (jina-v5-text), PP-OCRv6, whisper, NeMo diarization and voiceprints, LR-ASD) so that a caller never
+embedder (bge-m3), PP-OCRv6, whisper, NeMo diarization and voiceprints, LR-ASD) so that a caller never
 depends on which tool or model answers.
 
 This document is the contract. It is written to stand on its own: a caller with a directory of
@@ -714,8 +714,8 @@ path: the text tower is small, and pinned in the query worker (`EMS_QUERY_WORKER
 most 256) → `{ "embeddings": [ [ … ], … ], "dimension": 1024 }` in the same order. Normalized.
 
 The embedder is the configured one, named in capabilities `models.text_embed` and in
-`meta.producer` (jina-embeddings-v5-text-small, 1024 dimensions). `role` is `query` for a search
-and `document` (the default) for the text it should find; the model embeds them differently. A
+`meta.producer` (bge-m3, 1024 dimensions). `role` is `query` for a search and `document` (the
+default) for the text it should find; bge-m3 embeds them alike, a configured model may not. A
 text over `EMS_TEXT_EMBED_MAX_TOKENS` (8192) is `invalid_request`, never cut: the caller chunks.
 Queries run on their own pinned family (`text-query`, on the CPU by default), so a search does not
 wait behind a batch of documents. So do documents sent with `options.priority: "interactive"`, a
@@ -882,7 +882,7 @@ What this EMS can do, for a caller to check before it relies on it:
 { "api": "3.3.0", "ops": [ "media.probe", "faces.detect", … ],
   "roots": [ { "path": "/files", "mode": "ro" }, { "path": "/files-volatile", "mode": "rw" } ],
   "tools": { "exiftool": "13.10", "ffprobe": "9.0.1", "ffmpeg": "9.0.1", "fpcalc": "1.5.1", "magick": "7.1.1" },
-  "models": { "text_embed": "jina-embeddings-v5-text-small", "whisper": "large-v3", "faces": "retinaface-r34+transface",
+  "models": { "text_embed": "bge-m3", "whisper": "large-v3", "faces": "retinaface-r34+transface",
               "image_embed": "ViT-SO400M-16-SigLIP2-384__webli", "ocr": "PP-OCRv6_medium+multicentury-ppocrv6-medium+multicentury-htr-model+trocr-large-handwritten" },
   "limits": { "models": 8, "tools": 6, "encodes": 2, "queue_depth": 64, "interactive_reserve": 1 },
   "encode": { "video_encoder": "av1_nvenc", "cpu_budget": "4000/170/64" },
@@ -961,7 +961,7 @@ host without a card changes nothing. Queries go to it once it has loaded them, a
 on the card too when it has room. The next batch request waits until the card worker has stopped
 and the document embedder has left the card, so a batch family never loads beside them; searches
 never wait, because the query worker answers on the CPU throughout. The copies live in a process of
-their own because libraries in one that can see the card touch it (peft loads adapters onto it),
+their own because libraries in one that can see the card touch it (at import, or by loading onto it),
 and stopping the process gives back everything, its CUDA context included. Its socket is `EMS_CARD_WORKER_SOCKET` and its ceiling `EMS_CARD_WORKER_MAX_RSS` (`6g`).
 Measured on fry: a query 107 ms (text) and 7 ms (pictures) on the card against ~0.3 s each on an
 idle CPU and several seconds on a busy one. `health` lists both workers' models and reports the query worker under

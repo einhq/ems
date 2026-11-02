@@ -155,20 +155,20 @@ def main() -> int:
             else:
                 raise RuntimeError(msg)
 
-    @check('jina-v5-text embed (card float16 against CPU float32)')
+    @check('bge-m3 text embed (card float16 against CPU float32)')
     def _text_embed():
         import os
 
         import torch
         from sentence_transformers import SentenceTransformer
 
-        repo = os.environ.get('CFG_TEXT_EMBED_MODEL', 'jinaai/jina-embeddings-v5-text-small')
+        repo = os.environ.get('CFG_TEXT_EMBED_MODEL', 'BAAI/bge-m3')
         revision = os.environ.get('CFG_TEXT_EMBED_REVISION')
         texts = ['en segelbåt vid bryggan', 'Document text about a birthday cake']
         vectors = {}
         for device, dtype in (('cuda', torch.float16), ('cpu', torch.float32)):
-            model = SentenceTransformer(repo, revision=revision, device=device, trust_remote_code=True,
-                                        model_kwargs={'dtype': dtype, 'default_task': 'retrieval'})
+            model = SentenceTransformer(repo, revision=revision, device=device,
+                                        model_kwargs={'dtype': dtype, 'use_safetensors': False})
             vectors[device] = model.encode(texts, prompt_name='document', normalize_embeddings=True)
             del model
             torch.cuda.empty_cache()

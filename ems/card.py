@@ -11,7 +11,7 @@ Two modes, decided here from the requests the front forwards to the batch worker
   on the card too (`document_device`).
 
 The card copies live in a process of their own because a process that can see the card touches
-it: libraries probe it at import or load onto it whenever it is there (peft), and either leaves a
+it: libraries probe it at import or load onto it whenever it is there, and either leaves a
 CUDA context behind. Stopping the card worker gives back everything it held.
 
 A batch request entering busy mode waits until the card worker has stopped, so a batch family never

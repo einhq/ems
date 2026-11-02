@@ -24,10 +24,6 @@ The models are provided as is, without warranties of any kind, as their licences
 - NVIDIA's Streaming Sortformer diar_streaming_sortformer_4spk-v2,
   https://huggingface.co/nvidia/diar_streaming_sortformer_4spk-v2, in /opt/huggingface:
   CC BY 4.0, https://creativecommons.org/licenses/by/4.0/legalcode
-- Jina AI's jina-embeddings-v5-text-small, https://huggingface.co/jinaai/jina-embeddings-v5-text-small,
-  in /opt/huggingface: CC BY-NC 4.0, https://creativecommons.org/licenses/by-nc/4.0/legalcode
-
-CC BY-NC 4.0 allows no commercial use.
 
 ## Under the MIT licence
 
@@ -37,6 +33,8 @@ The licence's text, with the copyright notice it asks to be kept, is MIT, beside
   https://github.com/yakhyo/retinaface-pytorch, in /opt/faces/retinaface_r34.onnx
 - Alibaba DAMO Academy's TransFace, https://www.modelscope.cn/models/iic/cv_vit_face-recognition,
   in /opt/faces/transface.onnx: MIT as its model card gives it, which names no copyright holder
+- BAAI's bge-m3, https://huggingface.co/BAAI/bge-m3, in /opt/huggingface: MIT as its model card
+  gives it, which names no copyright holder
 
 ## Under Apache-2.0
 

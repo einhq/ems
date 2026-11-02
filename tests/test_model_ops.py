@@ -7,23 +7,23 @@ import pytest
 
 
 async def test_text_embed_round_trip_uses_the_configured_embedder(client, fake_worker):
-    fake_worker.on("embed_texts", lambda req: {"embeddings": [[0.1, 0.2, 0.3]], "model": "jina-embeddings-v5-text-small"})
+    fake_worker.on("embed_texts", lambda req: {"embeddings": [[0.1, 0.2, 0.3]], "model": "bge-m3"})
     r = await client.post("/v0/text/embed", json={"text": "hello", "options": {"priority": "interactive"}})
     body = r.json()
     assert r.status_code == 200 and body["ok"]
     assert body["result"] == {"embedding": [0.1, 0.2, 0.3], "dimension": 3}
-    assert body["meta"]["producer"] == "jina-embeddings-v5-text-small"
+    assert body["meta"]["producer"] == "bge-m3"
     assert fake_worker.requests[-1] == {"op": "embed_texts", "texts": ["hello"], "role": "document", "family": "query"}
 
 
 async def test_text_embed_current_sends_the_role_and_names_the_model(client, fake_worker):
-    fake_worker.on("embed_texts", lambda req: {"embeddings": [[0.6, 0.8]], "model": "jina-embeddings-v5-text-small"})
+    fake_worker.on("embed_texts", lambda req: {"embeddings": [[0.6, 0.8]], "model": "bge-m3"})
     r = await client.post("/v0/text/embed", json={"text": "segelbåt", "model": "current", "role": "query"})
     body = r.json()
     assert r.status_code == 200 and body["ok"], body
     assert body["result"] == {"embedding": [0.6, 0.8], "dimension": 2}
     # The producer is what the worker says ran, so a stored vector names its space.
-    assert body["meta"]["producer"] == "jina-embeddings-v5-text-small"
+    assert body["meta"]["producer"] == "bge-m3"
     assert fake_worker.requests[-1] == {"op": "embed_texts", "texts": ["segelbåt"], "role": "query"}
 
 
@@ -59,7 +59,7 @@ async def test_text_embed_over_the_token_limit_is_an_invalid_request(client, fak
 
 
 async def test_a_deadline_reaches_the_worker(client, fake_worker):
-    fake_worker.on("embed_texts", lambda req: {"embeddings": [[0.1]], "model": "jina"})
+    fake_worker.on("embed_texts", lambda req: {"embeddings": [[0.1]], "model": "bge-m3"})
     r = await client.post("/v0/text/embed", json={"text": "hi", "options": {"priority": "interactive", "deadline": 1234.5}})
     assert r.json()["ok"] is True
     sent = fake_worker.requests[-1]

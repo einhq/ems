@@ -317,13 +317,14 @@ OCR_GPU_MEM_LIMIT_BYTES = int(os.environ.get('CFG_OCR_GPU_MEM_MB', '2048')) * 10
 # The detector's full arena, the two recognisers' and the classifier's few hundred MB, and a margin.
 OCR_MIN_FREE_MB = float(os.environ.get('CFG_OCR_MIN_FREE_MB', '3000'))
 
-# The text embedder (`text.embed` with `model: current`): jina-embeddings-v5-text-small, a Qwen3-0.6B
-# with LoRA task adapters, loaded through its own remote code at a pinned revision so a rebuild
-# cannot change the vectors under stored ones; the retrieval adapter, "Query: " / "Document: "
-# prompts, last-token pooling, normalized, 1024 dims. MUST match the Containerfile's bake.
-TEXT_EMBED_MODEL = os.environ.get('CFG_TEXT_EMBED_MODEL', 'jinaai/jina-embeddings-v5-text-small')
-TEXT_EMBED_REVISION = os.environ.get('CFG_TEXT_EMBED_REVISION', 'dd76d535f5447ca3897a9c893fb1e612ead98192')
-# Longest input in tokens. The model reads 32k; past this a text is refused rather than silently
+# The text embedder (`text.embed` with `model: current`): BAAI/bge-m3 (MIT), an XLM-RoBERTa large
+# at a pinned revision so a rebuild cannot change the vectors under stored ones; CLS pooling,
+# normalized, 1024 dims, and no prompt: a query and a document are embedded alike. Chosen over
+# jina-v5-text-small (CC BY-NC) on Swedish retrieval and the archive's judged searches
+# (ein/core#889). MUST match the Containerfile's bake.
+TEXT_EMBED_MODEL = os.environ.get('CFG_TEXT_EMBED_MODEL', 'BAAI/bge-m3')
+TEXT_EMBED_REVISION = os.environ.get('CFG_TEXT_EMBED_REVISION', '5617a9f61b028005a4858fdac845db406aefb181')
+# Longest input in tokens. The model reads 8192; past this a text is refused rather than silently
 # cut, because the caller chunks and a cut chunk is a lie about what was embedded. 8192 keeps a
 # batch's attention within a few hundred MB on the card.
 TEXT_EMBED_MAX_TOKENS = int(os.environ.get('CFG_TEXT_EMBED_MAX_TOKENS', '8192'))
@@ -1318,9 +1319,11 @@ def text_embedder(family: str, device: str):
         import torch
         from sentence_transformers import SentenceTransformer
         dtype = torch.float16 if device == "cuda" else torch.float32
+        # The revision's own weights file: without `use_safetensors=False` transformers fetches a
+        # converted copy from another revision, which nothing pins.
         model = SentenceTransformer(
-            TEXT_EMBED_MODEL, revision=TEXT_EMBED_REVISION, device=device, trust_remote_code=True,
-            model_kwargs={"dtype": dtype, "default_task": "retrieval"},
+            TEXT_EMBED_MODEL, revision=TEXT_EMBED_REVISION, device=device,
+            model_kwargs={"dtype": dtype, "use_safetensors": False},
         )
         model.max_seq_length = TEXT_EMBED_MAX_TOKENS
         return model
