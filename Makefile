@@ -15,7 +15,7 @@ CONTAINER_NAME ?= ems
 # Build arguments, passed as --build-arg: these win over the Containerfile's defaults.
 TORCH_CUDA      ?= cu130
 FFMPEG_BUILD    ?= autobuild-2026-08-31-13-27
-FFMPEG_ASSET    ?= ffmpeg-n9.0.1-11-ge47273f4d9-linux64-gpl-9.0
+FFMPEG_ASSET    ?= ffmpeg-n9.0.1-11-ge47273f4d9-linux64-lgpl-9.0
 
 # Run arguments. The four host directories are mounted at the SAME container paths the caller
 # mounts them at (/files, /old, /files-volatile, /files-tmp): the paths the caller resolves
