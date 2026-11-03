@@ -2,8 +2,9 @@ Copyright (c) 2026 Mattias Runge-Broberg
 
 This software is licensed under the Elastic License 2.0, below, with the additional
 permission that follows it: you may host it free of charge for your family, relatives
-and friends. Offering it as a hosted service in any other way, such as to paying
-customers, needs a separate license from the licensor.
+and friends, and a non-profit association may host it free of charge for its members.
+Offering it as a hosted service in any other way, such as to paying customers, needs a
+separate license from the licensor, Mattias Runge-Broberg <mattias@runge.se>.
 
 Versions published before this license was added remain under the MIT license they
 were published with.
@@ -110,13 +111,17 @@ In addition to the license above, the licensor grants you permission to provide
 the software to third parties as a hosted or managed service, as long as:
 
 - everyone the service is provided to is a member of your family or household,
-  a relative of yours, or a friend of yours; and
+  a relative of yours, or a friend of yours, or, if you are a non-profit
+  association such as a club or a local history society, one of your members;
+  and
 
 - you provide it free of charge: you do not charge them, or anyone else, for
   access to it, or for hosting, storage, setup or support of it. Sharing what
-  running it actually costs among those it is provided to is not a charge.
+  running it actually costs among those it is provided to is not a charge, and
+  neither is an association's membership fee that is the same whether or not a
+  member uses the service.
 
 All other limitations and conditions of the license above still apply. Any other
-hosted or managed service, such as one offered to customers, members or the
-public, or as part of a paid product or service, needs a separate license from
-the licensor.
+hosted or managed service, such as one offered to customers or the public, or
+as part of a paid product or service, needs a separate license from the
+licensor, Mattias Runge-Broberg <mattias@runge.se>.
