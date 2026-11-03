@@ -1,5 +1,6 @@
 """`image.renditions`: the pipeline it builds, and how it publishes. The pixels need ImageMagick."""
 
+import json
 import os
 import shutil
 import subprocess
@@ -8,6 +9,7 @@ import pytest
 
 from ems.ops import image
 from ems.tools import magick
+from ems.tools import raw as raw_tool
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -208,15 +210,67 @@ async def test_cloned_outputs_match_independently_decoded_ones(tmp_path):
         assert ours.startswith(f"{plan.width // 2} {plan.height} ") and ours.split()[3] in ("TopLeft", "Undefined")
 
 
-async def test_a_raw_magick_cannot_demosaic_is_rendered_from_its_embedded_preview(client, roots, monkeypatch):
+async def test_a_raw_is_cut_from_libraws_decode_and_reports_the_sensor_frame(client, roots, monkeypatch):
+    ro, rw = roots
+    (ro / "shot.raf").write_bytes(b"raf")
+    seen = {}
+
+    async def fake_decode(source, out, angle, plans, *, timeout):
+        seen["decoded"] = (os.path.basename(source), angle, len(plans))
+        with open(out, "wb") as f:
+            f.write(b"ppm")
+        return raw_tool.Decoded(out, (6032, 4028))
+
+    async def fake_render(source, angle, mirror, plans, *, timeout):
+        seen["source"] = os.path.basename(source)
+        for plan in plans:
+            with open(plan.temp, "wb") as f:
+                f.write(b"a")
+        return magick.Rendered((1007, 1508), [(256, 384)])
+
+    monkeypatch.setattr(raw_tool, "decode", fake_decode)
+    monkeypatch.setattr(magick, "render", fake_render)
+    target = {"output": {"path": str(rw / "image.avif")}, "box": {"width": 384, "height": 384}, "crop": {"x": 0.4, "y": 0.3, "width": 0.2, "height": 0.2}}
+    r = await client.post("/v0/image/renditions", json={"file": {"path": str(ro / "shot.raf"), "angle": 90, "mimetype": "image/x-fujifilm-raf"}, "targets": [target]})
+    body = r.json()
+    assert r.status_code == 200, body
+    assert seen == {"decoded": ("shot.raf", 90, 1), "source": "decoded.ppm"}
+    # The original's frame, turned, not the half-size read's.
+    assert body["result"]["frame"] == {"width": 4028, "height": 6032}
+    assert not [d for d in os.listdir(ro.parent / "scratch") if d.startswith("raw-")]
+
+
+def test_a_raw_is_read_at_half_size_when_every_output_fits_in_it():
+    sensor = (6032, 4028)
+    ladder = [magick.Plan(temp="", format="avif", quality=None, width=w, height=w, fit="contain", crop=None) for w in (320, 800, 2560)]
+    assert raw_tool.half_size(sensor, 0, ladder)
+    face = lambda size: magick.Plan(temp="", format="avif", quality=None, width=384, height=384, fit="contain", crop=magick.Rect(0.4, 0.4, size, size))
+    # A fifth of the frame is 1206 px across: half of it still holds the 384 asked. A tenth is
+    # 603 px, and its half is short of it, so the full read is needed.
+    assert raw_tool.half_size(sensor, 0, [face(0.2)])
+    assert not raw_tool.half_size(sensor, 0, [face(0.1)])
+    assert not raw_tool.half_size(sensor, 0, [*ladder, face(0.1)])
+    # The whole frame with no box is the full frame.
+    assert not raw_tool.half_size(sensor, 0, [magick.Plan(temp="", format="avif", quality=None, width=None, height=None, fit="contain", crop=None)])
+
+
+def test_the_decode_hears_the_outputs_it_is_for():
+    plans = [magick.Plan(temp="t", format="avif", quality=70, width=384, height=384, fit="contain", crop=magick.Rect(0.1, 0.2, 0.3, 0.4))]
+    assert raw_tool.plans_of(json.loads(json.dumps(raw_tool.needs(90, plans)))) == [
+        magick.Plan(temp="", format="", quality=None, width=384, height=384, fit="contain", crop=magick.Rect(0.1, 0.2, 0.3, 0.4)),
+    ]
+
+
+async def test_a_raw_libraw_cannot_demosaic_is_rendered_from_its_embedded_preview(client, roots, monkeypatch):
     ro, rw = roots
     (ro / "shot.nef").write_bytes(b"nef")
     sources = []
 
-    async def failing_then_fine(source, angle, mirror, plans, *, timeout):
+    async def failing_decode(source, out, angle, plans, *, timeout):
+        raise magick.EmsError(magick.TOOL_FAILED, "raw decode failed: Input/output error")
+
+    async def fine(source, angle, mirror, plans, *, timeout):
         sources.append(os.path.basename(source))
-        if source.endswith("shot.nef"):
-            raise magick.EmsError(magick.TOOL_FAILED, "magick failed: Input/output error")
         for plan in plans:
             with open(plan.temp, "wb") as f:
                 f.write(b"p")
@@ -228,13 +282,14 @@ async def test_a_raw_magick_cannot_demosaic_is_rendered_from_its_embedded_previe
             f.write(b"jpeg")
         return out
 
-    monkeypatch.setattr(magick, "render", failing_then_fine)
+    monkeypatch.setattr(raw_tool, "decode", failing_decode)
+    monkeypatch.setattr(magick, "render", fine)
     monkeypatch.setattr(image.decode_tool, "_preview", fake_preview)
     target = {"output": {"path": str(rw / "320x320.avif")}, "box": {"width": 320, "height": 320}, "fit": "cover"}
     r = await client.post("/v0/image/renditions", json={"file": {"path": str(ro / "shot.nef"), "mimetype": "image/x-nikon-nef"}, "targets": [target]})
     body = r.json()
     assert r.status_code == 200, body
-    assert sources == ["shot.nef", "preview-JpgFromRaw.jpg"] and body["result"]["source"] == "preview"
+    assert sources == ["preview-JpgFromRaw.jpg"] and body["result"]["source"] == "preview"
     assert (rw / "320x320.avif").read_bytes() == b"p"
 
     # A JPEG that fails is a failure: there is no preview to fall back to.

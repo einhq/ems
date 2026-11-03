@@ -26,6 +26,7 @@ from ..schemas import Box, FileRef, OutputSpec, Strict, WithOptions
 from ..streaming import Outcome, Progress, run_op
 from ..tools import decode as decode_tool
 from ..tools import magick
+from ..tools import raw as raw_tool
 from ..tools.versions import producer
 
 MAX_TARGETS = 32
@@ -97,16 +98,24 @@ def discard(plans: list[magick.Plan]) -> None:
             pass
 
 
-async def render_targets(ctx: Context, source: str, angle: int, mirror: bool, targets: list[RenditionTarget], requested: list[str] | None = None) -> dict:
+async def render_targets(ctx: Context, source: str, angle: int, mirror: bool, targets: list[RenditionTarget], requested: list[str] | None = None, raw: bool = False) -> dict:
     """Render every target from `source` and publish them all, or none.
 
     `requested` is what each output path was called in the request, so the result names the
-    paths the caller knows rather than the resolved ones.
+    paths the caller knows rather than the resolved ones. A `raw` source is demosaiced by
+    LibRaw first, at the size the targets need, and cut from that (ems.tools.raw).
     """
     plans, finals = plan_targets(ctx, targets)
     names = requested or [t.output.path for t in targets]
+    scratch = ctx.scratch_dir("raw") if raw else None
     try:
+        sensor = None
+        if scratch:
+            decoded = await raw_tool.decode(source, os.path.join(scratch, "decoded.ppm"), angle, plans, timeout=ctx.settings.tool_stall_seconds)
+            source, sensor = decoded.path, decoded.frame
         rendered = await magick.render(source, angle, mirror, plans, timeout=ctx.settings.tool_stall_seconds)
+        if sensor:
+            rendered.frame = (sensor[1], sensor[0]) if angle % 180 == 90 else sensor
         for plan in plans:
             if not os.path.isfile(plan.temp) or os.path.getsize(plan.temp) == 0:
                 raise EmsError(TOOL_FAILED, f"magick exited 0 but wrote no bytes for {plan.format}:{os.path.basename(plan.temp)}")
@@ -117,10 +126,23 @@ async def render_targets(ctx: Context, source: str, angle: int, mirror: bool, ta
             results.append({"path": name, "width": width, "height": height, "bytes": size})
     finally:
         discard(plans)
+        if scratch:
+            shutil.rmtree(scratch, ignore_errors=True)
     return {"frame": {"width": rendered.frame[0], "height": rendered.frame[1]}, "targets": results}
 
 
-async def owed_angle(ctx: Context, path: str, file: FileRef) -> int:
+async def file_mimetype(ctx: Context, path: str, file: FileRef) -> str | None:
+    """The caller's mimetype, else exiftool's."""
+    if file.mimetype is not None or ctx.exiftool is None:
+        return file.mimetype
+    try:
+        exif = await ctx.exiftool.extract(path)
+        return str(exif.get("MIMEType") or "") or None
+    except EmsError:
+        return None
+
+
+async def owed_angle(ctx: Context, path: str, file: FileRef, mimetype: str | None) -> int:
     """The turn ImageMagick still has to make: the caller's, minus what libheif already did.
 
     A HEIF is the one family whose reader applies the container's rotation on its own, so a
@@ -128,13 +150,6 @@ async def owed_angle(ctx: Context, path: str, file: FileRef) -> int:
     the ordinary case, and exactly the hand correction when someone has overridden the tag.
     """
     angle = decode_tool.normalize_angle(file.angle)
-    mimetype = file.mimetype
-    if mimetype is None and ctx.exiftool is not None:
-        try:
-            exif = await ctx.exiftool.extract(path)
-            mimetype = str(exif.get("MIMEType") or "") or None
-        except EmsError:
-            mimetype = None
     if decode_tool.is_heif(mimetype):
         applied = await decode_tool.applied_angle(path, ctx.settings.tool_stall_seconds)
         return decode_tool.normalize_angle(angle - applied)
@@ -145,17 +160,19 @@ async def renditions(ctx: Context, req: RenditionsRequest, progress: Progress) -
     path = ctx.roots.input(req.file.path)
     async with ctx.admission.slot("tools", interactive=req.options.interactive):
         await progress.emit("render")
-        angle = await owed_angle(ctx, path, req.file)
+        mimetype = await file_mimetype(ctx, path, req.file)
+        angle = await owed_angle(ctx, path, req.file, mimetype)
+        raw = decode_tool.is_raw(mimetype)
         try:
-            result = await render_targets(ctx, path, angle, req.file.mirror, req.targets)
+            result = await render_targets(ctx, path, angle, req.file.mirror, req.targets, raw=raw)
         except EmsError as exc:
-            # A RAW ImageMagick cannot demosaic — a truncated raw section reads as an I/O error
-            # in libraw while the file itself opens fine — usually still carries its embedded
-            # JPEG, which is what the model ops fall back to as well. Same raster orientation as
-            # the sensor image (nothing in the RAW path rotates), so the caller's angle applies
-            # whole. Only a `tool_failed` from the render, and only for a RAW: anything else
-            # is answered as it was.
-            if exc.code is not TOOL_FAILED or not decode_tool.is_raw(req.file.mimetype):
+            # A RAW LibRaw cannot demosaic — a truncated raw section reads as an I/O error while
+            # the file itself opens fine — usually still carries its embedded JPEG, which is what
+            # the model ops fall back to as well. Same raster orientation as the sensor image
+            # (nothing in the RAW path rotates), so the caller's angle applies whole. Only a
+            # `tool_failed` from the render, and only for a RAW: anything else is answered as
+            # it was.
+            if exc.code is not TOOL_FAILED or not raw:
                 raise
             scratch = ctx.scratch_dir("preview")
             try:
