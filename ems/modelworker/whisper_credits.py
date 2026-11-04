@@ -20,13 +20,18 @@ _THANKS = [
     r"(tusen )?tack för att (du|ni) (har )?(tittat|tittade|såg|sett|lyssnat|lyssnade)"
     r"( på (den här|denna|min|vår) (video|videon|videoklipp|film|filmen|kanal|kanalen))?",
     # Norwegian
-    r"(tusen )?takk for at (du|dere) (har )?(så|sett|ser|lyttet|hørte)( på)?( (denne|videoen|videoen min))?",
+    r"(tusen )?takk for at (du|dere) (har )?(så|sett|ser|lyttet|hørte)( på| med)?( (denne|videoen|videoen min))?",
     # Danish
     r"(tusind )?tak (fordi|for at) (du|i) (har )?(så|set|ser|lyttede)( med)?",
     # English
-    r"thank you (so much )?for watching",
-    r"thanks (so much )?for watching",
+    r"thank you (so much )?for watching( (my|this|our) (video|channel))?",
+    r"thanks (so much )?for watching( (my|this|our) (video|channel))?",
     r"(please )?(like and )?subscribe( to (my|the|our) channel)?",
+    # Italian
+    r"grazie (a tutti )?per (aver|avere) (guardato|visto)( (il|questo) video)?",
+    # Indonesian
+    r"sampai jumpa (lagi )?di video (selanjutnya|berikutnya)",
+    r"terima kasih (telah|sudah) menonton",
 ]
 
 # Credit markers, anywhere in a segment.
@@ -39,9 +44,13 @@ _CREDITS = [
     r"tekstet av",
     r"danske tekster",
     r"subtitles by",
+    r"субтитры (сделал|делал|создавал|подготовил)",
+    r"редактор субтитров",
 ]
 
-_THANKS_RE = re.compile("|".join(f"(?:{p})" for p in _THANKS))
+# One of those lines, or several in a row: whisper often closes on two at once.
+_THANK = "|".join(f"(?:{p})" for p in _THANKS)
+_THANKS_RE = re.compile(f"(?:{_THANK})(?: (?:{_THANK}))*")
 _CREDITS_RE = re.compile("|".join(f"(?:{p})" for p in _CREDITS))
 
 

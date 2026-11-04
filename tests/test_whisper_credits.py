@@ -21,12 +21,18 @@ from whisper_credits import is_credit_line  # noqa: E402
     "Tak fordi du så med!",
     "Thank you for watching!",
     "Thanks for watching.",
+    "Thank you for watching my video.",
     "Like and subscribe!",
+    "Takk for at du så med.",
+    "Grazie a tutti per aver guardato il video.",
+    # Two lines in one segment.
+    "Sampai jumpa di video selanjutnya. Terima kasih telah menonton!",
     "Textning.nu",
     "Svensktextning.nu",
     "Undertexter från Amara.org-gemenskapen",
     "Teksting av Nicolai Winther",
     "Subtitles by the Amara.org community",
+    "Субтитры сделал DimaTorzok",
 ])
 def test_invented_lines_are_dropped(line):
     assert is_credit_line(line)
@@ -38,6 +44,8 @@ def test_invented_lines_are_dropped(line):
     "Nu har vi tittat på den här videon tre gånger.",
     "Vi ska titta på filmen sen.",
     "Thank you for watching the kids.",
+    "Thank you for watching. Now let's eat.",
+    "Grazie per aver guardato i bambini.",
     "Hej!",
     "",
 ])
