@@ -192,3 +192,26 @@ def test_credit_lines_are_dropped(stubbed, monkeypatch):
     monkeypatch.setattr(FakeModel, "transcribe", transcribe)
     result = ops.transcribe(path)
     assert result["segments"] == [] and result["text"] == "" and result["speech"] is False
+
+
+@pytest.mark.parametrize("votes, no_speech, lines, kept", [
+    ({"en": 0.9}, 0.6, ["Thank you."], False),  # whisper's stock line over music
+    ({"en": 0.9}, 0.3, ["Yeah, I know."], True),  # someone saying it
+    ({"sv": 0.9}, 0.6, ["Tack."], True),  # an expected language
+    ({"en": 0.9}, 0.6, ["Hello!", "Welcome."], True),  # more than one line
+])
+def test_a_lone_foreign_line_needs_a_lower_no_speech_score(stubbed, monkeypatch, votes, no_speech, lines, kept):
+    """One line in a language WHISPER_LANGUAGES does not list is dropped at a lower no-speech score."""
+    path, _ = stubbed
+    monkeypatch.setattr(registry, "WHISPER_LANGUAGES", ("sv", "da"))
+    monkeypatch.setattr(ops, "language_votes", lambda model, audio, vad, windows: [votes])
+
+    def transcribe(self, source, **kwargs):
+        segments = [FakeSegment(float(i), float(i) + 1.0, text) for i, text in enumerate(lines)]
+        for segment in segments:
+            segment.no_speech_prob = no_speech
+        return iter(segments), types.SimpleNamespace(language=kwargs["language"], language_probability=1.0, duration=30.0)
+
+    monkeypatch.setattr(FakeModel, "transcribe", transcribe)
+    result = ops.transcribe(path)
+    assert result["speech"] is kept and len(result["segments"]) == (len(lines) if kept else 0)

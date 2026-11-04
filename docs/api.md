@@ -605,6 +605,12 @@ is that averaged probability for the language chosen.
 `speech: false` comes with an empty `segments` and is a normal answer for a silent clip; a file
 with no sound track at all answers `audio: false` as well, so the two can be told apart.
 
+Lines whisper invents over silence, music or noise are left out: a segment the decoder itself
+rates as likely no speech (`EMS_WHISPER_NO_SPEECH_PROB_MAX`), a thank-you-for-watching or
+subtitle credit, and a transcript that is a single line in a language outside
+`EMS_WHISPER_LANGUAGES` when the decoder rated it 0.5 or more likely no speech, which is how
+its stock lines ("Thank you.", "We'll be right back.") over music come out.
+
 ### 4.14 `speech.diarize` _long_ _(implemented)_
 
 `{ "file" }` → speaker turns:

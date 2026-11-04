@@ -170,6 +170,16 @@ def whisper_vad_parameters() -> dict:
 # Set to 1 to disable.
 WHISPER_NO_SPEECH_PROB_MAX = float(os.environ.get('CFG_WHISPER_NO_SPEECH_PROB_MAX', '0.8'))
 
+# A tighter ceiling for a transcript that is one line in a language WHISPER_LANGUAGES does not
+# list. Over music or noise whisper writes a single stock line ("Thank you.", "We'll be right
+# back.", "Спасибо.") or a snatch of a song's lyrics, in whatever language it guessed; on fry's
+# archive that was 44 of the 79 transcripts in a language other than Swedish. Re-decoded, those
+# lines scored 0.5-0.8 on no-speech, while the lone foreign lines that read as someone speaking
+# scored 0.1-0.45 (ein/core#1000). A transcript of several lines, or one in an expected
+# language, is held to WHISPER_NO_SPEECH_PROB_MAX alone. A constant, like the credit filter, so
+# it stays out of the transcript signature (inference_ops.transcribe_signature).
+WHISPER_LONE_FOREIGN_NO_SPEECH_PROB_MAX = 0.5
+
 # Speaker diarization: who is talking, and between which seconds. Same baked-model rule as
 # WHISPER_MODEL (the Containerfile), at a pinned commit so a rebuild cannot change the turns under
 # stored ones. Streaming Sortformer v2 is end-to-end and handles overlapping speech; it replaced

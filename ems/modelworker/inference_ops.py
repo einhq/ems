@@ -45,8 +45,9 @@ def transcribe_signature(language: str | None = None, min_silence_ms: int | None
 
     So every setting that changes the output belongs in here, and nothing else does: the
     model, where and in what precision it runs on this host, the VAD, the no-speech ceiling, the
-    language — pinned, or how it is detected — and whether words are timed. Beam size, the conditioning flag and the
-    credit-line filter (whisper_credits) are constants in `transcribe`; if one becomes configurable it goes in too.
+    language — pinned, or how it is detected — and whether words are timed. Beam size, the conditioning flag, the
+    credit-line filter (whisper_credits) and the ceiling for a lone foreign line are constants; if one becomes
+    configurable it goes in too.
     """
     # Per-request overrides (the HTTP API's `language`, `vad.min_silence_ms`, `word_timestamps`)
     # take part exactly like the configured values do, so a transcript made with them is
@@ -283,8 +284,10 @@ def transcribe(file_path: str, language: str | None = None, min_silence_ms: int 
     expected languages given the benefit of the doubt (WHISPER_LANGUAGES, `language_votes`
     and `choose_language`), so a noisy first 30 seconds cannot mislabel an entire recording;
     a ceiling on the decoder's own no-speech score (WHISPER_NO_SPEECH_PROB_MAX) that
-    drops the fluent sentences it invents over a window it rated as silence; and a filter
-    (whisper_credits) for the thank-you and credit lines that get under that ceiling.
+    drops the fluent sentences it invents over a window it rated as silence, and a tighter one
+    for a transcript that is a single line in a language the archive is not expected to hold
+    (WHISPER_LONE_FOREIGN_NO_SPEECH_PROB_MAX); and a filter (whisper_credits) for the
+    thank-you and credit lines that get under those ceilings.
     """
     if not os.path.exists(file_path):
         raise FileNotFoundError(f"audio not found: {file_path}")
@@ -342,6 +345,7 @@ def transcribe(file_path: str, language: str | None = None, min_silence_ms: int 
         # exactly why they must not reach search.
         prepared = time.monotonic()
         out = []
+        scores = []
         for segment in segments:
             text = segment.text.strip()
             if not text:
@@ -363,6 +367,16 @@ def transcribe(file_path: str, language: str | None = None, min_silence_ms: int 
             if aligned:
                 entry["words"] = aligned
             out.append(entry)
+            scores.append(no_speech)
+        # A lone line in a language the archive is not expected to hold is whisper's guess over
+        # music or noise more often than speech, and is held to a tighter no-speech ceiling.
+        language = detected["language"] if detected else None
+        if (
+            len(out) == 1 and language and registry.WHISPER_LANGUAGES
+            and language not in registry.WHISPER_LANGUAGES
+            and scores[0] is not None and scores[0] >= registry.WHISPER_LONE_FOREIGN_NO_SPEECH_PROB_MAX
+        ):
+            out = []
         # Where a transcription's time goes, by phase (ein/core#741).
         print(
             f"transcribe: {os.path.basename(file_path)}: {float(info.duration or 0.0):.0f}s of audio, "
