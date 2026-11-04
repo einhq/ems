@@ -88,6 +88,60 @@ async def test_a_poster_past_the_end_of_the_picture_is_its_first_frame(client, r
     assert r.json()["result"]["t"] == 0.0
 
 
+async def test_a_blank_poster_gives_way_to_a_later_frame_that_shows_something(client, roots, monkeypatch):
+    from ems.tools import magick
+
+    ro, rw = roots
+    (ro / "v.mp4").write_bytes(b"mp4")
+    asked = []
+
+    async def extract(ctx, path, out, *, at, deinterlace):
+        asked.append(at)
+        with open(out, "w") as f:
+            f.write(str(at))
+
+    async def spread(path, *, timeout):
+        # Black until a quarter of the way in.
+        return 40.0 if float(open(path).read()) >= 25.0 else 0.5
+
+    async def seconds(path, *, timeout):
+        return 100.0
+
+    rendered = []
+
+    async def fake_render(source, angle, mirror, plans, *, timeout):
+        rendered.append(open(source).read())
+        for plan in plans:
+            with open(plan.temp, "wb") as f:
+                f.write(b"a")
+        return magick.Rendered((240, 320), [(240, 320)])
+
+    monkeypatch.setattr(video, "extract_poster", extract)
+    monkeypatch.setattr(video, "frame_spread", spread)
+    monkeypatch.setattr(video, "picture_seconds", seconds)
+    monkeypatch.setattr(magick, "render", fake_render)
+    body = {"file": {"path": str(ro / "v.mp4")}, "targets": [{"output": {"path": str(rw / "x.avif")}, "box": {"width": 10}}]}
+    r = await client.post("/v0/video/poster", json={**body, "skip_blank": True})
+    assert r.status_code == 200, r.json()
+    assert (asked, r.json()["result"]["t"], rendered) == ([1.0, 10.0, 25.0], 25.0, ["25.0"])
+
+    # Without skip_blank the frame asked for is the poster, blank or not.
+    asked.clear()
+    r = await client.post("/v0/video/poster", json=body)
+    assert (asked, r.json()["result"]["t"]) == ([1.0], 1.0)
+
+    # A video blank at every place looked keeps the frame asked for.
+    monkeypatch.setattr(video, "frame_spread", lambda path, *, timeout: _const(0.5))
+    asked.clear()
+    rendered.clear()
+    r = await client.post("/v0/video/poster", json={**body, "skip_blank": True})
+    assert (asked, r.json()["result"]["t"], rendered) == ([1.0, 10.0, 25.0, 50.0], 1.0, ["1.0"])
+
+
+async def _const(value):
+    return value
+
+
 async def test_a_video_with_no_frame_at_all_is_undecodable(client, roots, monkeypatch):
     ro, rw = roots
     (ro / "v.mp4").write_bytes(b"mp4")

@@ -6,6 +6,7 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import statistics
 from typing import Literal
 
 from fastapi import APIRouter, Request
@@ -166,6 +167,9 @@ class PosterRequest(WithOptions):
     file: FileRef
     at: float = Field(default=1.0, ge=0)
     deinterlace: bool = False
+    # True for a poster that stands for the whole video: a blank frame at `at` gives way to a
+    # later one that shows something (`unblank_poster`). A face's frame is asked for exactly.
+    skip_blank: bool = False
     targets: list[RenditionTarget] = Field(min_length=1, max_length=MAX_TARGETS)
 
 
@@ -232,6 +236,47 @@ async def extract_poster_within(ctx: Context, path: str, out: str, *, at: float,
     raise EmsError(UNDECODABLE, "no video frame")
 
 
+# A still whose luma spreads less than this at 48×27 shows nothing: black, white, or a tape's
+# blue screen. video.shots' leader is as flat, and also nearly black or white.
+BLANK_SPREAD = 6.0
+
+# Where a poster looks when its frame is blank, as fractions of the picture's length.
+UNBLANK_AT = (0.1, 0.25, 0.5)
+
+
+async def frame_spread(path: str, *, timeout: float) -> float | None:
+    """The standard deviation of a still's luma at 48×27, or None when ffmpeg cannot read it."""
+    size = 48 * 27
+    done = await run([require("ffmpeg"), "-v", "error", "-i", path, "-vf", "scale=48:27,format=gray", "-frames:v", "1", "-f", "rawvideo", "-"], timeout=timeout)
+    if done.code != 0 or len(done.stdout) < size:
+        return None
+    return statistics.pstdev(done.stdout[:size])
+
+
+async def unblank_poster(ctx: Context, path: str, out: str, *, t: float, deinterlace: bool) -> float:
+    """The second of the frame left at `out`: `t`'s, unless it is blank and a frame further in
+    (`UNBLANK_AT`) is not. When every one is blank, or the picture cannot be read further, `t`'s stands."""
+    timeout = ctx.settings.tool_stall_seconds
+    spread = await frame_spread(out, timeout=timeout)
+    if spread is None or spread >= BLANK_SPREAD:
+        return t
+    seconds = await picture_seconds(path, timeout=timeout)
+    later = os.path.join(os.path.dirname(out), "later.jpg")
+    for fraction in UNBLANK_AT if seconds else ():
+        second = round(seconds * fraction, 3)
+        if second <= t:
+            continue
+        try:
+            await extract_poster(ctx, path, later, at=second, deinterlace=deinterlace)
+        except (NoFrame, EmsError):
+            return t
+        spread = await frame_spread(later, timeout=timeout)
+        if spread is not None and spread >= BLANK_SPREAD:
+            os.replace(later, out)
+            return second
+    return t
+
+
 async def poster(ctx: Context, req: PosterRequest, progress: Progress) -> Outcome:
     path = ctx.roots.input(req.file.path)
     async with ctx.admission.slot("tools", interactive=req.options.interactive):
@@ -240,6 +285,8 @@ async def poster(ctx: Context, req: PosterRequest, progress: Progress) -> Outcom
             await progress.emit("frame")
             frame = os.path.join(scratch, "frame.jpg")
             t = await extract_poster_within(ctx, path, frame, at=req.at, deinterlace=req.deinterlace)
+            if req.skip_blank:
+                t = await unblank_poster(ctx, path, frame, t=t, deinterlace=req.deinterlace)
             await progress.emit("render")
             # The frame is a JPEG now: the caller's angle applies whole, no reader-applied turn to subtract.
             result = await render_targets(ctx, frame, req.file.angle, req.file.mirror, req.targets)

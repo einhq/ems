@@ -342,13 +342,16 @@ Result: `{ "frames": [ { "path", "t" } ] }`, `t` the frame's second in the file.
 
 ### 4.5 `video.poster` _(implemented)_
 
-One frame, fitted like a rendition. `{ "file", "at": 1.0, "deinterlace": false, "targets": [ … as 4.2 … ] }`
+One frame, fitted like a rendition. `{ "file", "at": 1.0, "deinterlace": false, "skip_blank": false, "targets": [ … as 4.2 … ] }`
 → as 4.2 plus `"t"`. A convenience over `video.frames` + `image.renditions` that decodes once:
 the frame is taken at `at` seconds (default 1, past the black leader most cameras record) in the
 display frame with square pixels; `deinterlace` runs yadif first. When the picture ends before
 `at`, the poster is the first frame and `t` says so (0): a container's duration counts its longest
 stream, so a caller cannot know where the picture stops. A file with no frame at all is
-`undecodable`.
+`undecodable`. With `skip_blank`, for a poster that stands for the whole video, a blank frame —
+its luma spread under 6 at 48×27: black, white or a tape's blue screen — gives way to the first
+of the frames at a tenth, a quarter and half of the picture that is not blank, and `t` says which;
+when all are blank the frame at `at` stands.
 
 ### 4.5a `video.storyboard` _(implemented, 5.4)_
 
