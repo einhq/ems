@@ -1,6 +1,7 @@
 """`faces.detect_video`: following faces through the sampled frames, grouping them into the
 file's faces, and the op with ffprobe and the worker stubbed."""
 
+import json
 import math
 import os
 import sys
@@ -395,3 +396,16 @@ def test_a_long_video_is_sampled_more_sparsely():
     assert ops.video_face_step(1.0, 600.0) == 1.0
     assert ops.video_face_step(1.0, 2 * ops.VIDEO_FACES_MAX_SAMPLES) == 2.0
     assert ops.video_face_step(1.0, None) == 1.0
+
+
+async def test_detect_video_streams_how_much_is_done(client, fake_worker, roots, monkeypatch):
+    ro, _ = roots
+    (ro / "v.mp4").write_bytes(b"mp4")
+    monkeypatch.setattr(faces.ffprobe_tool, "probe", readable_video())
+    fake_worker.on("detect_video_faces", lambda req: {"frame": {"width": 64, "height": 36}, "interval": 1.0, "samples": 2, "faces": []})
+    fake_worker.progress["detect_video_faces"] = [0.25, 0.5]
+    r = await client.post("/v0/faces/detect_video", json={"file": {"path": str(ro / "v.mp4")}}, headers={"accept": "text/event-stream"})
+    events = [block for block in r.text.split("\n\n") if block]
+    progress = [json.loads(block.split("data: ", 1)[1]) for block in events if block.startswith("event: progress")]
+    assert progress == [{"phase": "detect"}, {"phase": "detect", "fraction": 0.25}, {"phase": "detect", "fraction": 0.5}]
+    assert events[-1].startswith("event: result")

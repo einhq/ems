@@ -93,8 +93,10 @@ event: result
 data: {"ok":true,"result":{…},"meta":{…}}
 ```
 
-or `event: error` with the failure envelope. `fraction` is optional and monotonic when present;
-`phase` names what is happening in the op's own vocabulary. Without `text/event-stream` the same
+or `event: error` with the failure envelope. `fraction` is how much of the op is done, from 0 to
+1, whatever the op counts it in (seconds of video, pages, files); it is optional and monotonic when
+present, so a caller can show it as a percentage without knowing the op. `phase` names what is
+happening in the op's own vocabulary. Without `text/event-stream` the same
 op blocks and returns the terminal envelope as its body — the two forms carry the same result.
 
 **Closing the connection cancels the operation.** A running tool is killed, a queued model request
@@ -549,7 +551,7 @@ The faces a video shows, each with when it is seen, in one request:
 A frame every `interval` seconds (0.2–60, default 0.25), in the display frame the caller's
 `angle`/`mirror` name, read in one pass over the video. A video longer than 1800 intervals is
 sampled more sparsely so it gives no more frames than that; `interval` in the answer is the spacing
-used. Detections smaller than `min_size` of the frame's shorter side, or below `min_confidence`,
+used. Streamed, it reports `fraction` as the share of the video read, every few seconds. Detections smaller than `min_size` of the frame's shorter side, or below `min_confidence`,
 are left out.
 
 The detections are followed from frame to frame and the tracks of the file grouped into faces:

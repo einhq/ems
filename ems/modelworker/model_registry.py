@@ -413,18 +413,27 @@ ABANDON_POLL_SECONDS = 0.1
 
 
 @contextmanager
-def request_scope(expires_at: float | None, hung_up=None):
-    """The request this thread serves: its deadline (epoch seconds) and a check for its caller gone.
+def request_scope(expires_at: float | None, hung_up=None, progress=None):
+    """The request this thread serves: its deadline (epoch seconds), a check for its caller gone,
+    and where `report_progress` sends how far it has come.
 
     A family lock taken inside the scope gives up on a request nobody is waiting for, so work
     queued behind other work is dropped instead of run for no one. Threads outside a scope
     (preload, eviction) always wait.
     """
-    _request.expires_at, _request.hung_up = expires_at, hung_up
+    _request.expires_at, _request.hung_up, _request.progress = expires_at, hung_up, progress
     try:
         yield
     finally:
-        _request.expires_at, _request.hung_up = None, None
+        _request.expires_at, _request.hung_up, _request.progress = None, None, None
+
+
+def report_progress(fraction: float) -> None:
+    """Tell this thread's caller how much of its request is done, from 0 to 1. Outside a request,
+    nothing happens."""
+    report = getattr(_request, "progress", None)
+    if report is not None:
+        report(max(0.0, min(1.0, float(fraction))))
 
 
 def abandoned() -> str | None:

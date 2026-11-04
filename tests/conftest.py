@@ -22,6 +22,8 @@ class FakeModelWorker:
     def __init__(self, socket_path: str):
         self.socket_path = socket_path
         self.handlers: dict = {}
+        # Per op, the `{"progress": f}` lines sent before the answer.
+        self.progress: dict[str, list[float]] = {}
         self.requests: list[dict] = []
         self.server: asyncio.AbstractServer | None = None
 
@@ -50,6 +52,8 @@ class FakeModelWorker:
             reply = {"ok": True, "result": result}
         except Exception as exc:  # noqa: BLE001
             reply = {"ok": False, "error": str(exc), "error_type": type(exc).__name__}
+        for fraction in self.progress.get(request.get("op"), []):
+            writer.write((json.dumps({"progress": fraction}) + "\n").encode())
         writer.write((json.dumps(reply) + "\n").encode())
         await writer.drain()
         writer.close()

@@ -131,6 +131,7 @@ async def detect_video(ctx: Context, req: DetectVideoRequest, progress: Progress
                 "min_confidence": req.min_confidence,
             },
             deadline=req.options.deadline,
+            on_progress=lambda fraction: progress.emit("detect", fraction),
         )
     faces = []
     for face in raw.get("faces") or []:

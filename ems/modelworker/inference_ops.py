@@ -947,6 +947,8 @@ def detect_video_faces(video_path: str, angle=0, mirror=False, interval: float =
         pending.clear()
         with registry.family_lock(FACES):
             samples.extend(registry.run_on_model_thread(FACES, lambda: detect(batch)))
+        if duration:
+            registry.report_progress(batch[-1][1] / duration)
 
     decoded, next_t, misses = 0, 0.0, 0
     try:

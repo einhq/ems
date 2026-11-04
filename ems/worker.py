@@ -18,7 +18,7 @@ import os
 import signal
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from .admission import note_family
@@ -212,12 +212,16 @@ class Worker:
         payload: dict[str, Any],
         *,
         deadline: float | None = None,
+        on_progress: Callable[[float], Awaitable[None]] | None = None,
     ) -> Any:
-        """One request, one connection. Raises EmsError on every failure."""
+        """One request, one connection. Raises EmsError on every failure.
+
+        `on_progress` is given how much of the request is done, 0 to 1, as often as the worker
+        says so; an op that does not measure its progress never calls it."""
         if self.gate is not None:
             async with self.gate(op, payload):
-                return await self._call(op, payload, deadline=deadline)
-        return await self._call(op, payload, deadline=deadline)
+                return await self._call(op, payload, deadline=deadline, on_progress=on_progress)
+        return await self._call(op, payload, deadline=deadline, on_progress=on_progress)
 
     async def _call(
         self,
@@ -225,6 +229,7 @@ class Worker:
         payload: dict[str, Any],
         *,
         deadline: float | None = None,
+        on_progress: Callable[[float], Awaitable[None]] | None = None,
     ) -> Any:
         family = WORKER_OP_FAMILIES.get(op) or (("text-query" if payload.get("role") == "query" or payload.get("family") == "query" else "text-embed") if op == "embed_texts" else None)
         if family:
@@ -253,6 +258,11 @@ class Worker:
                     reply = json.loads(text)
                 except json.JSONDecodeError as exc:
                     raise EmsError(INTERNAL, f"model worker returned unparseable output: {text[:200]}") from exc
+                if "ok" not in reply and "progress" in reply:
+                    if on_progress is not None:
+                        await on_progress(float(reply["progress"]))
+                    reply = None
+                    continue
                 break
         finally:
             # On cancellation this is what tells the worker the caller is gone: work still

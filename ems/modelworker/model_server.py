@@ -30,6 +30,7 @@ response per connection.
 
 `angle`/`mirror` (optional, default 0/false) name the display frame an image op works in —
 the caller's rotation, not the EXIF tag's. Face boxes are fractions of that frame.
+  <- {"progress":0.42}            (any number of these first, from an op that measures its progress)
   <- {"ok":true,"result":...}
   <- {"ok":false,"error":"..."}
 
@@ -66,6 +67,8 @@ import model_registry as registry  # noqa: E402
 
 SOCKET_PATH = os.environ.get('CFG_MODEL_SOCKET', '/tmp/ems-model-worker.sock')
 EVICT_INTERVAL_SECONDS = 60
+# How often a request that measures its progress tells its caller how far it has come.
+PROGRESS_EVERY_SECONDS = 5
 
 # How often the RSS watchdog samples. One read of /proc/self/statm, so the interval is set by
 # how fast the ceiling can be crossed rather than by cost: a leak of gigabytes an hour is a few
@@ -456,7 +459,7 @@ class Handler(socketserver.StreamRequestHandler):
 
         started = time.time()
         try:
-            with registry.request_scope(request.get("expires_at"), self._hung_up):
+            with registry.request_scope(request.get("expires_at"), self._hung_up, self._progress):
                 # A request can sit in the socket's backlog while the server is busy, and a caller
                 # that gave up meanwhile has removed the files it sent, so it is refused before
                 # anything reads them. The family lock checks again once the model is free.
@@ -523,6 +526,16 @@ class Handler(socketserver.StreamRequestHandler):
         poller = select.poll()
         poller.register(self.connection, select.POLLHUP)
         return any(events & (select.POLLHUP | select.POLLERR) for _fd, events in poller.poll(0))
+
+    def _progress(self, fraction: float) -> None:
+        """Send how much of the request is done, at most every PROGRESS_EVERY_SECONDS and only when
+        it moved by a percent: the caller wants a sign of life, not every frame."""
+        now = time.monotonic()
+        last_at, last = getattr(self, "_progress_sent", (0.0, -1.0))
+        if now - last_at < PROGRESS_EVERY_SECONDS or fraction - last < 0.01:
+            return
+        self._progress_sent = (now, fraction)
+        self._reply({"progress": round(fraction, 4)})
 
     def _reply(self, payload: dict) -> None:
         try:
