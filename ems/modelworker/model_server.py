@@ -382,7 +382,7 @@ def handle(request: dict) -> dict:
         return ops.shot_boundaries(
             path, times, float(request.get("duration") or times[-1]),
             threshold=float(request["threshold"]), nms=float(request["nms"]), merge=float(request["merge"]),
-            min_shot=float(request["min_shot"]), min_change=float(request["min_change"]), debug=bool(request.get("debug")),
+            min_shot=float(request["min_shot"]), min_change=float(request["min_change"]), leader=bool(request.get("leader", True)), debug=bool(request.get("debug")),
         )
 
     if op == "read_text":

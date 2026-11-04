@@ -1117,11 +1117,12 @@ def copy_descriptors(paths: list[str], angle=0, mirror=False) -> dict:
     return {"descriptors": vectors, "model": registry.COPY_DETECT_MODEL}
 
 
-def shot_boundaries(path: str, times: list[float], duration: float, *, threshold: float, nms: float, merge: float, min_shot: float, min_change: float, debug: bool = False) -> dict:
+def shot_boundaries(path: str, times: list[float], duration: float, *, threshold: float, nms: float, merge: float, min_shot: float, min_change: float, leader: bool = True, debug: bool = False) -> dict:
     """A video's cuts, from its frames at 48×27 in the raw rgb24 file `path` and each frame's second.
 
     TransNetV2 scores every frame on its model thread; the rules that make cuts of the scores
     (shot_rules.py) and the lasting-change check read the frames again here, outside the lock.
+    Without `leader` no run of blank frames is a gap, as in a camera's take, which has none.
     With `debug` the per-frame scores and every candidate come back too, to tune the rules by.
     """
     import shot_rules
@@ -1138,7 +1139,7 @@ def shot_boundaries(path: str, times: list[float], duration: float, *, threshold
     with registry.family_lock(TRANSNET):
         scores, means, spreads = registry.run_on_model_thread(TRANSNET, run)
     candidates = shot_rules.peaks(scores, times, threshold, nms)
-    gaps = shot_rules.leader_gaps(means, spreads, times)
+    gaps = shot_rules.leader_gaps(means, spreads, times) if leader else []
     cuts = shot_rules.boundaries(
         candidates, gaps, duration,
         change_at=lambda t: shots.lasting_change(path, times, t),

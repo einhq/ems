@@ -129,12 +129,23 @@ async def test_the_op_asks_the_worker_with_its_rules_and_answers_the_cuts(client
     assert r.status_code == 200, body
     sent = fake_worker.requests[-1]
     assert sent["op"] == "shot_boundaries" and len(sent["times"]) == 750 and sent["duration"] == 30.0
-    assert (sent["threshold"], sent["nms"], sent["merge"], sent["min_shot"], sent["min_change"], sent["debug"]) == (0.55, 0.5, 1.0, 3.0, 0.1, False)
+    assert (sent["threshold"], sent["nms"], sent["merge"], sent["min_shot"], sent["min_change"], sent["leader"], sent["debug"]) == (0.55, 0.5, 1.0, 3.0, 0.1, True, False)
     # The scratch frames are gone once the worker has them.
     assert not os.path.exists(sent["path"])
     assert body["result"]["cuts"] == [{"t": 8.04, "score": 0.97, "kind": "cut"}]
     assert body["result"]["params"]["threshold"] == 0.55 and "scores" not in body["result"]
     assert body["meta"]["producer"].startswith("transnetv2+ffmpeg/") and body["meta"]["producer"].endswith("/cuda")
+
+
+async def test_a_video_without_leader_is_asked_for_none(client, fake_worker, roots, monkeypatch):
+    ro, _ = roots
+    (ro / "1920x1080.mp4").write_bytes(b"mp4")
+    install(monkeypatch)
+    fake_worker.on("shot_boundaries", lambda req: {"cuts": [], "gaps": [], "frames": 750, "model": "transnetv2"})
+    r = await client.post("/v0/video/shots", json={"file": {"path": str(ro / "1920x1080.mp4")}, "leader": False})
+    assert r.status_code == 200, r.json()
+    assert fake_worker.requests[-1]["leader"] is False
+    assert r.json()["result"]["params"]["leader"] is False
 
 
 async def test_a_turned_file_is_refused(client, roots, monkeypatch):

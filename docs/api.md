@@ -388,7 +388,7 @@ ends before the last tick.
 Where a video cuts from one shot to the next: the starts of its chapters.
 
 ```json
-{ "file": { "path": "…/1920x1080.mp4" }, "threshold": 0.6, "nms": 0.5, "merge": 1.0, "min_shot": 3.0, "min_change": 0.1, "debug": false }
+{ "file": { "path": "…/1920x1080.mp4" }, "threshold": 0.6, "nms": 0.5, "merge": 1.0, "min_shot": 3.0, "min_change": 0.1, "leader": true, "debug": false }
 ```
 
 - The file is upright — a rendition — so `angle` and `mirror` are refused rather than applied.
@@ -399,7 +399,9 @@ Where a video cuts from one shot to the next: the starts of its chapters.
     network marks the old shot's last frame, and the cut's `t` is the next one, the new shot's first;
   - black or white leader (blank frames — luma mean under 18 or over 235, spread under 6 at
     48×27 — for at least 0.2 s) is no cut, and its end is one (`kind: "leader"`, `score: null`)
-    unless it opens or closes the file;
+    unless it opens or closes the file. With `leader: false` there is none: for a video that has
+    no leader, such as a camera's take, where a blank stretch is a dark scene or a hand over the
+    lens, and is scored like any other picture;
   - the colours a second before and after a cut must differ by `min_change` (a Bhattacharyya
     distance of median 8×8×8 RGB histograms), which a flash or a flicker does not;
   - cuts under `merge` seconds apart are one, the stronger;

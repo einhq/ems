@@ -8,7 +8,8 @@ The rules, each measured on the archive (ein/core#707, wow notes/lessons-media.m
 - a cut is a peak of the score at or over the threshold, with no higher one within `nms` seconds,
   and starts on the frame after the peak: the network marks the old shot's last frame;
 - black or white leader (a run of nearly uniform, nearly black or white frames) is a gap: no cut
-  inside it, and one where it ends, unless it opens or closes the file;
+  inside it, and one where it ends, unless it opens or closes the file (the caller finds none in
+  a video that has no leader);
 - a cut must change the picture for good: the colours a second before and after it must differ,
   which a flash, a flicker or a splice blip does not do;
 - cuts closer than `merge` seconds are one, the stronger;

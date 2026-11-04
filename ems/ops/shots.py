@@ -42,6 +42,8 @@ class ShotsRequest(WithOptions):
     merge: float = Field(default=1.0, ge=0)
     min_shot: float = Field(default=3.0, ge=0)
     min_change: float = Field(default=0.10, ge=0, le=1)
+    # False for a video that has no leader, such as a camera's take: its dark stretches are picture.
+    leader: bool = True
     debug: bool = False
 
 
@@ -133,6 +135,7 @@ async def shots(ctx: Context, req: ShotsRequest, progress: Progress) -> Outcome:
                 "merge": req.merge,
                 "min_shot": req.min_shot,
                 "min_change": req.min_change,
+                "leader": req.leader,
                 "debug": req.debug,
             }, deadline=req.options.deadline)
     finally:
@@ -144,7 +147,7 @@ async def shots(ctx: Context, req: ShotsRequest, progress: Progress) -> Outcome:
         "cuts": raw.get("cuts", []),
         "gaps": raw.get("gaps", []),
         # What the cuts were found with, so a caller can tell a result made by other rules.
-        "params": {"threshold": req.threshold, "nms": req.nms, "merge": req.merge, "min_shot": req.min_shot, "min_change": req.min_change},
+        "params": {"threshold": req.threshold, "nms": req.nms, "merge": req.merge, "min_shot": req.min_shot, "min_change": req.min_change, "leader": req.leader},
     }
     if req.debug:
         result["candidates"] = raw.get("candidates", [])
