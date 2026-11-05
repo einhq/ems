@@ -75,9 +75,12 @@ def test_the_query_preload_loads_each_lengths_kernels_on_the_card(monkeypatch, d
     assert [len(text.split()) for text in model.texts] == lengths
 
 
-def test_the_query_family_is_kept_warm_at_several_lengths(quiet, monkeypatch):
+@pytest.mark.parametrize("device, lengths", [("cuda", [1, 16, 32, 64]), ("cpu", [1])])
+def test_the_query_family_is_kept_warm_at_several_lengths_on_the_card(quiet, monkeypatch, device, lengths):
     texts: list[str] = []
     monkeypatch.setattr(registry, "PINNED_FAMILIES", {"text-query"})
+    monkeypatch.setattr(registry, "text_embed_query_device", lambda: device)
     monkeypatch.setattr(ms, "handle", lambda request: texts.extend(request["texts"]))
     _run(0.08)
-    assert [len(text.split()) for text in texts[:4]] == [1, 16, 32, 64]
+    assert [len(text.split()) for text in texts[:len(lengths)]] == lengths
+    assert len(texts) % len(lengths) == 0

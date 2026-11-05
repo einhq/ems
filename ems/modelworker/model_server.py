@@ -698,12 +698,20 @@ def _preload_families(stop: threading.Event, families: set[str] | frozenset[str]
 # The requests a search sends each family, which the keep-warm sends as well: the same path through
 # the op, the tokenizer's length check and all, so they touch every page a search would. A query is
 # as long as its search: a longer one runs other code in cuBLAS and torch than a one-word one, which
-# after a reclaim read it back for 0.16 s (ein/core#1020), so the query family gets one of several
-# lengths. SigLIP pads every query to the same length.
+# after a reclaim read it back for 0.16 s (ein/core#1020), so on the card the query family gets one
+# of several lengths; on the CPU those take 0.7 s a minute, and one word is enough. SigLIP pads
+# every query to the same length.
 _KEEP_WARM_REQUESTS = {
     'siglip-text': [{"op": "embed_image_texts", "texts": ["warm"]}],
     'text-query': [{"op": "embed_texts", "texts": [" ".join(["warm"] * words)], "role": "query"} for words in (1, 16, 32, 64)],
 }
+
+
+def _keep_warm_requests(family: str) -> list[dict] | None:
+    requests = _KEEP_WARM_REQUESTS.get(family)
+    if family == 'text-query' and registry.text_embed_query_device() != "cuda":
+        return requests[:1]
+    return requests
 
 
 def _keep_warm(stop: threading.Event) -> None:
@@ -717,7 +725,7 @@ def _keep_warm(stop: threading.Event) -> None:
         if time.time() - _last_work_at < KEEP_WARM_SECONDS or _recycling or not registry.pinned_ready.is_set():
             continue
         for family in sorted(registry.PINNED_FAMILIES):
-            requests = _KEEP_WARM_REQUESTS.get(family)
+            requests = _keep_warm_requests(family)
             if requests is None or registry.family_lock(family).busy() or stop.is_set():
                 continue
             try:
