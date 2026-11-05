@@ -248,3 +248,37 @@ def test_making_room_on_the_card_leaves_copies_on_the_cpu(monkeypatch):
     assert registry.place("sscd") == "cuda"
     assert "siglip-visual:cuda" not in registry._cache
     assert "text-language:cpu" in registry._cache
+
+
+def _ocr_beside(monkeypatch, free_mb):
+    """OCR in a crawl beside the second worker's kind: the photo engine used a moment ago, the
+    transcriber two minutes ago, siglip-visual ten seconds ago as the worker turns to faces; each
+    unload frees 2600 MB."""
+    _crawl(monkeypatch, free_mb)
+    monkeypatch.setattr(registry, "_own_card_mb", lambda: None)     # free memory alone decides
+    monkeypatch.setattr(registry, "_card_return_at", {})
+    monkeypatch.setattr(registry, "CARD_RETURN_SECONDS", 60.0)
+    now = registry.time.time()
+    registry._cache["htr:cuda"] = object()
+    registry._last_used.update({"htr:cuda": now - 120, "siglip-visual:cuda": now - 10})
+
+
+def test_the_transcriber_is_not_idle_while_the_photo_engine_works(monkeypatch):
+    # ein/core#843: on its own clock the transcriber was the one idle family, and faces unloaded it.
+    free = [1200.0]
+    _ocr_beside(monkeypatch, free)
+    assert registry.place("faces") == "cpu"
+    assert "htr:cuda" in registry._cache and "siglip-visual:cuda" in registry._cache
+    # Once siglip-visual is idle past the grace, faces goes to the card in its place.
+    registry._last_used["siglip-visual:cuda"] -= registry.ROOM_IDLE_SECONDS
+    registry._cache["faces:cpu"] = object()
+    registry._last_used["faces:cpu"] = registry.time.time()
+    assert registry.place("faces") == "cuda"
+    assert "htr:cuda" in registry._cache and "siglip-visual:cuda" not in registry._cache
+
+
+def test_the_transcriber_is_idle_once_the_photo_engine_is(monkeypatch):
+    free = [1200.0]
+    _ocr_beside(monkeypatch, free)
+    registry._last_used["ocr:cuda"] -= 60
+    assert registry.evict_idle(registry.ROOM_IDLE_SECONDS) == ["ocr:cuda", "htr:cuda"]

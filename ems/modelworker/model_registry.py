@@ -854,8 +854,8 @@ def unload(families: list[str] | None = None, device: str | None = None, wait: b
 
 def evict_idle(max_idle: float = IDLE_EVICT_SECONDS, keep: tuple[str, ...] = (), device: str | None = None,
                enough: Callable[[], bool] | None = None) -> list[str]:
-    """Unload resident families untouched for `max_idle` seconds, only their copies on `device` if
-    given. Returns their keys.
+    """Unload resident families untouched for `max_idle` seconds, nor the family they serve
+    (SERVES), only their copies on `device` if given. Returns their keys.
 
     Families in PINNED_FAMILIES are never evicted — see the note there — nor those in `keep`, nor
     one whose family lock is held or waited on right now. With `enough`, the least recently used
@@ -864,12 +864,13 @@ def evict_idle(max_idle: float = IDLE_EVICT_SECONDS, keep: tuple[str, ...] = (),
     """
     now = time.time()
     with _lock:
+        seen = {k: _seen(k) for k in _last_used}
         stale = sorted((
-            k for k, seen in _last_used.items()
-            if now - seen > max_idle and _family_of(k) not in PINNED_FAMILIES and _family_of(k) not in keep
+            k for k in _last_used
+            if now - seen[k] > max_idle and _family_of(k) not in PINNED_FAMILIES and _family_of(k) not in keep
             and (device is None or _device_of(k) == device)
             and not _busy(_family_of(k))
-        ), key=lambda k: _last_used[k])
+        ), key=lambda k: seen[k])
     if enough is None:
         if stale:
             _forget(stale)
@@ -883,6 +884,20 @@ def evict_idle(max_idle: float = IDLE_EVICT_SECONDS, keep: tuple[str, ...] = (),
         _forget([key])
         unloaded.append(key)
     return unloaded
+
+
+# A family that works on another's requests, and is idle only once that one is too. The transcriber
+# writes the lines of the photo engine's readings that are handwriting, a tenth of them in a crawl,
+# so on its own clock it was the least recently used family whenever faces or siglip-visual came
+# back beside the photo engine, and each unload cost the next handwritten page a load of ~90 s
+# (ein/core#843). The English transcriber has fewer pages still, and is left to its own clock.
+SERVES = {"htr": "ocr"}
+
+
+def _seen(key: str) -> float:
+    """When `key` was last used, or the family it serves (SERVES) if that was later. Under `_lock`."""
+    served = SERVES.get(_family_of(key))
+    return max([_last_used[key], *(at for k, at in _last_used.items() if served and _family_of(k) == served)])
 
 
 def _busy(family: str) -> bool:

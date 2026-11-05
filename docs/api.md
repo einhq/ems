@@ -149,7 +149,9 @@ fast it answers, never what (`model_registry.place`):
   `model_unavailable` (`ocr.read` is asked again later), since on the CPU they are ten to seventy
   times slower; only a card too small ever to hold one leaves it on the CPU. To make room they
   unload families not working right now, least recently used first, but not the photo engine,
-  and `htr-en` unloads `htr` only when nothing else gives it room.
+  and `htr-en` unloads `htr` only when nothing else gives it room. `htr` counts as idle only once
+  the photo engine is too, so another family coming onto the card beside an OCR crawl does not
+  unload it for the next handwritten page to load again.
 - **A shared card.** `EMS_CARD_SHARE_MB` caps what EMS's own processes hold (counted with
   `nvidia-smi`, which in the container lists only them), for a card another service shares; the
   other side is set to leave EMS the same number (ein/llm's `LLM_CARD_RESERVE_MB`).
