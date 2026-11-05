@@ -639,6 +639,8 @@ def _preload_done() -> None:
 
 
 def _import_card_libraries() -> None:
+    if all(name in sys.modules for name in CARD_IMPORTS):
+        return
     started = time.time()
     for name in CARD_IMPORTS:
         if name not in sys.modules:
