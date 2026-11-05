@@ -73,3 +73,11 @@ def test_the_query_preload_loads_each_lengths_kernels_on_the_card(monkeypatch, d
     monkeypatch.setattr(registry, "text_embedder", lambda family, device: model)
     ms._warm_query("text-query")()
     assert [len(text.split()) for text in model.texts] == lengths
+
+
+def test_the_query_family_is_kept_warm_at_several_lengths(quiet, monkeypatch):
+    texts: list[str] = []
+    monkeypatch.setattr(registry, "PINNED_FAMILIES", {"text-query"})
+    monkeypatch.setattr(ms, "handle", lambda request: texts.extend(request["texts"]))
+    _run(0.08)
+    assert [len(text.split()) for text in texts[:4]] == [1, 16, 32, 64]

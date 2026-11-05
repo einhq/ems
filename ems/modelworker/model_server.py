@@ -69,13 +69,13 @@ import model_registry as registry  # noqa: E402
 
 SOCKET_PATH = os.environ.get('CFG_MODEL_SOCKET', '/tmp/ems-model-worker.sock')
 EVICT_INTERVAL_SECONDS = 60
-# After this many seconds without a request, one query goes through each pinned family, and again
+# After this many seconds without a request, a search's queries go through each pinned family, and again
 # every as many seconds while it stays quiet; 0 turns it off. Left alone overnight, the kernel
 # reclaims the file pages a query runs through (libraries, tokenizers), and the first search after
 # it read them back from the containers' disk: 3 s where a warm one takes 20 ms (ein/core#1011).
-# A query a minute keeps them among the pages in use, for ~20 ms of the card's time.
+# Queries once a minute keep them among the pages in use, for ~80 ms of the card's time.
 KEEP_WARM_SECONDS = float(os.environ.get('CFG_MODEL_KEEP_WARM', '60'))
-# A keep-warm query slower than this is logged: it found something cold.
+# A family's keep-warm queries slower than this together are logged: they found something cold.
 KEEP_WARM_SLOW_SECONDS = 0.5
 # On the card, the query family's preload runs a query of every length up to this many words. A
 # length the process has not seen picks its own kernels, which CUDA loads from the libraries the
@@ -695,16 +695,19 @@ def _preload_families(stop: threading.Event, families: set[str] | frozenset[str]
             log(f"preload of {family} failed: {exc}")
 
 
-# The request a search sends each family, which the keep-warm sends as well: the same path through
-# the op, the tokenizer's length check and all, so it touches every page a search would.
+# The requests a search sends each family, which the keep-warm sends as well: the same path through
+# the op, the tokenizer's length check and all, so they touch every page a search would. A query is
+# as long as its search: a longer one runs other code in cuBLAS and torch than a one-word one, which
+# after a reclaim read it back for 0.16 s (ein/core#1020), so the query family gets one of several
+# lengths. SigLIP pads every query to the same length.
 _KEEP_WARM_REQUESTS = {
-    'siglip-text': {"op": "embed_image_texts", "texts": ["warm"]},
-    'text-query': {"op": "embed_texts", "texts": ["warm"], "role": "query"},
+    'siglip-text': [{"op": "embed_image_texts", "texts": ["warm"]}],
+    'text-query': [{"op": "embed_texts", "texts": [" ".join(["warm"] * words)], "role": "query"} for words in (1, 16, 32, 64)],
 }
 
 
 def _keep_warm(stop: threading.Event) -> None:
-    """While no request comes, the search request through each pinned family every KEEP_WARM_SECONDS.
+    """While no request comes, the search requests through each pinned family every KEEP_WARM_SECONDS.
 
     A family a request holds or waits for is skipped: it is warm, and the request goes first.
     """
@@ -714,15 +717,16 @@ def _keep_warm(stop: threading.Event) -> None:
         if time.time() - _last_work_at < KEEP_WARM_SECONDS or _recycling or not registry.pinned_ready.is_set():
             continue
         for family in sorted(registry.PINNED_FAMILIES):
-            request = _KEEP_WARM_REQUESTS.get(family)
-            if request is None or registry.family_lock(family).busy() or stop.is_set():
+            requests = _KEEP_WARM_REQUESTS.get(family)
+            if requests is None or registry.family_lock(family).busy() or stop.is_set():
                 continue
             try:
                 started = time.time()
-                handle(dict(request))
+                for request in requests:
+                    handle(dict(request))
                 took = time.time() - started
                 if took > KEEP_WARM_SLOW_SECONDS:
-                    log(f"keep-warm query through {family} took {took:.2f}s")
+                    log(f"keep-warm queries through {family} took {took:.2f}s")
             except Exception as exc:  # noqa: BLE001 - the next request reports a real failure
                 log(f"keep-warm query through {family} failed: {exc}")
 
