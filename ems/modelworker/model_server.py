@@ -67,6 +67,14 @@ import model_registry as registry  # noqa: E402
 
 SOCKET_PATH = os.environ.get('CFG_MODEL_SOCKET', '/tmp/ems-model-worker.sock')
 EVICT_INTERVAL_SECONDS = 60
+# After this many seconds without a request, one query goes through each pinned family, and again
+# every as many seconds while it stays quiet; 0 turns it off. Left alone overnight, the kernel
+# reclaims the file pages a query runs through (libraries, tokenizers), and the first search after
+# it read them back from the containers' disk: 3 s where a warm one takes 20 ms (ein/core#1011).
+# A query a minute keeps them among the pages in use, for ~20 ms of the card's time.
+KEEP_WARM_SECONDS = float(os.environ.get('CFG_MODEL_KEEP_WARM', '60'))
+# A keep-warm query slower than this is logged: it found something cold.
+KEEP_WARM_SLOW_SECONDS = 0.5
 # How often a request that measures its progress tells its caller how far it has come.
 PROGRESS_EVERY_SECONDS = 5
 
@@ -119,6 +127,8 @@ RECYCLED_FOR = os.environ.get('CFG_MODEL_RECYCLE_REASON', '')
 
 _started_at = time.time()
 _requests = 0
+# When the last request that ran a model came in, for the keep-warm loop.
+_last_work_at = time.time()
 _requests_lock = threading.Lock()
 
 # Recycles this lineage of processes has already done, carried across the re-exec in the
@@ -433,7 +443,7 @@ class Handler(socketserver.StreamRequestHandler):
     timeout = None
 
     def handle(self):
-        global _requests, _inflight
+        global _requests, _inflight, _last_work_at
         try:
             raw = self.rfile.readline()
         except OSError:
@@ -450,6 +460,8 @@ class Handler(socketserver.StreamRequestHandler):
         op = request.get("op", "?")
         with _requests_lock:
             _requests += 1
+            if op not in ("health", "memstats"):
+                _last_work_at = time.time()
             _op_counts[op] = _op_counts.get(op, 0) + 1
         # Counted before the work and released in the same `finally` as the trim, so a
         # recycle's drain covers the reclaim too — re-exec'ing between a reply and its
@@ -575,6 +587,19 @@ def _preload(stop: threading.Event) -> None:
         registry.pinned_ready.set()
 
 
+def _warm_query(family: str):
+    """One query through `family`, as a search sends it, or None for a family that has none wired.
+
+    It runs on the family's own thread, as every load and query does (see run_on_model_thread): the
+    preload's thread exits once it is done, and it must not leave per-thread CUDA state behind.
+    """
+    if family == 'siglip-text':
+        return lambda: registry.siglip_text(registry.image_embed_text_device()).embed(["warm"])
+    if family == 'text-query':
+        return lambda: registry.text_embedder('text-query', registry.text_embed_query_device()).encode(["warm"], prompt_name="query")
+    return None
+
+
 def _preload_families(stop: threading.Event) -> None:
     """The loop itself, split out only so `_preload` can bracket it with `_preloading`."""
     for family in sorted(registry.PINNED_FAMILIES):
@@ -582,25 +607,42 @@ def _preload_families(stop: threading.Event) -> None:
             return
         try:
             started = time.time()
-            # Loading goes on the family's own thread, not this one. A thread that loads a
-            # model acquires the same per-thread CUDA state a thread that runs one does, and
-            # this thread exits as soon as the preload is done — see run_on_model_thread.
-            # One query through each as well: on the card the first one sets up its kernels, which
-            # took the first search after a start 2.8 s.
-            if family == 'siglip-text':
-                def load():
-                    registry.siglip_text(registry.image_embed_text_device()).embed(["warm"])
-            elif family == 'text-query':
-                def load():
-                    registry.text_embedder('text-query', registry.text_embed_query_device()).encode(["warm"], prompt_name="query")
-            else:
+            # Loading the family and one query through it: on the card the first query sets up its
+            # kernels, which took the first search after a start 2.8 s.
+            query = _warm_query(family)
+            if query is None:
                 log(f"preload: no loader wired for pinned family '{family}', skipping")
                 continue
             with registry.family_lock(family):
-                registry.run_on_model_thread(family, load)
+                registry.run_on_model_thread(family, query)
             log(f"preloaded {family} in {time.time() - started:.1f}s")
         except Exception as exc:  # noqa: BLE001 - preload is best-effort
             log(f"preload of {family} failed: {exc}")
+
+
+def _keep_warm(stop: threading.Event) -> None:
+    """While no request comes, one query through each pinned family every KEEP_WARM_SECONDS.
+
+    A family a request holds or waits for is skipped: it is warm, and the request goes first.
+    """
+    registry.pinned_ready.wait()
+    while not stop.wait(KEEP_WARM_SECONDS):
+        if time.time() - _last_work_at < KEEP_WARM_SECONDS or _recycling:
+            continue
+        for family in sorted(registry.PINNED_FAMILIES):
+            query = _warm_query(family)
+            lock = registry.family_lock(family)
+            if query is None or lock.busy() or stop.is_set():
+                continue
+            try:
+                started = time.time()
+                with lock:
+                    registry.run_on_model_thread(family, query)
+                took = time.time() - started
+                if took > KEEP_WARM_SLOW_SECONDS:
+                    log(f"keep-warm query through {family} took {took:.2f}s")
+            except Exception as exc:  # noqa: BLE001 - the next request reports a real failure
+                log(f"keep-warm query through {family} failed: {exc}")
 
 
 def _evict_loop(stop: threading.Event) -> None:
@@ -873,6 +915,8 @@ def main() -> int:
     # Cleared before the socket binds, so no request can load another family ahead of the pins.
     registry.pinned_ready.clear()
     threading.Thread(target=_preload, args=(stop,), daemon=True).start()
+    if KEEP_WARM_SECONDS > 0:
+        threading.Thread(target=_keep_warm, args=(stop,), daemon=True).start()
 
     # A leak takes hours to reach the container cap, so the memory series collects unattended.
     memlog_interval = mem_diag.interval_from_env()

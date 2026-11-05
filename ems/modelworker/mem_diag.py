@@ -154,11 +154,23 @@ def _torch_cuda() -> dict | None:
         return None
 
 
+def _major_faults() -> int | None:
+    """Page faults so far that had to read from disk: a rise between two lines with nothing loaded
+    is pages the kernel had reclaimed, read back by the request that needed them."""
+    try:
+        with open("/proc/self/stat", "r") as handle:
+            # The command name can hold spaces; the fields after its closing paren are fixed.
+            return int(handle.read().rsplit(")", 1)[1].split()[9])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
 def snapshot() -> dict:
     """One reading of every probe. Missing probes are simply absent."""
     out: dict[str, object] = {"at": round(time.time(), 1), "threads": threading.active_count()}
     for key, value in (
         ("proc", _smaps_rollup()),
+        ("majflt", _major_faults()),
         ("glibc", mallinfo()),
         ("anon_maps", _anon_mappings()),
         ("torch_cuda", _torch_cuda()),
@@ -197,6 +209,7 @@ def format_line(snap: dict, loaded: object = None) -> str:
         f"maps={maps.get('count', '?')}",
         f"mapsMB={_mb(maps.get('total'))}",
         f"threads={snap.get('threads', '?')}",
+        f"majflt={snap.get('majflt', '?')}",
     ]
     if cuda:
         parts.append(f"vram_alloc={_mb(cuda.get('allocated'))}MB")
