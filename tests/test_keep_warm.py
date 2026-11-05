@@ -15,14 +15,14 @@ import model_server as ms  # noqa: E402
 
 @pytest.fixture
 def quiet(monkeypatch):
-    """A server whose pins are ready and whose warm queries record the family instead of running a model."""
+    """A server whose pins are ready and whose requests record their op instead of running a model."""
     ran: list[str] = []
     monkeypatch.setattr(ms, "KEEP_WARM_SECONDS", 0.05)
     monkeypatch.setattr(ms, "_recycling", False)
     monkeypatch.setattr(ms, "_last_work_at", time.time() - 60)
     monkeypatch.setattr(ms, "log", lambda message: None)
     monkeypatch.setattr(registry, "PINNED_FAMILIES", {"siglip-text", "text-query"})
-    monkeypatch.setattr(ms, "_warm_query", lambda family: lambda: ran.append(family))
+    monkeypatch.setattr(ms, "handle", lambda request: ran.append(request["op"]))
     registry.pinned_ready.set()
     return ran
 
@@ -38,7 +38,7 @@ def _run(seconds: float) -> None:
 
 def test_a_quiet_server_queries_each_pinned_family(quiet):
     _run(0.2)
-    assert "siglip-text" in quiet and "text-query" in quiet
+    assert "embed_image_texts" in quiet and "embed_texts" in quiet
 
 
 def test_a_recent_request_holds_it_off(quiet, monkeypatch):
@@ -55,4 +55,4 @@ def test_a_family_a_request_holds_is_skipped(quiet):
         _run(0.2)
     finally:
         lock.release()
-    assert "siglip-text" not in quiet and "text-query" in quiet
+    assert "embed_image_texts" not in quiet and "embed_texts" in quiet

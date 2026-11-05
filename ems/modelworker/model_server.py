@@ -683,8 +683,16 @@ def _preload_families(stop: threading.Event, families: set[str] | frozenset[str]
             log(f"preload of {family} failed: {exc}")
 
 
+# The request a search sends each family, which the keep-warm sends as well: the same path through
+# the op, the tokenizer's length check and all, so it touches every page a search would.
+_KEEP_WARM_REQUESTS = {
+    'siglip-text': {"op": "embed_image_texts", "texts": ["warm"]},
+    'text-query': {"op": "embed_texts", "texts": ["warm"], "role": "query"},
+}
+
+
 def _keep_warm(stop: threading.Event) -> None:
-    """While no request comes, one query through each pinned family every KEEP_WARM_SECONDS.
+    """While no request comes, the search request through each pinned family every KEEP_WARM_SECONDS.
 
     A family a request holds or waits for is skipped: it is warm, and the request goes first.
     """
@@ -694,14 +702,12 @@ def _keep_warm(stop: threading.Event) -> None:
         if time.time() - _last_work_at < KEEP_WARM_SECONDS or _recycling or not registry.pinned_ready.is_set():
             continue
         for family in sorted(registry.PINNED_FAMILIES):
-            query = _warm_query(family)
-            lock = registry.family_lock(family)
-            if query is None or lock.busy() or stop.is_set():
+            request = _KEEP_WARM_REQUESTS.get(family)
+            if request is None or registry.family_lock(family).busy() or stop.is_set():
                 continue
             try:
                 started = time.time()
-                with lock:
-                    registry.run_on_model_thread(family, query)
+                handle(dict(request))
                 took = time.time() - started
                 if took > KEEP_WARM_SLOW_SECONDS:
                     log(f"keep-warm query through {family} took {took:.2f}s")
