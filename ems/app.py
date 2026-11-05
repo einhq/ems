@@ -82,10 +82,9 @@ def make_workers(settings: Settings, env: dict[str, str] | None = None) -> tuple
 
 
 def make_card_worker(settings: Settings, env: dict[str, str] | None = None) -> Worker:
-    """The query worker's twin on the card, which the CardArbiter starts while the card is quiet.
-
-    It pins the query families on the card; which of them is the arbiter's choice at each start
-    (`CFG_MODEL_PINNED`), by what fits.
+    """The query worker's twin on the card, which the CardArbiter runs: with nothing loaded while
+    the card is busy, and with the query families pinned on the card while it is quiet. Which of
+    them is the arbiter's choice at each switch, by what fits.
     """
     return Worker(
         settings.worker_script,

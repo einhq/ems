@@ -7,18 +7,22 @@ import pytest
 
 from conftest import FakeModelWorker
 from ems.card import CardBudget, room_mb
+from ems.errors import MODEL_UNAVAILABLE, EmsError
 from ems.worker import Worker
 from test_query_worker import Up
 
 
 class Switchable(Worker):
-    """A card worker the test starts and stops without a process."""
+    """A card worker the test starts and stops without a process. `starts` is what each start
+    pinned, `loads` what it was asked to load, at a start or by `pin`."""
 
     def __init__(self, *args, order: list[str], **kwargs):
         super().__init__(*args, **kwargs)
         self.up = False
         self.order = order
         self.starts: list[str] = []
+        self.loads: list[str] = []
+        self.holds: list[str] = []
 
     @property
     def running(self) -> bool:
@@ -26,11 +30,21 @@ class Switchable(Worker):
 
     async def start(self) -> None:
         self.up = True
-        self.starts.append(self.env.get("CFG_MODEL_PINNED", ""))
+        pinned = self.env.get("CFG_MODEL_PINNED", "")
+        self.starts.append(pinned)
+        self.holds = [family for family in pinned.split(",") if family]
+        if pinned:
+            self.loads.append(pinned)
 
     async def stop(self) -> None:
         self.up = False
+        self.holds = []
         self.order.append("stop card")
+
+    def pin(self, families: list[str]) -> dict:
+        self.holds = [*self.holds, *families]
+        self.loads.append(",".join(families))
+        return {"pinning": families}
 
 
 def card_stats(free_mb: float | None):
@@ -51,7 +65,8 @@ async def setup(client, fake_worker, tmp_path, roots):
     ctx.query_worker = Up("/nonexistent/model_server.py", query_fake.socket_path, log=lambda m: None)
     card = Switchable("/nonexistent/model_server.py", card_fake.socket_path, log=lambda m: None, order=order)
 
-    card_fake.on("health", lambda req: {"loaded": [f"{family}:cuda" for family in card.starts[-1].split(",") if family]})
+    card_fake.on("health", lambda req: {"loaded": [f"{family}:cuda" for family in card.holds]})
+    card_fake.on("pin", lambda req: card.pin(req["families"]))
     for fake, vector in ((query_fake, [1.0]), (card_fake, [9.0])):
         fake.on("embed_texts", lambda req, v=vector: {"embeddings": [v], "model": "bge-m3"})
         fake.on("embed_image_texts", lambda req, v=vector: {"embeddings": [v], "model": "siglip2"})
@@ -86,9 +101,11 @@ async def test_quiet_on_a_big_card_puts_both_query_families_on_it(client, setup)
     arm, order, card = setup
     arbiter = await arm(10000)
     assert await search(client) == ([1.0], [1.0])
+    # While busy the card worker waits with nothing loaded.
+    assert card.running and card.starts == [""] and card.loads == []
     await arbiter.tick()
     assert arbiter.mode == "quiet" and order == ["unload all"]
-    assert card.starts == ["text-query,siglip-text"]
+    assert card.starts == [""] and card.loads == ["text-query,siglip-text"]
     assert await search(client) == ([9.0], [9.0])
     health = (await client.get("/v0/health")).json()
     assert health["card"]["mode"] == "quiet" and health["card"]["search_on_card"] == ["siglip-text", "text-query"]
@@ -99,7 +116,7 @@ async def test_a_small_card_takes_what_fits(client, setup):
     # 8 GB beside a 5.6 GB chat model: room for text-query (1800 + 400 + 1024 MB), not siglip-text.
     arbiter = await arm(3500)
     await arbiter.tick()
-    assert card.starts == ["text-query"]
+    assert card.loads == ["text-query"]
     assert await search(client) == ([9.0], [1.0])
     assert "siglip-text" in arbiter.skipped
 
@@ -108,7 +125,7 @@ async def test_a_card_without_room_is_left_alone(client, setup):
     arm, _, card = setup
     arbiter = await arm(2000)
     await arbiter.tick()
-    assert arbiter.mode == "quiet" and card.starts == []
+    assert arbiter.mode == "quiet" and card.loads == []
     assert await search(client) == ([1.0], [1.0])
 
 
@@ -143,7 +160,8 @@ async def test_batch_work_stops_the_card_worker_before_it_runs(client, setup, ro
     response = await client.post("/v0/vision/embed", json={"file": {"path": str(ro / "a.jpg"), "mimetype": "image/jpeg"}})
     assert response.status_code == 200, response.text
     assert order == ["stop card", "unload ['text-embed']", "embed"]
-    assert arbiter.mode == "busy" and not card.running
+    # A new one waits for the next quiet, holding nothing.
+    assert arbiter.mode == "busy" and card.running and card.starts[-1] == "" and card.holds == []
     assert await search(client) == ([1.0], [1.0])
     # It stays busy while batch work keeps coming.
     await arbiter.tick()
@@ -166,8 +184,8 @@ async def test_batch_work_arriving_while_going_quiet_keeps_the_card(client, setu
     response = await client.post("/v0/vision/embed", json={"file": {"path": str(ro / "a.jpg"), "mimetype": "image/jpeg"}})
     await going_quiet
     assert response.status_code == 200, response.text
-    # The card worker never started, and the batch work ran after the unload.
-    assert order == ["unload all", "embed"] and card.starts == []
+    # The card worker loaded nothing, and the batch work ran after the unload.
+    assert order == ["unload all", "embed"] and card.loads == []
     assert arbiter.mode == "busy"
 
 
@@ -178,6 +196,30 @@ async def test_a_card_worker_that_restarted_is_used_again_once_it_has_loaded(cli
     card.restarts += 1
     assert await search(client) == ([1.0], [1.0])
     await arbiter.tick()
+    assert await search(client) == ([9.0], [9.0])
+
+
+async def test_a_card_worker_that_is_down_at_the_switch_starts_with_the_families(client, setup):
+    arm, _, card = setup
+    arbiter = await arm(10000)
+    card.up = False
+    await arbiter.tick()
+    assert card.starts == ["", "text-query,siglip-text"]
+    assert await search(client) == ([9.0], [9.0])
+
+
+async def test_a_card_worker_that_does_not_take_the_families_is_replaced_by_one_that_starts_with_them(client, setup):
+    arm, _, card = setup
+    arbiter = await arm(10000)
+
+    async def refuse(op, payload, **kwargs):
+        if op == "pin":
+            raise EmsError(MODEL_UNAVAILABLE, "model worker is not answering")
+        return await Worker.call(card, op, payload, **kwargs)
+
+    card.call = refuse
+    await arbiter.tick()
+    assert card.order[-1] == "stop card" and card.starts == ["", "text-query,siglip-text"]
     assert await search(client) == ([9.0], [9.0])
 
 

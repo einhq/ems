@@ -1305,6 +1305,10 @@ def reset_faces_if_low() -> float | None:
     amortises to nothing over the hundreds of pictures between resets. Returns the free VRAM that
     triggered a reset, or None when nothing was done.
     """
+    # Without them on the card there is nothing to free, and asking torch for the free VRAM would
+    # open a CUDA context in a worker that has none — the card worker waiting for its families.
+    if "faces:cuda" not in loaded():
+        return None
     free_mb = free_vram_mb()
     if free_mb is None or free_mb >= FACES_RESET_FREE_MB:
         return None
@@ -1355,8 +1359,9 @@ def text_embedder(family: str, device: str):
         dtype = torch.float16 if device == "cuda" else torch.float32
         # The revision's own weights file: without `use_safetensors=False` transformers fetches a
         # converted copy from another revision, which nothing pins.
+        # The image holds the revision, so a load never asks the Hub.
         model = SentenceTransformer(
-            TEXT_EMBED_MODEL, revision=TEXT_EMBED_REVISION, device=device,
+            TEXT_EMBED_MODEL, revision=TEXT_EMBED_REVISION, device=device, local_files_only=True,
             model_kwargs={"dtype": dtype, "use_safetensors": False},
         )
         model.max_seq_length = TEXT_EMBED_MAX_TOKENS

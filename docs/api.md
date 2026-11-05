@@ -971,7 +971,7 @@ the batch worker.
 
 The card goes to batch work while there is some and to search while there is none (_3.4_). After
 `EMS_CARD_QUIET_AFTER` seconds (600; `0` turns this off) without a batch model request, the batch
-worker unloads what it holds and a third model worker, the card worker, starts with the query
+worker unloads what it holds and a third model worker, the card worker, loads the query
 families whose card copies fit what `nvidia-smi` then reports free — `EMS_CARD_TEXT_QUERY_MB` (1800)
 first, then `EMS_CARD_SIGLIP_TEXT_MB` (3100), plus `EMS_CARD_CONTEXT_MB` (400) for its CUDA context
 and `EMS_CARD_MARGIN_MB` (1024) to spare — so a small card takes text-query alone, or nothing, and a
@@ -979,8 +979,11 @@ host without a card changes nothing. Queries go to it once it has loaded them, a
 on the card too when it has room. The next batch request waits until the card worker has stopped
 and the document embedder has left the card, so a batch family never loads beside them; searches
 never wait, because the query worker answers on the CPU throughout. The copies live in a process of
-their own because libraries in one that can see the card touch it (at import, or by loading onto it),
-and stopping the process gives back everything, its CUDA context included. Its socket is `EMS_CARD_WORKER_SOCKET` and its ceiling `EMS_CARD_WORKER_MAX_RSS` (`6g`).
+their own because libraries in one that can see the card load onto it, and stopping the process
+gives back everything, its CUDA context included. A new card worker starts as soon as the old one
+has stopped and waits for the next quiet with its libraries imported and nothing on the card, so
+the switch costs only the loads: about 45 s on fry, where the imports took from half a minute to
+four. Its socket is `EMS_CARD_WORKER_SOCKET` and its ceiling `EMS_CARD_WORKER_MAX_RSS` (`6g`).
 Measured on fry: a query 107 ms (text) and 7 ms (pictures) on the card against ~0.3 s each on an
 idle CPU and several seconds on a busy one. `health` lists both workers' models and reports the query worker under
 `worker.query` (_3.1_). `capabilities` and `health` are how a caller learns what a

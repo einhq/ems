@@ -26,6 +26,7 @@ response per connection.
   -> {"op":"detect_faces","path":"/files/S1/01K...","angle":270,"mirror":false}
   -> {"op":"detect_video_faces","path":"/files/S1/01K...","angle":90,"interval":1.0,"duration":63.2,"min_size":0.02,"min_confidence":0.7}
   -> {"op":"embed_face","path":"...","box":{"x":0.1,"y":0.2,"width":0.1,"height":0.1},"angle":270}
+  -> {"op":"pin","families":["siglip-text","text-query"]}
   -> {"op":"health"}
 
 `angle`/`mirror` (optional, default 0/false) name the display frame an image op works in —
@@ -39,7 +40,8 @@ idle, so an audio-free crawl never pays for whisper and VRAM stays bounded. Infe
 
 Families in CFG_MODEL_PINNED (default: text-query) are exempt from eviction and are
 preloaded at startup — they sit on the interactive search path, where a reload costs
-tens of seconds and is far more noticeable than the VRAM it frees.
+tens of seconds and is far more noticeable than the VRAM it frees. `pin` pins more of them
+and preloads those the same way, answering at once; `health` says when they have loaded.
 
 The server also holds itself to an RSS ceiling (CFG_MODEL_MAX_RSS, by default a
 fraction of the cgroup limit). Crossing it logs the `memstats` line and the `op_counts`
@@ -147,6 +149,10 @@ _inflight_cv = threading.Condition()
 # would count the server as quiet at exactly the moment it is doing the most work — and recycle
 # into a reload of the very models that were half-loaded.
 _preloading = False
+# Preloads one at a time: the startup one and each `pin`'s, in the order they came.
+_preload_lock = threading.Lock()
+_preloads_pending = 0
+_preloads_cv = threading.Condition()
 
 # Set when a recycle is decided and cleared by an explicit shutdown, which is what makes a
 # SIGTERM cancel one. Handlers keep running to completion either way; `main` acts on it after
@@ -176,8 +182,13 @@ _op_counts: dict[str, int] = {}
 
 
 # `query` for the worker that answers search queries alone (the front's Context.for_queries), so the
-# two workers' lines can be told apart in one log.
+# two workers' lines can be told apart in one log; `card` for its twin on the card.
 ROLE = os.environ.get('CFG_MODEL_ROLE', '').strip()
+
+# What the card worker imports at startup, before it is asked to load anything: the libraries its
+# families load with. It is started ahead of the switch to search and told what to load then, and
+# on a slow disk the imports took longer than the loads (ein/core#1010). None of them touches the card.
+CARD_IMPORTS = ("numpy", "tokenizers", "onnxruntime", "torch", "sentence_transformers")
 LOG_TAG = f"[{ROLE}-server]" if ROLE else "[model-server]"
 
 
@@ -310,6 +321,12 @@ def handle(request: dict) -> dict:
             if _gpu_failure is not None:
                 health["gpu_failure"] = dict(_gpu_failure)
         return health
+
+    if op == "pin":
+        families = request.get("families")
+        if not isinstance(families, list) or not families:
+            raise ValueError("pin: missing families")
+        return {"pinning": _pin([str(family) for family in families])}
 
     if op == "memstats":
         # Host-RSS diagnostics, by hand over the socket. Kept out of `health` because it reads /proc/self/maps, which is O(mappings) and pointless on the
@@ -565,8 +582,8 @@ class Server(socketserver.ThreadingUnixStreamServer):
     allow_reuse_address = True
 
 
-def _preload(stop: threading.Event) -> None:
-    """Load the pinned families up front, off the request path.
+def _preload(stop: threading.Event, families: set[str] | frozenset[str]) -> None:
+    """Load `families` up front, off the request path.
 
     Without this the pin only helps from the *second* search onwards: the first one after a
     restart still pays the full model load. Runs in a thread so a slow load never delays
@@ -579,12 +596,17 @@ def _preload(stop: threading.Event) -> None:
     merely doing the work twice.
     """
     global _preloading
-    _preloading = True
     try:
-        _preload_families(stop)
+        with _preload_lock:
+            _preloading = True
+            try:
+                if ROLE == "card":
+                    _import_card_libraries()
+                _preload_families(stop, families)
+            finally:
+                _preloading = False
     finally:
-        _preloading = False
-        registry.pinned_ready.set()
+        _preload_done()
 
 
 def _warm_query(family: str):
@@ -600,9 +622,48 @@ def _warm_query(family: str):
     return None
 
 
-def _preload_families(stop: threading.Event) -> None:
+def _preload_started() -> None:
+    """Hold back every family not pinned until this preload and any before it are done."""
+    global _preloads_pending
+    with _preloads_cv:
+        _preloads_pending += 1
+        registry.pinned_ready.clear()
+
+
+def _preload_done() -> None:
+    global _preloads_pending
+    with _preloads_cv:
+        _preloads_pending -= 1
+        if _preloads_pending == 0:
+            registry.pinned_ready.set()
+
+
+def _import_card_libraries() -> None:
+    started = time.time()
+    for name in CARD_IMPORTS:
+        if name not in sys.modules:
+            try:
+                __import__(name)
+            except Exception as exc:  # noqa: BLE001 - the family's own load reports it again
+                log(f"import of {name} failed: {exc}")
+    log(f"imported {', '.join(CARD_IMPORTS)} in {time.time() - started:.1f}s")
+
+
+def _pin(families: list[str]) -> list[str]:
+    """Pin `families` and load the ones not pinned yet, in the background. Returns those."""
+    new = sorted(set(families) - registry.PINNED_FAMILIES)
+    if new:
+        registry.PINNED_FAMILIES.update(new)
+        # A recycle re-execs with this environment, and must come back with them.
+        os.environ["CFG_MODEL_PINNED"] = ",".join(sorted(registry.PINNED_FAMILIES))
+        _preload_started()
+        threading.Thread(target=_preload, args=(_stop, frozenset(new)), daemon=True).start()
+    return new
+
+
+def _preload_families(stop: threading.Event, families: set[str] | frozenset[str]) -> None:
     """The loop itself, split out only so `_preload` can bracket it with `_preloading`."""
-    for family in sorted(registry.PINNED_FAMILIES):
+    for family in sorted(families):
         if stop.is_set():
             return
         try:
@@ -627,7 +688,8 @@ def _keep_warm(stop: threading.Event) -> None:
     """
     registry.pinned_ready.wait()
     while not stop.wait(KEEP_WARM_SECONDS):
-        if time.time() - _last_work_at < KEEP_WARM_SECONDS or _recycling:
+        # Not while a pin's preload runs: a family it has not loaded yet would load here instead.
+        if time.time() - _last_work_at < KEEP_WARM_SECONDS or _recycling or not registry.pinned_ready.is_set():
             continue
         for family in sorted(registry.PINNED_FAMILIES):
             query = _warm_query(family)
@@ -913,8 +975,8 @@ def main() -> int:
     evictor = threading.Thread(target=_evict_loop, args=(stop,), daemon=True)
     evictor.start()
     # Cleared before the socket binds, so no request can load another family ahead of the pins.
-    registry.pinned_ready.clear()
-    threading.Thread(target=_preload, args=(stop,), daemon=True).start()
+    _preload_started()
+    threading.Thread(target=_preload, args=(stop, frozenset(registry.PINNED_FAMILIES)), daemon=True).start()
     if KEEP_WARM_SECONDS > 0:
         threading.Thread(target=_keep_warm, args=(stop,), daemon=True).start()
 

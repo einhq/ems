@@ -6,13 +6,15 @@ Two modes, decided here from the requests the front forwards to the batch worker
   own rules (claims, room-making, idle eviction); search queries embed on the query worker, on the
   CPU.
 - **quiet** after `quiet_after` seconds without any. The batch worker unloads what it holds, and
-  a card worker starts with the query families that fit what is then free: a third model worker,
-  the query worker's twin on the card. Queries go to it once it has loaded them; documents embed
-  on the card too (`document_device`).
+  the card worker pins the query families that fit what is then free: a third model worker, the
+  query worker's twin on the card. Queries go to it once it has loaded them; documents embed on
+  the card too (`document_device`).
 
 The card copies live in a process of their own because a process that can see the card touches
-it: libraries probe it at import or load onto it whenever it is there, and either leaves a
-CUDA context behind. Stopping the card worker gives back everything it held.
+it: libraries load onto it whenever it is there, and leave a CUDA context behind. Stopping the
+card worker gives back everything it held. While busy a new one waits with nothing loaded: it
+has imported its libraries, which hold nothing on the card, and which on a slow disk took longer
+than the loads themselves.
 
 A batch request entering busy mode waits until the card worker has stopped, so a batch family never
 loads beside it; a search never waits, because the query worker answers throughout. Text embedding of
@@ -123,6 +125,7 @@ class CardArbiter:
         if self.enabled:
             self.batch.gate = self.gate
             self.card.gate = self._card_gate
+            await self._standby()
             self._task = asyncio.create_task(self._tick_loop())
 
     async def stop(self) -> None:
@@ -192,6 +195,24 @@ class CardArbiter:
             except Exception as exc:  # noqa: BLE001 - the loop must outlive one bad tick
                 self.log(f"card: tick failed: {exc}")
 
+    async def _standby(self) -> None:
+        """Start the card worker with nothing to load, ready to be told what to at the next quiet."""
+        self.card.env["CFG_MODEL_PINNED"] = ""
+        await self.card.start()
+
+    async def _load(self, families: list[str]) -> None:
+        """Have the card worker load `families`: pinned on the one waiting, or at a new one's start.
+        A restart pins them again from its environment."""
+        self.card.env["CFG_MODEL_PINNED"] = ",".join(families)
+        if self.card.running:
+            try:
+                await self.card.call("pin", {"families": families})
+                return
+            except EmsError as exc:
+                self.log(f"card: the card worker did not take {', '.join(families)} ({exc}); starting a new one")
+                await self.card.stop()
+        await self.card.start()
+
     def _pinned(self) -> list[str]:
         return [name for name in self.card.env.get("CFG_MODEL_PINNED", "").split(",") if name]
 
@@ -223,8 +244,7 @@ class CardArbiter:
             return
         families, self.skipped = self.budget.fitting(room_mb(await self.card_stats(), self.share_mb))
         if families:
-            self.card.env["CFG_MODEL_PINNED"] = ",".join(families)
-            await self.card.start()
+            await self._load(families)
             await self._await_ready(families)
         self.mode, self.since = "quiet", time.time()
         self.log(f"card: quiet after {self.quiet_after:.0f}s without batch work; unloaded {', '.join(unloaded) or 'nothing'}; "
@@ -239,6 +259,7 @@ class CardArbiter:
             await asyncio.sleep(0.05)
         if self.card.running:
             await self.card.stop()
+        await self._standby()
         try:
             await self.batch.call("unload", {"families": ["text-embed"], "device": "cuda", "wait": True})
         except EmsError as exc:
