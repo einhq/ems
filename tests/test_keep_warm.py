@@ -56,3 +56,20 @@ def test_a_family_a_request_holds_is_skipped(quiet):
     finally:
         lock.release()
     assert "embed_image_texts" not in quiet and "embed_texts" in quiet
+
+
+class _Model:
+    def __init__(self):
+        self.texts: list[str] = []
+
+    def encode(self, texts, prompt_name):
+        self.texts.extend(texts)
+
+
+@pytest.mark.parametrize("device, lengths", [("cuda", list(range(1, ms.WARM_QUERY_WORDS + 1))), ("cpu", [1])])
+def test_the_query_preload_loads_each_lengths_kernels_on_the_card(monkeypatch, device, lengths):
+    model = _Model()
+    monkeypatch.setattr(registry, "text_embed_query_device", lambda: device)
+    monkeypatch.setattr(registry, "text_embedder", lambda family, device: model)
+    ms._warm_query("text-query")()
+    assert [len(text.split()) for text in model.texts] == lengths

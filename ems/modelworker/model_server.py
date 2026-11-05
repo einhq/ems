@@ -77,6 +77,12 @@ EVICT_INTERVAL_SECONDS = 60
 KEEP_WARM_SECONDS = float(os.environ.get('CFG_MODEL_KEEP_WARM', '60'))
 # A keep-warm query slower than this is logged: it found something cold.
 KEEP_WARM_SLOW_SECONDS = 0.5
+# On the card, the query family's preload runs a query of every length up to this many words. A
+# length the process has not seen picks its own kernels, which CUDA loads from the libraries the
+# first time; after the kernel reclaimed those files' pages, that first query read them back from
+# the containers' disk: 0.8 s where a length seen before took 16 ms (ein/core#1020). The keep-warm
+# keeps the pages of the kernels in use, not those of kernels never loaded.
+WARM_QUERY_WORDS = 64
 # How often a request that measures its progress tells its caller how far it has come.
 PROGRESS_EVERY_SECONDS = 5
 
@@ -611,6 +617,7 @@ def _preload(stop: threading.Event, families: set[str] | frozenset[str]) -> None
 
 def _warm_query(family: str):
     """One query through `family`, as a search sends it, or None for a family that has none wired.
+    On the card the query family runs one of every length up to WARM_QUERY_WORDS words.
 
     It runs on the family's own thread, as every load and query does (see run_on_model_thread): the
     preload's thread exits once it is done, and it must not leave per-thread CUDA state behind.
@@ -618,7 +625,12 @@ def _warm_query(family: str):
     if family == 'siglip-text':
         return lambda: registry.siglip_text(registry.image_embed_text_device()).embed(["warm"])
     if family == 'text-query':
-        return lambda: registry.text_embedder('text-query', registry.text_embed_query_device()).encode(["warm"], prompt_name="query")
+        def query():
+            device = registry.text_embed_query_device()
+            model = registry.text_embedder('text-query', device)
+            for words in range(1, WARM_QUERY_WORDS + 1 if device == "cuda" else 2):
+                model.encode([" ".join(["warm"] * words)], prompt_name="query")
+        return query
     return None
 
 
