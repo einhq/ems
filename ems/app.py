@@ -144,7 +144,7 @@ def create_app(
             log=log,
         ),
         audio=AudioCache(settings.scratch, ttl_seconds=settings.audio_cache_seconds, budget_mb=settings.audio_cache_mb, timeout=settings.tool_stall_seconds),
-        files=RemoteFiles(settings.scratch, budget_mb=settings.files_cache_mb, ttl_seconds=settings.files_cache_seconds),
+        files=RemoteFiles(settings.scratch, budget_mb=settings.files_cache_mb, ttl_seconds=settings.files_cache_seconds, mount=settings.files_mount),
     )
 
     @asynccontextmanager

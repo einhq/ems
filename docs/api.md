@@ -186,26 +186,30 @@ tiers — names an SFTP endpoint of its own in an `EMS-Files` header:
 EMS-Files: address=ein.example:2224; user=ems; secret=…; hostkey=ssh-ed25519 AAAA…
 ```
 
-Every path in that request is then the caller's, and no root is consulted. Before the op runs,
-EMS copies each input (`file.path`) from the endpoint into a local cache, and gives each output
-(`output.path`, `output.dir`) a place in the request's scratch. The op runs on those local paths.
-Once it has succeeded, EMS writes each output it made to the caller's path, and every file of an
-output directory into the caller's directory, before it answers. A failed or cancelled op sends
-nothing back. Paths in the result (`video.frames`' `frames[].path`) are given in the caller's
-spelling.
+Every path in that request is then the caller's, and no root is consulted. The op runs on local
+paths for them:
 
-EMS connects with SSH using chacha20-poly1305 alone, with `hostkey` pinned, signs in as `user`
-with `secret` as its password, and keeps one connection per endpoint. It asks the endpoint for
-only what the request names: a `stat`, a `realpath` (whose last component's extension the copy
-keeps, since tools pick a format by it) and a read of each input, and a write of each output and
-of each file of an output directory, which the endpoint creates. It never lists a directory, and
-it never removes or renames anything there: the endpoint replaces an output whole when its write
-is closed.
+- **Inputs** (`file.path`) are read through an sshfs mount of the endpoint when the container can
+  make one (`/dev/fuse` and `SYS_ADMIN`; `EMS_FILES_MOUNT`, on by default): one read-only mount per
+  endpoint, made on the first request and kept. A tool reads only what it seeks to, while it runs,
+  and what it read stays in the page cache for the next op on the file until its size or
+  modification time changes. Without a mount, EMS copies each input whole into a local cache
+  before the op starts; an input stays there for `EMS_FILES_CACHE_SECONDS` (1800) after its last
+  use, within `EMS_FILES_CACHE_MB` (8192), checked against its size and modification time on the
+  endpoint, so the next op on the same file does not fetch it again. A copy in use is never
+  evicted. A mount that fails makes EMS copy instead for ten minutes.
+- **Outputs** (`output.path`, `output.dir`) get a place in the request's scratch. Once the op has
+  succeeded, EMS writes each output it made to the caller's path, and every file of an output
+  directory into the caller's directory, before it answers. A failed or cancelled op sends nothing
+  back. Paths in the result (`video.frames`' `frames[].path`) are given in the caller's spelling.
 
-An input stays in the cache for `EMS_FILES_CACHE_SECONDS` (1800) after its last use, within
-`EMS_FILES_CACHE_MB` (8192), so the next op on the same file does not fetch it again. A copy in
-use is never evicted. The cache is checked against the input's size and modification time on
-the endpoint.
+EMS connects with SSH using chacha20-poly1305 alone, with `hostkey` pinned, and signs in as `user`
+with `secret` as its password. It asks the endpoint for only what the request names: a `stat` of
+each input and of the directories above it, a `realpath` (whose last component's extension the
+local name keeps, since tools pick a format by it) and reads of each input, and a write of each
+output and of each file of an output directory, which the endpoint creates. It never lists a
+directory, and it never removes or renames anything there: the endpoint replaces an output whole
+when its write is closed.
 
 An endpoint EMS cannot reach or sign in to is `502 files_unavailable` (not permanent); an input it
 does not have is `404 not_found`, and a path it refuses is `403 path_outside_roots`.
@@ -973,7 +977,7 @@ settings; it is absent while the model worker is down.
 
 Environment only. `EMS_KEYS_FILE` (one key per line) or `EMS_KEY`, `EMS_ROOTS`
 (`/files:ro,/old:ro,/files-volatile:rw,/files-tmp:rw`), `EMS_PORT`, `EMS_HOST`, `EMS_SCRATCH`,
-the cache of a caller's files (`EMS_FILES_CACHE_MB`, `EMS_FILES_CACHE_SECONDS`; _3.1a_),
+a caller's files (`EMS_FILES_MOUNT`, `EMS_FILES_CACHE_MB`, `EMS_FILES_CACHE_SECONDS`; _3.1a_),
 the admission limits (`EMS_LIMIT_MODELS`, `EMS_LIMIT_TOOLS`, `EMS_LIMIT_ENCODES`,
 `EMS_QUEUE_DEPTH`, `EMS_INTERACTIVE_RESERVE`), `EMS_EXIFTOOL_WORKERS`, `EMS_EXPECT_GPU` (`1`: a card
 is expected, and health lists `what: "gpu"` under `degraded` when none is visible), `EMS_CARD_BUDGET_MB` (the most of the card the models

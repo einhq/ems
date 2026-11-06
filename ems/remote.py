@@ -1,18 +1,23 @@
-"""The caller's files, when EMS does not mount them: fetched for a request, sent back before it answers.
+"""The caller's files, when EMS does not mount them: reached for a request, sent back before it answers.
 
 A request may carry an `EMS-Files` header naming an SFTP endpoint of its caller's:
 `address=host:port; user=…; secret=…; hostkey=ssh-ed25519 AAAA…`. Every path in that request is
-then the caller's, not a local one. Before the op runs, each input (`file.path`) is copied into a
-local cache and each output (`output.path`, `output.dir`) given a place in the request's scratch;
-the op runs on those local paths as it would on mounted ones (`Roots` asks `current` first); and
-once it succeeds, what it wrote goes back to the caller's paths before the result does. The caller
-grants a request exactly its own paths for as long as it runs, so nothing is listed and nothing
-else is asked for.
+then the caller's, not a local one, and the op runs on local paths for them (`Roots` asks
+`current` first):
 
-Inputs stay in the cache under their caller path, checked against its size and mtime, so the next
-op on the same file — a video gets a dozen — does not fetch it again. A copy in use is never
-evicted. The connection is SSH with chacha20-poly1305 alone and the host key from the header
-pinned, one per endpoint, opened on first use and again after it drops.
+- An input (`file.path`) is read through an sshfs mount of the endpoint when this host can make
+  one (`/dev/fuse`, sshfs, `EMS_FILES_MOUNT` not `0`): one read-only mount per endpoint, made on
+  first use, so a tool seeks and reads only what it needs while it runs, and the kernel's page
+  cache keeps what was read for the next op until the file's size or mtime changes. Without a
+  mount, an input is copied whole into a local cache first, under its caller path and checked
+  against its size and mtime, so the next op on the same file does not fetch it again; a copy in
+  use is never evicted.
+- An output (`output.path`, `output.dir`) gets a place in the request's scratch, and what the op
+  wrote goes back to the caller's paths before the result does.
+
+The caller grants a request exactly its own paths for as long as it runs, so nothing is listed
+and nothing else is asked for. Every connection is SSH with chacha20-poly1305 alone and the host
+key from the header pinned.
 """
 
 from __future__ import annotations
@@ -22,7 +27,9 @@ import hashlib
 import os
 import posixpath
 import shutil
+import signal
 import sys
+import tempfile
 import time
 from contextlib import suppress
 from contextvars import ContextVar
@@ -254,17 +261,123 @@ class InputCache:
             total -= copy.size
 
 
-class RemoteFiles:
-    """What a request with an `EMS-Files` header needs: the connections and the input cache."""
+class MountFailed(Exception):
+    """sshfs could not mount an endpoint: this host cannot mount, or the endpoint refused."""
 
-    def __init__(self, scratch: str, budget_mb: int, ttl_seconds: float):
+
+class Mounts:
+    """Read-only sshfs mounts of callers' endpoints, one per endpoint, made on first use.
+
+    A mount whose sshfs has exited, its connection gone, is made again; one of an older endpoint
+    at the same address (the caller restarted, with a new key and secret) is let go. After a mount
+    fails, none is tried for `RETRY_AFTER` seconds, and inputs are copied meanwhile.
+    """
+
+    RETRY_AFTER = 600
+
+    def __init__(self, root: str, enabled: bool):
+        self.root = root
+        self._possible = enabled and os.path.exists("/dev/fuse") and shutil.which("sshfs") is not None
+        self._failed_at = -self.RETRY_AFTER
+        self._held: dict[Endpoint, tuple[str, asyncio.subprocess.Process]] = {}
+        self._locks: dict[Endpoint, asyncio.Lock] = {}
+
+    @property
+    def enabled(self) -> bool:
+        return self._possible and time.monotonic() - self._failed_at >= self.RETRY_AFTER
+
+    async def mount(self, endpoint: Endpoint) -> str:
+        """Where `endpoint`'s `/` is mounted."""
+        held = self._held.get(endpoint)
+        if held is not None and held[1].returncode is None:
+            return held[0]
+        async with self._locks.setdefault(endpoint, asyncio.Lock()):
+            held = self._held.get(endpoint)
+            if held is not None and held[1].returncode is None:
+                return held[0]
+            if held is not None:
+                await self._let_go(endpoint)
+            for other in [e for e in self._held if e.name == endpoint.name]:
+                await self._let_go(other)
+            point = os.path.join(self.root, hashlib.sha256(repr(endpoint).encode()).hexdigest()[:16])
+            await _unmount(point)
+            os.makedirs(point, exist_ok=True)
+            known = os.path.join(self.root, os.path.basename(point) + ".known_hosts")
+            with open(known, "w") as f:
+                host = endpoint.host if endpoint.port == 22 else f"[{endpoint.host}]:{endpoint.port}"
+                f.write(f"{host} {endpoint.hostkey}\n")
+            process = await asyncio.create_subprocess_exec(
+                "sshfs", f"{endpoint.user}@{endpoint.host}:/", point, "-f",
+                # Attributes are asked for at every open, so a file that changed is never read from the
+                # page cache (auto_cache keeps it while size and mtime stay the same).
+                "-o", f"port={endpoint.port},password_stdin,ro,cache=no,auto_cache,attr_timeout=0,entry_timeout=0,negative_timeout=0",
+                "-o", f"UserKnownHostsFile={known},StrictHostKeyChecking=yes,HostKeyAlgorithms={endpoint.hostkey.split()[0]}",
+                "-o", f"Ciphers={CIPHER},PreferredAuthentications=password,PubkeyAuthentication=no",
+                "-o", "ServerAliveInterval=15,ServerAliveCountMax=3",
+                stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
+                start_new_session=True,
+            )
+            process.stdin.write(endpoint.secret.encode() + b"\n")
+            await process.stdin.drain()
+            process.stdin.close()
+            # A look at a mount waits on the caller's answer, so it is made off the event loop.
+            deadline = time.monotonic() + 20
+            while not await asyncio.to_thread(os.path.ismount, point):
+                if process.returncode is not None or time.monotonic() > deadline:
+                    if process.returncode is None:
+                        process.kill()
+                    error = (await process.stderr.read()).decode(errors="replace").strip()
+                    await process.wait()
+                    await _unmount(point)
+                    self._failed_at = time.monotonic()
+                    raise MountFailed(f"{endpoint.name}: sshfs: {error or 'no mount'}")
+                await asyncio.sleep(0.05)
+            self._held[endpoint] = (point, process)
+            _log(f"mounted {endpoint.name}")
+            return point
+
+    async def drop(self, endpoint: Endpoint) -> None:
+        """Let go of a mount that failed a request; the next one mounts again."""
+        async with self._locks.setdefault(endpoint, asyncio.Lock()):
+            if endpoint in self._held:
+                await self._let_go(endpoint)
+
+    async def _let_go(self, endpoint: Endpoint) -> None:
+        point, process = self._held.pop(endpoint)
+        if process.returncode is None:
+            process.send_signal(signal.SIGTERM)
+            await process.wait()
+        await _unmount(point)
+        with suppress(OSError):
+            os.rmdir(point)
+
+    async def stop(self) -> None:
+        for endpoint in list(self._held):
+            await self._let_go(endpoint)
+
+
+async def _unmount(point: str) -> None:
+    """Take a mount off `point`, one whose sshfs died too, which stays in the table until then."""
+    unmount = await asyncio.create_subprocess_exec("fusermount3", "-uz", point, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+    await unmount.wait()
+
+
+class RemoteFiles:
+    """What a request with an `EMS-Files` header needs: the connections, the mounts and the input cache."""
+
+    def __init__(self, scratch: str, budget_mb: int, ttl_seconds: float, mount: bool = True, mounts_root: str | None = None):
         self.connections = Connections()
         self.cache = InputCache(os.path.join(scratch, "files"), budget_mb * 1024 * 1024, ttl_seconds)
+        # Not under the scratch, which is swept: a sweep must never walk into a mount.
+        self.mounts = Mounts(mounts_root or os.path.join(tempfile.gettempdir(), "ems-mounts"), mount)
 
     def start(self) -> None:
         self.cache.start()
+        if self.mounts.enabled:
+            os.makedirs(self.mounts.root, exist_ok=True)
 
     async def stop(self) -> None:
+        await self.mounts.stop()
         await self.connections.close()
 
 
@@ -294,8 +407,17 @@ class Staging:
             os.makedirs(local_dir)
             self.dirs[path] = local_dir
         started = time.monotonic()
+        paths = list(dict.fromkeys(_caller_path(p) for p in inputs))
+        if paths and self.files.mounts.enabled:
+            try:
+                await self._mounted(paths)
+                _log(f"{len(paths)} input(s) through the mount of {self.endpoint.name}, in {time.monotonic() - started:.2f} s")
+                return
+            except MountFailed as exc:
+                _log(f"no mount ({exc}); copying the inputs instead, for the next {Mounts.RETRY_AFTER} s")
+                self.inputs.clear()
         fetched = cached = 0
-        for path in dict.fromkeys(_caller_path(p) for p in inputs):
+        for path in paths:
             copy = await self._retrying(path, lambda sftp, path=path: self.files.cache.fetch(sftp, self.endpoint, path))
             self._pinned.append(copy)
             self.inputs[path] = copy.local
@@ -305,6 +427,34 @@ class Staging:
                 cached += copy.size
         if self.inputs:
             _log(f"{len(self.inputs)} input(s) from {self.endpoint.name}: {fetched / 1e6:.1f} MB fetched, {cached / 1e6:.1f} MB from the cache, in {time.monotonic() - started:.2f} s")
+
+    async def _mounted(self, paths: list[str]) -> None:
+        """Each input as a link in the request's scratch to its file in the endpoint's mount.
+
+        The link bears the name of the file the caller's path leads to, since tools pick a format
+        by the name as well as by the bytes; a mount that stopped answering is made again once.
+        """
+        for index, path in enumerate(paths):
+            real = await self._retrying(path, lambda sftp, path=path: sftp.realpath(path))
+            for attempt in (0, 1):
+                point = await self.files.mounts.mount(self.endpoint)
+                target = point + path
+                try:
+                    await asyncio.to_thread(os.stat, target)
+                    break
+                except FileNotFoundError as exc:
+                    raise EmsError(NOT_FOUND, f"{path}: no such file") from exc
+                except PermissionError as exc:
+                    raise EmsError(PATH_OUTSIDE_ROOTS, f"{path}: not granted to this request") from exc
+                except OSError as exc:
+                    await self.files.mounts.drop(self.endpoint)
+                    if attempt:
+                        raise EmsError(FILES_UNAVAILABLE, f"{path}: {exc}") from exc
+            local_dir = os.path.join(self.scratch, "in", str(index))
+            os.makedirs(local_dir)
+            link = os.path.join(local_dir, posixpath.basename(real) or "input")
+            os.symlink(target, link)
+            self.inputs[path] = link
 
     async def _retrying(self, path: str, step):
         """Run one SFTP step, again on a fresh connection when the held one has gone stale."""

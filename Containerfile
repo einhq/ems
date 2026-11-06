@@ -437,6 +437,11 @@ RUN pip install --no-cache-dir "fastapi>=0.115" "uvicorn[standard]>=0.30"
 # The SFTP client that reaches a caller's files when they are not mounted (ems/remote.py).
 RUN pip install --no-cache-dir "asyncssh>=2.21"
 
+# sshfs, which reads a caller's inputs where they lie when the container has /dev/fuse and
+# SYS_ADMIN (ems/remote.py); without them the inputs are copied in with the client above.
+RUN apt-get update && apt-get install -y --no-install-recommends sshfs openssh-client \
+    && rm -rf /var/lib/apt/lists/*
+
 # Nothing installed above brought back PyAV, the CPU onnxruntime or Debian's FFmpeg libraries.
 RUN ! pip show av 2>/dev/null && ! pip show onnxruntime 2>/dev/null \
     && ! ldconfig -p | grep -q libavcodec
