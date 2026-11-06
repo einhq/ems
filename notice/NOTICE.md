@@ -1,7 +1,6 @@
 # EMS, the EiN Media Service: what this image passes on
 
-EMS's own code is under the Elastic License 2.0, with a permission added, in
-/opt/ems/LICENSE. The image also carries models and tools made by others, each under its own
+EMS's own code is under the MIT licence, in /opt/ems/LICENSE. The image also carries models and tools made by others, each under its own
 licence. Every one of them, its maker, its model card and its licence, is listed at
 
 https://einhq.eu/docs/ems/#models-tools-and-their-licences

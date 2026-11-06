@@ -13,23 +13,15 @@ A pull request is squash-merged: it becomes one commit on `main`, whose message 
 request's title and description. The title therefore follows the commit message rules below,
 and a check on the pull request says whether it does.
 
-## The licence and the contributor licence agreement
+## The licence
 
-This repository is under the Elastic License 2.0 with an added permission, as
-[LICENSE](LICENSE) says. Its author also sells separate licences for hosting EiN as a service,
-so before your first contribution is accepted you agree to the
-[EiN Contributor License Agreement](CLA.md). You keep the copyright to what you contribute;
-you give the licensor the right to use it and to license it on any terms, including those
-separate licences.
+This repository is under the MIT licence, as [LICENSE](LICENSE) says, and what you contribute
+to it is under the MIT licence too; there is no agreement to sign. If what you create belongs to
+your employer, such as code you write at work, make sure your employer allows you to contribute
+it.
 
-When you open your first pull request, the CLA assistant comments on it with a link; sign the
-agreement there with your GitHub account. A pull request is merged only once everyone with a
-commit in it has signed. Signing once covers every later contribution you make to any of EiN's
-repositories under the Elastic License. If what you create belongs to your employer, such as
-code you write at work, your employer has to allow it first (section 5 of the agreement).
-
-The libraries EiN is built on, bash-parser, bash-executor and ssh2, are under the MIT licence
-and need no agreement.
+EiN core, which uses this service, is under the Elastic License 2.0 and asks its contributors
+to agree to a contributor licence agreement; core's CONTRIBUTING.md says what it asks.
 
 ## How the code is written
 

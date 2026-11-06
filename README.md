@@ -11,8 +11,7 @@ tool or model answers. **The contract is [docs/api.md](docs/api.md).**
 It is a keyed service on identically mounted volumes, and it keeps no cache: the
 caller decides where results live.
 
-EMS's code is under the Elastic License 2.0, with a permission to host it free of charge for
-one's family or an association's members ([LICENSE](LICENSE), [The licence](https://einhq.eu/docs/develop/source.html#the-licence));
+EMS's code is under the MIT licence ([LICENSE](LICENSE), [The licence](https://einhq.eu/docs/develop/source.html#the-licence));
 the models and tools in its image are under their own licences, listed in [Models, tools and their licences](https://einhq.eu/docs/ems/#models-tools-and-their-licences).
 The image carries [notice/NOTICE.md](notice/NOTICE.md), the credits and licence
 texts they ask for, as `/usr/share/doc/ein-ems/NOTICE.md`.
