@@ -13,7 +13,9 @@ then the caller's, not a local one, and the op runs on local paths for them (`Ro
   against its size and mtime, so the next op on the same file does not fetch it again; a copy in
   use is never evicted.
 - An output (`output.path`, `output.dir`) gets a place in the request's scratch, and what the op
-  wrote goes back to the caller's paths before the result does.
+  wrote goes back to the caller's paths before the result does: an output file copied into the
+  mount when there is one, where sshfs keeps many writes in flight, and otherwise, and for the
+  files of an output directory, sent with the SFTP client.
 
 The caller grants a request exactly its own paths for as long as it runs, so nothing is listed
 and nothing else is asked for. Every connection is SSH with chacha20-poly1305 alone and the host
@@ -266,7 +268,7 @@ class MountFailed(Exception):
 
 
 class Mounts:
-    """Read-only sshfs mounts of callers' endpoints, one per endpoint, made on first use.
+    """sshfs mounts of callers' endpoints, one per endpoint, made on first use.
 
     A mount whose sshfs has exited, its connection gone, is made again; one of an older endpoint
     at the same address (the caller restarted, with a new key and secret) is let go. After a mount
@@ -310,7 +312,7 @@ class Mounts:
                 "sshfs", f"{endpoint.user}@{endpoint.host}:/", point, "-f",
                 # Attributes are asked for at every open, so a file that changed is never read from the
                 # page cache (auto_cache keeps it while size and mtime stay the same).
-                "-o", f"port={endpoint.port},password_stdin,ro,cache=no,auto_cache,attr_timeout=0,entry_timeout=0,negative_timeout=0",
+                "-o", f"port={endpoint.port},password_stdin,rw,cache=no,auto_cache,attr_timeout=0,entry_timeout=0,negative_timeout=0",
                 "-o", f"UserKnownHostsFile={known},StrictHostKeyChecking=yes,HostKeyAlgorithms={endpoint.hostkey.split()[0]}",
                 "-o", f"Ciphers={CIPHER},PreferredAuthentications=password,PubkeyAuthentication=no",
                 "-o", "ServerAliveInterval=15,ServerAliveCountMax=3",
@@ -496,11 +498,35 @@ class Staging:
                 if not name.startswith(".") and os.path.isfile(local):
                     sends.append((local, posixpath.join(remote_dir, name)))
         started = time.monotonic()
+        files = set(self.outputs.values())
+        point = await self._point() if any(local in files for local, _remote in sends) else None
         for local, remote in sends:
+            if point is not None and local in files and await self._copied(local, point + remote):
+                continue
             await self._retrying(remote, lambda sftp, local=local, remote=remote: sftp.put(local, remote, block_size=BLOCK_SIZE, max_requests=MAX_REQUESTS))
         if sends:
             size = sum(os.path.getsize(local) for local, _remote in sends)
-            _log(f"{len(sends)} output(s) to {self.endpoint.name}: {size / 1e6:.1f} MB sent back in {time.monotonic() - started:.2f} s")
+            way = " through the mount" if point is not None else ""
+            _log(f"{len(sends)} output(s) to {self.endpoint.name}{way}: {size / 1e6:.1f} MB sent back in {time.monotonic() - started:.2f} s")
+
+    async def _point(self) -> str | None:
+        """Where the endpoint is mounted, or None to send outputs with the SFTP client instead."""
+        if not self.files.mounts.enabled:
+            return None
+        try:
+            return await self.files.mounts.mount(self.endpoint)
+        except MountFailed:
+            return None
+
+    @staticmethod
+    async def _copied(local: str, target: str) -> bool:
+        """Copy an output into the mount, its bytes at the caller once the copy returns; False when
+        the mount refused it, for the SFTP client to send it instead."""
+        try:
+            await asyncio.to_thread(shutil.copyfile, local, target)
+            return True
+        except OSError:
+            return False
 
     def caller_paths(self, value: Any) -> Any:
         """`value` with every local path of this request's in its caller's spelling."""

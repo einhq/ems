@@ -191,7 +191,7 @@ paths for them:
 
 - **Inputs** (`file.path`) are read through an sshfs mount of the endpoint when the container can
   make one (`/dev/fuse` and `SYS_ADMIN`; `EMS_FILES_MOUNT`, on by default): one read-only mount per
-  endpoint, made on the first request and kept. A tool reads only what it seeks to, while it runs,
+  endpoint, made on the first request and kept (read-write: outputs are copied back through it). A tool reads only what it seeks to, while it runs,
   and what it read stays in the page cache for the next op on the file until its size or
   modification time changes. Without a mount, EMS copies each input whole into a local cache
   before the op starts; an input stays there for `EMS_FILES_CACHE_SECONDS` (1800) after its last
@@ -199,8 +199,8 @@ paths for them:
   endpoint, so the next op on the same file does not fetch it again. A copy in use is never
   evicted. A mount that fails makes EMS copy instead for ten minutes.
 - **Outputs** (`output.path`, `output.dir`) get a place in the request's scratch. Once the op has
-  succeeded, EMS writes each output it made to the caller's path, and every file of an output
-  directory into the caller's directory, before it answers. A failed or cancelled op sends nothing
+  succeeded, EMS writes each output it made to the caller's path, through the mount when there is
+  one, and every file of an output directory into the caller's directory, before it answers. A failed or cancelled op sends nothing
   back. Paths in the result (`video.frames`' `frames[].path`) are given in the caller's spelling.
 
 EMS connects with SSH using chacha20-poly1305 alone, with `hostkey` pinned, and signs in as `user`
@@ -208,8 +208,8 @@ with `secret` as its password. It asks the endpoint for only what the request na
 each input and of the directories above it, a `realpath` (whose last component's extension the
 local name keeps, since tools pick a format by it) and reads of each input, and a write of each
 output and of each file of an output directory, which the endpoint creates. It never lists a
-directory, and it never removes or renames anything there: the endpoint replaces an output whole
-when its write is closed.
+directory, and it never removes or renames anything there. The endpoint writes an output in place:
+a copy through the mount has every byte at the caller once it returns.
 
 An endpoint EMS cannot reach or sign in to is `502 files_unavailable` (not permanent); an input it
 does not have is `404 not_found`, and a path it refuses is `403 path_outside_roots`.
