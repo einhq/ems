@@ -18,6 +18,7 @@ from .config import Settings
 from .context import Context
 from .errors import INTERNAL, INVALID_REQUEST, EmsError
 from .ops import audio, document, faces, fingerprint, image, media, ocr, shots, speech, storyboard, system, text, transcode, video, vision
+from .remote import RemoteFiles
 from .roots import Roots
 from .tools.audio import AudioCache
 from .tools.exiftool import ExifTool
@@ -143,6 +144,7 @@ def create_app(
             log=log,
         ),
         audio=AudioCache(settings.scratch, ttl_seconds=settings.audio_cache_seconds, budget_mb=settings.audio_cache_mb, timeout=settings.tool_stall_seconds),
+        files=RemoteFiles(settings.scratch, budget_mb=settings.files_cache_mb, ttl_seconds=settings.files_cache_seconds),
     )
 
     @asynccontextmanager
@@ -159,6 +161,7 @@ def create_app(
         else:
             ctx.warnings.append("exiftool is not installed: media.probe answers from ffprobe only")
         await ctx.audio.start()
+        ctx.files.start()
         if start_worker:
             await worker.start()
             if query_worker is not None:
@@ -175,6 +178,7 @@ def create_app(
             if ctx.exiftool is not None:
                 await ctx.exiftool.stop()
             await ctx.audio.stop()
+            await ctx.files.stop()
 
     app = FastAPI(title="EMS", version=API_VERSION, lifespan=lifespan, docs_url=None, redoc_url=None)
     app.state.settings = settings

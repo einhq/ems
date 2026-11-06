@@ -8,6 +8,9 @@ the wire form from the request's `Accept` header:
   form would have returned as its body.
 - anything else: the op runs to completion and the envelope is the body.
 
+A request with an `EMS-Files` header runs on its caller's files (remote.py): its inputs are
+fetched before the op starts and its outputs sent back before the result goes out, in either form.
+
 In both forms a caller that closes the connection cancels the op: Starlette cancels a streaming
 response's task when the client disconnects, and the blocking form watches for the disconnect
 itself. Cancellation reaches the op as `asyncio.CancelledError`, which is what kills a
@@ -26,7 +29,7 @@ from typing import Any, Awaitable, Callable
 from fastapi import Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
-from . import API_VERSION
+from . import API_VERSION, remote
 from .errors import INTERNAL, EmsError
 
 
@@ -83,9 +86,33 @@ def wants_stream(request: Request) -> bool:
 
 
 async def run_op(request: Request, op: Op) -> Response:
+    header = request.headers.get(remote.HEADER)
+    if header:
+        op = _on_callers_files(request, remote.parse_header(header), await request.json(), op)
     if wants_stream(request):
         return _stream(op)
     return await _block(request, op)
+
+
+def _on_callers_files(request: Request, endpoint: remote.Endpoint, body: Any, op: Op) -> Op:
+    """`op` with the request's paths staged: run in the op's own task, so the staging is the
+    task's (`remote.current`) and goes when the op does, cancelled or not."""
+    ctx = request.app.state.ctx
+
+    async def staged(progress: Progress) -> Outcome:
+        staging = remote.Staging(ctx.files, endpoint, ctx.scratch_dir("staged"))
+        token = remote.current.set(staging)
+        try:
+            await staging.prepare(body)
+            outcome = await op(progress)
+            await staging.send_back()
+            outcome.result = staging.caller_paths(outcome.result)
+            return outcome
+        finally:
+            remote.current.reset(token)
+            staging.close()
+
+    return staged
 
 
 async def _block(request: Request, op: Op) -> Response:

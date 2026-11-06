@@ -33,7 +33,9 @@ GET  /v0/capabilities         ops, roots, tools, models, limits
 Files are absolute paths under configured **roots**
 (`EMS_ROOTS=/files:ro,/old:ro,/files-volatile:rw,/files-tmp:rw`); anything
 outside is refused. Mount the caller's directories at the same container paths
-on both sides and nothing is ever copied.
+on both sides and nothing is ever copied. A caller whose files are not mounted
+names an SFTP endpoint of its own in the request's `EMS-Files` header instead:
+EMS copies the inputs in and writes the outputs back (docs/api.md, 3.1a).
 
 ## Run
 

@@ -8,6 +8,9 @@ roots is refused even though its name is inside them, because what would be read
 `EMS_ROOTS` is `path:mode,path:mode,…`, e.g. `/files:ro,/old:ro,/files-volatile:rw`. An empty
 setting means EMS may touch nothing, which makes a misconfigured deployment fail on its first
 request instead of quietly serving the whole disk.
+
+A request whose files are its caller's (`EMS-Files`, remote.py) touches no root at all: each of
+its paths is the local copy or the local place its staging made for it.
 """
 
 from __future__ import annotations
@@ -15,6 +18,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
+from . import remote
 from .errors import EmsError, NOT_FOUND, PATH_OUTSIDE_ROOTS, invalid
 
 
@@ -64,6 +68,9 @@ class Roots:
         """
         if not isinstance(path, str) or not path:
             raise invalid("file.path is required")
+        staged = remote.current.get()
+        if staged is not None:
+            return staged.input(path)
         if not os.path.isabs(path):
             raise EmsError(PATH_OUTSIDE_ROOTS, f"{path}: not an absolute path")
         resolved = os.path.realpath(path)
@@ -77,6 +84,9 @@ class Roots:
         """Resolve a directory outputs will be written into; under a writable root, created if asked."""
         if not isinstance(path, str) or not path:
             raise invalid("output.dir is required")
+        staged = remote.current.get()
+        if staged is not None:
+            return staged.output_dir(path)
         if not os.path.isabs(path):
             raise EmsError(PATH_OUTSIDE_ROOTS, f"{path}: not an absolute path")
         real = os.path.realpath(path)
@@ -97,6 +107,9 @@ class Roots:
         """
         if not isinstance(path, str) or not path:
             raise invalid("output.path is required")
+        staged = remote.current.get()
+        if staged is not None:
+            return staged.output(path)
         if not os.path.isabs(path):
             raise EmsError(PATH_OUTSIDE_ROOTS, f"{path}: not an absolute path")
         directory, name = os.path.split(os.path.normpath(path))

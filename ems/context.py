@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from .admission import Admission
 from .card import CardArbiter
 from .config import Settings
+from .remote import RemoteFiles
 from .roots import Roots
 from .tools.audio import AudioCache
 from .tools.exiftool import ExifTool
@@ -30,6 +31,8 @@ class Context:
     query_worker: Worker | None = None
     # Who has the card (ems/card.py); off without a card or a query worker.
     card: CardArbiter | None = None
+    # The connections and input cache of requests whose files are their caller's (ems/remote.py).
+    files: RemoteFiles | None = None
 
     def for_queries(self, family: str) -> Worker:
         """Where a search query for `family` is embedded: the card worker while it holds the family

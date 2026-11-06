@@ -177,6 +177,39 @@ output path; a failed op leaves nothing there. The directory must exist and be w
 extension does not choose the format — the request does — but EMS refuses a mismatch it can see
 (`.avif` asked to hold `mp4`) as `invalid_request`.
 
+### 3.1a A caller's own files
+
+A caller whose files EMS does not mount — EMS on another host, or one without the caller's file
+tiers — names an SFTP endpoint of its own in an `EMS-Files` header:
+
+```
+EMS-Files: address=ein.example:2224; user=ems; secret=…; hostkey=ssh-ed25519 AAAA…
+```
+
+Every path in that request is then the caller's, and no root is consulted. Before the op runs,
+EMS copies each input (`file.path`) from the endpoint into a local cache, and gives each output
+(`output.path`, `output.dir`) a place in the request's scratch. The op runs on those local paths.
+Once it has succeeded, EMS writes each output it made to the caller's path, and every file of an
+output directory into the caller's directory, before it answers. A failed or cancelled op sends
+nothing back. Paths in the result (`video.frames`' `frames[].path`) are given in the caller's
+spelling.
+
+EMS connects with SSH using chacha20-poly1305 alone, with `hostkey` pinned, signs in as `user`
+with `secret` as its password, and keeps one connection per endpoint. It asks the endpoint for
+only what the request names: a `stat`, a `realpath` (whose last component's extension the copy
+keeps, since tools pick a format by it) and a read of each input, and a write of each output and
+of each file of an output directory, which the endpoint creates. It never lists a directory, and
+it never removes or renames anything there: the endpoint replaces an output whole when its write
+is closed.
+
+An input stays in the cache for `EMS_FILES_CACHE_SECONDS` (1800) after its last use, within
+`EMS_FILES_CACHE_MB` (8192), so the next op on the same file does not fetch it again. A copy in
+use is never evicted. The cache is checked against the input's size and modification time on
+the endpoint.
+
+An endpoint EMS cannot reach or sign in to is `502 files_unavailable` (not permanent); an input it
+does not have is `404 not_found`, and a path it refuses is `403 path_outside_roots`.
+
 ### 3.2 File input
 
 Every operation that reads media takes a `file` object:
@@ -933,12 +966,14 @@ settings; it is absent while the model worker is down.
 | `deadline_exceeded`  | 504  | no        | Discarded from the queue past `options.deadline`                                                               |
 | `model_unavailable`  | 503  | no        | The model needed is loading, its device is unusable right now, or the card is out of memory; `Retry-After` set |
 | `tool_failed`        | 500  | no        | A tool or model failed for a reason EMS could not classify; `message` carries what it said                     |
+| `files_unavailable`  | 502  | no        | The caller's file endpoint (_3.1a_) could not be reached, refused the sign-in, or failed mid-transfer          |
 | `internal`           | 500  | no        | EMS's own fault                                                                                                |
 
 ## 6. Configuration (operator)
 
 Environment only. `EMS_KEYS_FILE` (one key per line) or `EMS_KEY`, `EMS_ROOTS`
 (`/files:ro,/old:ro,/files-volatile:rw,/files-tmp:rw`), `EMS_PORT`, `EMS_HOST`, `EMS_SCRATCH`,
+the cache of a caller's files (`EMS_FILES_CACHE_MB`, `EMS_FILES_CACHE_SECONDS`; _3.1a_),
 the admission limits (`EMS_LIMIT_MODELS`, `EMS_LIMIT_TOOLS`, `EMS_LIMIT_ENCODES`,
 `EMS_QUEUE_DEPTH`, `EMS_INTERACTIVE_RESERVE`), `EMS_EXIFTOOL_WORKERS`, `EMS_EXPECT_GPU` (`1`: a card
 is expected, and health lists `what: "gpu"` under `degraded` when none is visible), `EMS_CARD_BUDGET_MB` (the most of the card the models

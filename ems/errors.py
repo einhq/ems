@@ -30,6 +30,7 @@ BUSY = Code("busy", 503, False)
 DEADLINE_EXCEEDED = Code("deadline_exceeded", 504, False)
 MODEL_UNAVAILABLE = Code("model_unavailable", 503, False)
 TOOL_FAILED = Code("tool_failed", 500, False)
+FILES_UNAVAILABLE = Code("files_unavailable", 502, False)
 INTERNAL = Code("internal", 500, False)
 
 

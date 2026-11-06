@@ -434,6 +434,9 @@ ENV PATH="/opt/ffmpeg/bin:$PATH"
 # The HTTP front. Pinned floors only; the model stack above is what decides compatibility.
 RUN pip install --no-cache-dir "fastapi>=0.115" "uvicorn[standard]>=0.30"
 
+# The SFTP client that reaches a caller's files when they are not mounted (ems/remote.py).
+RUN pip install --no-cache-dir "asyncssh>=2.21"
+
 # Nothing installed above brought back PyAV, the CPU onnxruntime or Debian's FFmpeg libraries.
 RUN ! pip show av 2>/dev/null && ! pip show onnxruntime 2>/dev/null \
     && ! ldconfig -p | grep -q libavcodec
