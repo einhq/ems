@@ -85,14 +85,6 @@ class Settings:
     # card another service shares (the assistant's llm), set to the share that service leaves EMS:
     # neither then loads into the other's part, whichever started first (ein/core#515).
     card_share_mb: int = 0
-    # The local copies of inputs fetched from a caller that names its files in `EMS-Files`
-    # (ems/remote.py): kept this long after their last use, within this many MB, so the dozen
-    # ops a video gets fetch it once.
-    files_cache_seconds: int = 1800
-    files_cache_mb: int = 8192
-    # Whether a caller's inputs are read through an sshfs mount when /dev/fuse and sshfs are here
-    # (ems/remote.py); off, they are always copied into the cache above first.
-    files_mount: bool = True
 
     @staticmethod
     def from_env(env: dict[str, str] | None = None) -> "Settings":
@@ -128,9 +120,6 @@ class Settings:
             tool_stall_seconds=integer("EMS_TOOL_STALL", 900),
             audio_cache_seconds=integer("EMS_AUDIO_CACHE_SECONDS", 1800),
             audio_cache_mb=integer("EMS_AUDIO_CACHE_MB", 2048),
-            files_cache_seconds=integer("EMS_FILES_CACHE_SECONDS", 1800),
-            files_cache_mb=integer("EMS_FILES_CACHE_MB", 8192),
-            files_mount=e.get("EMS_FILES_MOUNT", "1").strip().lower() not in ("0", "false", "no", ""),
             cpu_encode_max_mb=integer("EMS_CPU_ENCODE_MAX_MB", 4000),
             cpu_encode_mb_per_1k_frames=integer("EMS_CPU_ENCODE_MB_PER_1K_FRAMES", 170),
             cpu_encode_max_segments=integer("EMS_CPU_ENCODE_MAX_SEGMENTS", 64),

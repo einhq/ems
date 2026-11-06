@@ -18,7 +18,7 @@ from .config import Settings
 from .context import Context
 from .errors import INTERNAL, INVALID_REQUEST, EmsError
 from .ops import audio, document, faces, fingerprint, image, media, ocr, shots, speech, storyboard, system, text, transcode, video, vision
-from .remote import RemoteFiles
+from .remote import Mounts
 from .roots import Roots
 from .tools.audio import AudioCache
 from .tools.exiftool import ExifTool
@@ -144,7 +144,7 @@ def create_app(
             log=log,
         ),
         audio=AudioCache(settings.scratch, ttl_seconds=settings.audio_cache_seconds, budget_mb=settings.audio_cache_mb, timeout=settings.tool_stall_seconds),
-        files=RemoteFiles(settings.scratch, budget_mb=settings.files_cache_mb, ttl_seconds=settings.files_cache_seconds, mount=settings.files_mount),
+        files=Mounts(),
     )
 
     @asynccontextmanager

@@ -1,7 +1,8 @@
-"""Requests whose files are their caller's (`EMS-Files`): inputs fetched, outputs sent back.
+"""Requests whose files are their caller's (`EMS-Files`): read and written through an sshfs mount.
 
-The caller is an asyncssh SFTP server on loopback serving a directory outside every root, so
-an op can only reach its files through the staging: the local mounts have none of them.
+The caller is an asyncssh SFTP server on loopback serving a directory outside every root, so an
+op can only reach its files through the mount: the local roots have none of them. The tests that
+mount need sshfs and /dev/fuse.
 """
 
 import asyncio
@@ -17,13 +18,8 @@ from ems.remote import parse_header, request_paths
 
 DATA = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 SECRET = "a-secret-made-at-start"
-OPENED: list[tuple[str, int]] = []
-
-
-class CountingSFTP(asyncssh.SFTPServer):
-    def open(self, path, pflags, attrs):
-        OPENED.append((path.decode(), pflags))
-        return super().open(path, pflags, attrs)
+MOUNTABLE = os.path.exists("/dev/fuse") and shutil.which("sshfs") is not None and shutil.which("fusermount3") is not None
+needs_mount = pytest.mark.skipif(not MOUNTABLE, reason="no sshfs or FUSE here")
 
 
 class OneUser(asyncssh.SSHServer):
@@ -53,7 +49,7 @@ def caller(tmp_path):
 
     async def serve():
         holder["server"] = await asyncssh.create_server(
-            OneUser, "127.0.0.1", 0, server_host_keys=[key], sftp_factory=CountingSFTP,
+            OneUser, "127.0.0.1", 0, server_host_keys=[key], sftp_factory=asyncssh.SFTPServer,
             encryption_algs=["chacha20-poly1305@openssh.com"],
         )
         started.set()
@@ -63,25 +59,10 @@ def caller(tmp_path):
     started.wait(10)
     port = holder["server"].sockets[0].getsockname()[1]
     hostkey = key.export_public_key().decode().strip()
-    OPENED.clear()
     yield files, {"EMS-Files": f"address=127.0.0.1:{port}; user=ems; secret={SECRET}; hostkey={hostkey}"}
     loop.call_soon_threadsafe(holder["server"].close)
     loop.call_soon_threadsafe(loop.stop)
     thread.join(10)
-
-
-MOUNTABLE = os.path.exists("/dev/fuse") and shutil.which("sshfs") is not None and shutil.which("fusermount3") is not None
-
-
-@pytest.fixture(params=["copy", pytest.param("mount", marks=pytest.mark.skipif(not MOUNTABLE, reason="no sshfs or FUSE here"))])
-def mode(request, client):
-    """Each test once with the inputs copied and once read through an sshfs mount."""
-    client.app.state.ctx.files.mounts._possible = request.param == "mount"
-    return request.param
-
-
-def reads_of(path) -> int:
-    return sum(1 for opened, pflags in OPENED if opened == str(path) and pflags & asyncssh.FXF_READ)
 
 
 def test_the_header_names_an_endpoint_and_the_body_its_paths():
@@ -90,21 +71,19 @@ def test_the_header_names_an_endpoint_and_the_body_its_paths():
     assert request_paths({"file": {"path": "/a"}, "targets": [{"output": {"path": "/b"}}], "output": {"dir": "/c"}}) == (["/a"], ["/b"], ["/c"])
 
 
-async def test_an_input_is_read_and_its_scratch_goes_with_the_request(client, caller, mode, tmp_path):
+@needs_mount
+async def test_an_input_is_read_through_the_mount_and_the_scratch_goes_with_the_request(client, caller, tmp_path):
     files, headers = caller
     (files / "note.txt").write_text("written by Anna Andersson")
     for _ in range(2):
         r = await client.post("/v0/document/extract", json={"file": {"path": str(files / "note.txt")}}, headers=headers)
         assert r.status_code == 200, r.json()
         assert r.json()["result"]["text"].strip() == "written by Anna Andersson"
-    # A copy is fetched once; through a mount the file is opened for each op.
-    if mode == "copy":
-        assert reads_of(files / "note.txt") == 1
-    # The request's own scratch goes with it; only the caches stay.
     assert not [name for name in os.listdir(tmp_path / "scratch") if name.startswith("staged-")]
 
 
-async def test_a_changed_input_is_read_again(client, caller, mode):
+@needs_mount
+async def test_a_changed_input_is_read_again(client, caller):
     files, headers = caller
     note = files / "note.txt"
     note.write_text("first")
@@ -112,18 +91,15 @@ async def test_a_changed_input_is_read_again(client, caller, mode):
     note.write_text("second, longer")
     r = await client.post("/v0/document/extract", json={"file": {"path": str(note)}}, headers=headers)
     assert r.json()["result"]["text"].strip() == "second, longer"
-    if mode == "copy":
-        assert reads_of(note) == 2
 
 
-async def test_frames_go_back_to_the_callers_directory(client, caller, mode, monkeypatch):
+@needs_mount
+async def test_frames_go_back_to_the_callers_directory_which_is_made(client, caller, monkeypatch):
     files, headers = caller
     shutil.copy(os.path.join(DATA, "video1.mp4"), files / "clip.mp4")
-    # The caller makes a directory it grants; this one is a plain SFTP server.
-    (files / "frames").mkdir()
 
     async def fake(ctx, path, out_dir, *, at, count, strategy, fmt, quality, max_edge, progress, angle, mirror):
-        assert path.endswith(".mp4") and not path.startswith(str(files)) and open(path, "rb").read() == (files / "clip.mp4").read_bytes()
+        assert path.endswith("clip.mp4") and open(path, "rb").read() == (files / "clip.mp4").read_bytes()
         frames = []
         for i, t in enumerate(at):
             with open(f"{out_dir}/frame-{i:03d}.jpg", "wb") as f:
@@ -138,8 +114,9 @@ async def test_frames_go_back_to_the_callers_directory(client, caller, mode, mon
     assert (files / "frames" / "frame-001.jpg").read_bytes() == b"jpeg 1"
 
 
+@needs_mount
 @pytest.mark.skipif(not (shutil.which("ffmpeg") and shutil.which("ffprobe")), reason="ffmpeg is not installed")
-async def test_a_transcode_writes_the_callers_output_before_it_answers(client, caller, mode):
+async def test_a_transcode_writes_the_callers_output_before_it_answers(client, caller):
     files, headers = caller
     shutil.copy(os.path.join(DATA, "video1.mp4"), files / "clip.mp4")
     (files / "sound.m4a").write_bytes(b"")
@@ -149,7 +126,8 @@ async def test_a_transcode_writes_the_callers_output_before_it_answers(client, c
     assert sorted(os.listdir(files)) == ["clip.mp4", "sound.m4a"]
 
 
-async def test_a_missing_input_is_not_found_and_a_bad_header_invalid(client, caller, mode):
+@needs_mount
+async def test_a_missing_input_is_not_found_and_a_bad_header_invalid(client, caller):
     files, headers = caller
     r = await client.post("/v0/document/extract", json={"file": {"path": str(files / "gone.txt")}}, headers=headers)
     assert r.status_code == 404 and r.json()["error"]["code"] == "not_found"
@@ -157,10 +135,20 @@ async def test_a_missing_input_is_not_found_and_a_bad_header_invalid(client, cal
     assert r.status_code == 400 and r.json()["error"]["code"] == "invalid_request"
 
 
-async def test_an_unreachable_caller_is_a_failure_to_retry(client, caller, mode):
+@needs_mount
+async def test_a_caller_that_refuses_the_mount_is_a_failure_to_retry(client, caller):
     files, headers = caller
     (files / "note.txt").write_text("x")
     wrong = {"EMS-Files": headers["EMS-Files"].replace(SECRET, "not-the-secret")}
     r = await client.post("/v0/document/extract", json={"file": {"path": str(files / "note.txt")}}, headers=wrong)
     error = r.json()["error"]
     assert r.status_code == 502 and error["code"] == "files_unavailable" and error["permanent"] is False
+
+
+async def test_a_host_that_cannot_mount_refuses_the_request(client, caller):
+    files, headers = caller
+    (files / "note.txt").write_text("x")
+    client.app.state.ctx.files.possible = False
+    r = await client.post("/v0/document/extract", json={"file": {"path": str(files / "note.txt")}}, headers=headers)
+    error = r.json()["error"]
+    assert r.status_code == 502 and error["code"] == "files_unavailable" and "cannot mount" in error["message"]

@@ -35,9 +35,8 @@ Files are absolute paths under configured **roots**
 outside is refused. Mount the caller's directories at the same container paths
 on both sides and nothing is ever copied. A caller whose files are not mounted
 names an SFTP endpoint of its own in the request's `EMS-Files` header instead:
-EMS reads the inputs through an sshfs mount of it (the container needs
-`/dev/fuse` and `SYS_ADMIN`; without them it copies them in) and writes the
-outputs back (docs/api.md, 3.1a).
+EMS reads the inputs and writes the outputs back through an sshfs mount of it,
+for which the container needs `/dev/fuse` and `SYS_ADMIN` (docs/api.md, 3.1a).
 
 ## Run
 

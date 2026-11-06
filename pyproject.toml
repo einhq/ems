@@ -6,7 +6,6 @@ requires-python = ">=3.12"
 dependencies = [
   "fastapi>=0.115",
   "uvicorn[standard]>=0.30",
-  "asyncssh>=2.21",
 ]
 
 [project.optional-dependencies]
@@ -21,7 +20,8 @@ tools = [
   "python-docx",
   "odfpy",
 ]
-test = ["pytest>=8", "pytest-asyncio>=1", "httpx>=0.27"]
+# asyncssh plays a caller's SFTP endpoint in tests/test_remote_files.py.
+test = ["pytest>=8", "pytest-asyncio>=1", "httpx>=0.27", "asyncssh>=2.21"]
 
 [tool.setuptools.packages.find]
 include = ["ems*"]

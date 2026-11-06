@@ -1,25 +1,22 @@
-"""The caller's files, when EMS does not mount them: reached for a request, sent back before it answers.
+"""The caller's files, when EMS does not mount them: an sshfs mount of the caller's endpoint.
 
 A request may carry an `EMS-Files` header naming an SFTP endpoint of its caller's:
 `address=host:port; user=…; secret=…; hostkey=ssh-ed25519 AAAA…`. Every path in that request is
-then the caller's, not a local one, and the op runs on local paths for them (`Roots` asks
-`current` first):
+then the caller's, not a local one. EMS mounts the endpoint read-write with sshfs, once per
+endpoint, and the op runs on local paths for the request's (`Roots` asks `current` first):
 
-- An input (`file.path`) is read through an sshfs mount of the endpoint when this host can make
-  one (`/dev/fuse`, sshfs, `EMS_FILES_MOUNT` not `0`): one read-only mount per endpoint, made on
-  first use, so a tool seeks and reads only what it needs while it runs, and the kernel's page
-  cache keeps what was read for the next op until the file's size or mtime changes. Without a
-  mount, an input is copied whole into a local cache first, under its caller path and checked
-  against its size and mtime, so the next op on the same file does not fetch it again; a copy in
-  use is never evicted.
+- An input (`file.path`) is read through the mount where it lies, so a tool seeks and reads only
+  what it needs while it runs, and the page cache keeps what was read for the next op until the
+  file's size or mtime changes.
 - An output (`output.path`, `output.dir`) gets a place in the request's scratch, and what the op
-  wrote goes back to the caller's paths before the result does: an output file copied into the
-  mount when there is one, where sshfs keeps many writes in flight, and otherwise, and for the
-  files of an output directory, sent with the SFTP client.
+  wrote is copied into the mount before the result goes out. A copy through sshfs has its bytes at
+  the caller once it returns.
 
-The caller grants a request exactly its own paths for as long as it runs, so nothing is listed
-and nothing else is asked for. Every connection is SSH with chacha20-poly1305 alone and the host
-key from the header pinned.
+Without a mount — no /dev/fuse or sshfs here, an endpoint that cannot be reached, a mount that
+fails during the request — the request is refused as `files_unavailable`, which the caller tries
+again later. The caller grants a request exactly its own paths for as long as it runs, so nothing
+is listed and nothing else is asked for. The connection is SSH with chacha20-poly1305 alone and the
+host key from the header pinned.
 """
 
 from __future__ import annotations
@@ -35,21 +32,14 @@ import tempfile
 import time
 from contextlib import suppress
 from contextvars import ContextVar
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
-
-import asyncssh
 
 from .admission import current_op
 from .errors import EmsError, FILES_UNAVAILABLE, NOT_FOUND, PATH_OUTSIDE_ROOTS, invalid
 
 HEADER = "ems-files"
 CIPHER = "chacha20-poly1305@openssh.com"
-
-# An SFTP read or write of this size answers in one packet from EiN, and this many in flight keep
-# a gigabit link full without a deep queue on the caller's side.
-BLOCK_SIZE = 128 * 1024
-MAX_REQUESTS = 32
 
 
 @dataclass(frozen=True)
@@ -118,178 +108,34 @@ def _caller_path(path: str) -> str:
     return posixpath.normpath(path)
 
 
-def _failure(path: str, exc: BaseException) -> EmsError:
-    """What an SFTP failure on the caller's `path` is to EMS's caller."""
-    if isinstance(exc, EmsError):
-        return exc
-    if isinstance(exc, asyncssh.SFTPNoSuchFile):
-        return EmsError(NOT_FOUND, f"{path}: no such file")
-    if isinstance(exc, asyncssh.SFTPPermissionDenied):
-        return EmsError(PATH_OUTSIDE_ROOTS, f"{path}: not granted to this request")
-    return EmsError(FILES_UNAVAILABLE, f"{path}: {type(exc).__name__}: {exc}")
-
-
-class Connections:
-    """One SSH connection and SFTP session per endpoint, opened on first use and again after it drops."""
-
-    def __init__(self) -> None:
-        self._open: dict[Endpoint, tuple[Any, Any]] = {}
-        self._locks: dict[Endpoint, asyncio.Lock] = {}
-
-    async def sftp(self, endpoint: Endpoint):
-        held = self._open.get(endpoint)
-        if held is not None and not held[0].is_closed():
-            return held[1]
-        async with self._locks.setdefault(endpoint, asyncio.Lock()):
-            held = self._open.get(endpoint)
-            if held is not None and not held[0].is_closed():
-                return held[1]
-            try:
-                key = asyncssh.import_public_key(endpoint.hostkey)
-                conn = await asyncssh.connect(
-                    endpoint.host,
-                    endpoint.port,
-                    username=endpoint.user,
-                    password=endpoint.secret,
-                    known_hosts=([key], [], []),
-                    server_host_key_algs=[key.get_algorithm()],
-                    encryption_algs=[CIPHER],
-                    compression_algs=None,
-                    client_keys=None,
-                    agent_path=None,
-                    preferred_auth="password",
-                    keepalive_interval=30,
-                )
-                sftp = await conn.start_sftp_client()
-            except (OSError, asyncssh.Error, ValueError) as exc:
-                raise EmsError(FILES_UNAVAILABLE, f"{endpoint.name}: {type(exc).__name__}: {exc}") from exc
-            self._open[endpoint] = (conn, sftp)
-            return sftp
-
-    def drop(self, endpoint: Endpoint) -> None:
-        held = self._open.pop(endpoint, None)
-        if held is not None:
-            held[0].close()
-
-    async def close(self) -> None:
-        for conn, _sftp in self._open.values():
-            conn.close()
-        for conn, _sftp in self._open.values():
-            await conn.wait_closed()
-        self._open.clear()
-
-
-@dataclass
-class _Copy:
-    local: str
-    size: int
-    mtime: int
-    used: float
-    pins: int = 0
-    # Whether the pin that returned it fetched it, rather than finding it in the cache.
-    fetched: bool = False
-
-
-@dataclass
-class InputCache:
-    """Local copies of the callers' inputs, by caller path, size and mtime, within a byte budget."""
-
-    root: str
-    budget_bytes: int
-    ttl_seconds: float
-    _copies: dict[str, _Copy] = field(default_factory=dict)
-    _fetching: dict[str, asyncio.Future] = field(default_factory=dict)
-
-    def start(self) -> None:
-        shutil.rmtree(self.root, ignore_errors=True)
-        os.makedirs(self.root, exist_ok=True)
-
-    async def fetch(self, sftp, endpoint: Endpoint, path: str) -> _Copy:
-        """The local copy of `path`, pinned until `release`; fetched unless the one held is current."""
-        attrs = await sftp.stat(path)
-        size, mtime = int(attrs.size or 0), int(attrs.mtime or 0)
-        digest = hashlib.sha256(f"{endpoint.name}\0{path}".encode()).hexdigest()[:32]
-        name = f"{digest}-{size}-{mtime}"
-        while True:
-            copy = self._copies.get(name)
-            if copy is not None and os.path.exists(copy.local):
-                copy.pins += 1
-                copy.used = time.monotonic()
-                copy.fetched = False
-                return copy
-            pending = self._fetching.get(name)
-            if pending is None:
-                break
-            await asyncio.shield(pending)
-        future = asyncio.get_running_loop().create_future()
-        self._fetching[name] = future
-        part = None
-        try:
-            # Tools pick a format by the name as well as by the bytes, and an original's name is
-            # that of the file the caller's path leads to.
-            real = await sftp.realpath(path)
-            local = os.path.join(self.root, name + os.path.splitext(real)[1].lower())
-            part = local + ".part"
-            await sftp.get(path, part, block_size=BLOCK_SIZE, max_requests=MAX_REQUESTS)
-            os.utime(part, (mtime, mtime))
-            os.replace(part, local)
-            copy = _Copy(local, size, mtime, time.monotonic(), pins=1, fetched=True)
-            self._copies[name] = copy
-            self._evict()
-            return copy
-        finally:
-            if part is not None:
-                with suppress(OSError):
-                    os.unlink(part)
-            future.set_result(None)
-            del self._fetching[name]
-
-    def release(self, copy: _Copy) -> None:
-        copy.pins = max(0, copy.pins - 1)
-        copy.used = time.monotonic()
-        self._evict()
-
-    def _evict(self) -> None:
-        now = time.monotonic()
-        total = sum(c.size for c in self._copies.values())
-        for name, copy in sorted(self._copies.items(), key=lambda item: item[1].used):
-            if copy.pins:
-                continue
-            if total <= self.budget_bytes and now - copy.used < self.ttl_seconds:
-                continue
-            with suppress(OSError):
-                os.unlink(copy.local)
-            del self._copies[name]
-            total -= copy.size
-
-
-class MountFailed(Exception):
-    """sshfs could not mount an endpoint: this host cannot mount, or the endpoint refused."""
+async def _unmount(point: str) -> None:
+    """Take a mount off `point`, one whose sshfs died too, which stays in the table until then."""
+    unmount = await asyncio.create_subprocess_exec("fusermount3", "-uz", point, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+    await unmount.wait()
 
 
 class Mounts:
     """sshfs mounts of callers' endpoints, one per endpoint, made on first use.
 
     A mount whose sshfs has exited, its connection gone, is made again; one of an older endpoint
-    at the same address (the caller restarted, with a new key and secret) is let go. After a mount
-    fails, none is tried for `RETRY_AFTER` seconds, and inputs are copied meanwhile.
+    at the same address (the caller restarted, with a new key and secret) is let go.
     """
 
-    RETRY_AFTER = 600
-
-    def __init__(self, root: str, enabled: bool):
-        self.root = root
-        self._possible = enabled and os.path.exists("/dev/fuse") and shutil.which("sshfs") is not None
-        self._failed_at = -self.RETRY_AFTER
+    def __init__(self, root: str | None = None):
+        # Not under the scratch, which is swept: a sweep must never walk into a mount.
+        self.root = root or os.path.join(tempfile.gettempdir(), "ems-mounts")
+        self.possible = os.path.exists("/dev/fuse") and shutil.which("sshfs") is not None
         self._held: dict[Endpoint, tuple[str, asyncio.subprocess.Process]] = {}
         self._locks: dict[Endpoint, asyncio.Lock] = {}
 
-    @property
-    def enabled(self) -> bool:
-        return self._possible and time.monotonic() - self._failed_at >= self.RETRY_AFTER
+    def start(self) -> None:
+        if self.possible:
+            os.makedirs(self.root, exist_ok=True)
 
     async def mount(self, endpoint: Endpoint) -> str:
-        """Where `endpoint`'s `/` is mounted."""
+        """Where `endpoint`'s `/` is mounted; `files_unavailable` when it cannot be."""
+        if not self.possible:
+            raise EmsError(FILES_UNAVAILABLE, f"{endpoint.name}: this host cannot mount (no /dev/fuse or sshfs)")
         held = self._held.get(endpoint)
         if held is not None and held[1].returncode is None:
             return held[0]
@@ -331,8 +177,7 @@ class Mounts:
                     error = (await process.stderr.read()).decode(errors="replace").strip()
                     await process.wait()
                     await _unmount(point)
-                    self._failed_at = time.monotonic()
-                    raise MountFailed(f"{endpoint.name}: sshfs: {error or 'no mount'}")
+                    raise EmsError(FILES_UNAVAILABLE, f"{endpoint.name}: sshfs: {error or 'no mount'}")
                 await asyncio.sleep(0.05)
             self._held[endpoint] = (point, process)
             _log(f"mounted {endpoint.name}")
@@ -358,45 +203,17 @@ class Mounts:
             await self._let_go(endpoint)
 
 
-async def _unmount(point: str) -> None:
-    """Take a mount off `point`, one whose sshfs died too, which stays in the table until then."""
-    unmount = await asyncio.create_subprocess_exec("fusermount3", "-uz", point, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
-    await unmount.wait()
-
-
-class RemoteFiles:
-    """What a request with an `EMS-Files` header needs: the connections, the mounts and the input cache."""
-
-    def __init__(self, scratch: str, budget_mb: int, ttl_seconds: float, mount: bool = True, mounts_root: str | None = None):
-        self.connections = Connections()
-        self.cache = InputCache(os.path.join(scratch, "files"), budget_mb * 1024 * 1024, ttl_seconds)
-        # Not under the scratch, which is swept: a sweep must never walk into a mount.
-        self.mounts = Mounts(mounts_root or os.path.join(tempfile.gettempdir(), "ems-mounts"), mount)
-
-    def start(self) -> None:
-        self.cache.start()
-        if self.mounts.enabled:
-            os.makedirs(self.mounts.root, exist_ok=True)
-
-    async def stop(self) -> None:
-        await self.mounts.stop()
-        await self.connections.close()
-
-
 class Staging:
-    """One request's paths: its inputs' local copies and its outputs' local places, while it runs."""
+    """One request's paths: its inputs in the mount and its outputs' local places, while it runs."""
 
-    def __init__(self, files: RemoteFiles, endpoint: Endpoint, scratch: str):
-        self.files = files
+    def __init__(self, mounts: Mounts, endpoint: Endpoint, scratch: str):
+        self.mounts = mounts
         self.endpoint = endpoint
         self.scratch = scratch
+        self.point = ""
         self.inputs: dict[str, str] = {}
         self.outputs: dict[str, str] = {}
         self.dirs: dict[str, str] = {}
-        self._pinned: list[_Copy] = []
-
-    async def _sftp(self):
-        return await self.files.connections.sftp(self.endpoint)
 
     async def prepare(self, body: Any) -> None:
         inputs, outputs, dirs = request_paths(body)
@@ -408,68 +225,34 @@ class Staging:
             local_dir = os.path.join(self.scratch, "dir", str(index))
             os.makedirs(local_dir)
             self.dirs[path] = local_dir
-        started = time.monotonic()
         paths = list(dict.fromkeys(_caller_path(p) for p in inputs))
-        if paths and self.files.mounts.enabled:
-            try:
-                await self._mounted(paths)
-                _log(f"{len(paths)} input(s) through the mount of {self.endpoint.name}, in {time.monotonic() - started:.2f} s")
-                return
-            except MountFailed as exc:
-                _log(f"no mount ({exc}); copying the inputs instead, for the next {Mounts.RETRY_AFTER} s")
-                self.inputs.clear()
-        fetched = cached = 0
-        for path in paths:
-            copy = await self._retrying(path, lambda sftp, path=path: self.files.cache.fetch(sftp, self.endpoint, path))
-            self._pinned.append(copy)
-            self.inputs[path] = copy.local
-            if copy.fetched:
-                fetched += copy.size
-            else:
-                cached += copy.size
-        if self.inputs:
-            _log(f"{len(self.inputs)} input(s) from {self.endpoint.name}: {fetched / 1e6:.1f} MB fetched, {cached / 1e6:.1f} MB from the cache, in {time.monotonic() - started:.2f} s")
-
-    async def _mounted(self, paths: list[str]) -> None:
-        """Each input as a link in the request's scratch to its file in the endpoint's mount.
-
-        The link bears the name of the file the caller's path leads to, since tools pick a format
-        by the name as well as by the bytes; a mount that stopped answering is made again once.
-        """
-        for index, path in enumerate(paths):
-            real = await self._retrying(path, lambda sftp, path=path: sftp.realpath(path))
-            for attempt in (0, 1):
-                point = await self.files.mounts.mount(self.endpoint)
-                target = point + path
-                try:
-                    await asyncio.to_thread(os.stat, target)
-                    break
-                except FileNotFoundError as exc:
-                    raise EmsError(NOT_FOUND, f"{path}: no such file") from exc
-                except PermissionError as exc:
-                    raise EmsError(PATH_OUTSIDE_ROOTS, f"{path}: not granted to this request") from exc
-                except OSError as exc:
-                    await self.files.mounts.drop(self.endpoint)
-                    if attempt:
-                        raise EmsError(FILES_UNAVAILABLE, f"{path}: {exc}") from exc
-            local_dir = os.path.join(self.scratch, "in", str(index))
-            os.makedirs(local_dir)
-            link = os.path.join(local_dir, posixpath.basename(real) or "input")
-            os.symlink(target, link)
-            self.inputs[path] = link
-
-    async def _retrying(self, path: str, step):
-        """Run one SFTP step, again on a fresh connection when the held one has gone stale."""
+        if not (paths or self.outputs or self.dirs):
+            return
+        started = time.monotonic()
         for attempt in (0, 1):
-            sftp = await self._sftp()
+            self.point = await self.mounts.mount(self.endpoint)
             try:
-                return await step(sftp)
-            except (asyncssh.SFTPNoSuchFile, asyncssh.SFTPPermissionDenied) as exc:
-                raise _failure(path, exc) from exc
-            except (OSError, asyncssh.Error) as exc:
-                self.files.connections.drop(self.endpoint)
-                if attempt:
-                    raise _failure(path, exc) from exc
+                for path in paths:
+                    await self._look(path)
+                    self.inputs[path] = self.point + path
+                break
+            except EmsError as exc:
+                if exc.code is not FILES_UNAVAILABLE or attempt:
+                    raise
+                await self.mounts.drop(self.endpoint)
+        if paths:
+            _log(f"{len(paths)} input(s) through the mount of {self.endpoint.name}, in {time.monotonic() - started:.2f} s")
+
+    async def _look(self, path: str) -> None:
+        """That an input is there to read, as the caller grants it."""
+        try:
+            await asyncio.to_thread(os.stat, self.point + path)
+        except FileNotFoundError as exc:
+            raise EmsError(NOT_FOUND, f"{path}: no such file") from exc
+        except PermissionError as exc:
+            raise EmsError(PATH_OUTSIDE_ROOTS, f"{path}: not granted to this request") from exc
+        except OSError as exc:
+            raise EmsError(FILES_UNAVAILABLE, f"{path}: {exc}") from exc
 
     def input(self, path: str) -> str:
         local = self.inputs.get(_caller_path(path))
@@ -490,50 +273,33 @@ class Staging:
         return local
 
     async def send_back(self) -> None:
-        """Write what the op made to the caller's paths: each output it wrote, and every file in an output directory."""
+        """Copy what the op made into the mount: each output it wrote, and every file of an output
+        directory, which is made there first."""
         sends: list[tuple[str, str]] = [(local, remote) for remote, local in self.outputs.items() if os.path.isfile(local)]
+        made = [remote_dir for remote_dir in self.dirs]
         for remote_dir, local_dir in self.dirs.items():
             for name in sorted(os.listdir(local_dir)):
                 local = os.path.join(local_dir, name)
                 if not name.startswith(".") and os.path.isfile(local):
                     sends.append((local, posixpath.join(remote_dir, name)))
+        if not sends:
+            return
         started = time.monotonic()
-        files = set(self.outputs.values())
-        point = await self._point() if any(local in files for local, _remote in sends) else None
-        for local, remote in sends:
-            if point is not None and local in files and await self._copied(local, point + remote):
-                continue
-            await self._retrying(remote, lambda sftp, local=local, remote=remote: sftp.put(local, remote, block_size=BLOCK_SIZE, max_requests=MAX_REQUESTS))
-        if sends:
-            size = sum(os.path.getsize(local) for local, _remote in sends)
-            way = " through the mount" if point is not None else ""
-            _log(f"{len(sends)} output(s) to {self.endpoint.name}{way}: {size / 1e6:.1f} MB sent back in {time.monotonic() - started:.2f} s")
-
-    async def _point(self) -> str | None:
-        """Where the endpoint is mounted, or None to send outputs with the SFTP client instead."""
-        if not self.files.mounts.enabled:
-            return None
         try:
-            return await self.files.mounts.mount(self.endpoint)
-        except MountFailed:
-            return None
-
-    @staticmethod
-    async def _copied(local: str, target: str) -> bool:
-        """Copy an output into the mount, its bytes at the caller once the copy returns; False when
-        the mount refused it, for the SFTP client to send it instead."""
-        try:
-            await asyncio.to_thread(shutil.copyfile, local, target)
-            return True
-        except OSError:
-            return False
+            for remote_dir in made:
+                await asyncio.to_thread(os.makedirs, self.point + remote_dir, exist_ok=True)
+            for local, remote in sends:
+                await asyncio.to_thread(shutil.copyfile, local, self.point + remote)
+        except PermissionError as exc:
+            raise EmsError(PATH_OUTSIDE_ROOTS, f"{exc.filename}: not granted to this request") from exc
+        except OSError as exc:
+            raise EmsError(FILES_UNAVAILABLE, f"{self.endpoint.name}: sending an output back: {exc}") from exc
+        size = sum(os.path.getsize(local) for local, _remote in sends)
+        _log(f"{len(sends)} output(s) to {self.endpoint.name}: {size / 1e6:.1f} MB sent back in {time.monotonic() - started:.2f} s")
 
     def caller_paths(self, value: Any) -> Any:
         """`value` with every local path of this request's in its caller's spelling."""
         if isinstance(value, str):
-            for remote, local in self.inputs.items():
-                if value == local:
-                    return remote
             for remote, local in self.outputs.items():
                 if value == local:
                     return remote
@@ -542,6 +308,8 @@ class Staging:
                     return remote
                 if value.startswith(local + os.sep):
                     return posixpath.join(remote, value[len(local) + 1 :])
+            if self.point and value.startswith(self.point + "/"):
+                return value[len(self.point) :]
             return value
         if isinstance(value, list):
             return [self.caller_paths(item) for item in value]
@@ -550,9 +318,6 @@ class Staging:
         return value
 
     def close(self) -> None:
-        for copy in self._pinned:
-            self.files.cache.release(copy)
-        self._pinned.clear()
         shutil.rmtree(self.scratch, ignore_errors=True)
 
 

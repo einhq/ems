@@ -186,33 +186,34 @@ tiers — names an SFTP endpoint of its own in an `EMS-Files` header:
 EMS-Files: address=ein.example:2224; user=ems; secret=…; hostkey=ssh-ed25519 AAAA…
 ```
 
-Every path in that request is then the caller's, and no root is consulted. The op runs on local
-paths for them:
+Every path in that request is then the caller's, and no root is consulted. EMS mounts the endpoint
+read-write with sshfs, once per endpoint, made on the first request and kept, and the op runs on
+local paths for the request's:
 
-- **Inputs** (`file.path`) are read through an sshfs mount of the endpoint when the container can
-  make one (`/dev/fuse` and `SYS_ADMIN`; `EMS_FILES_MOUNT`, on by default): one read-only mount per
-  endpoint, made on the first request and kept (read-write: outputs are copied back through it). A tool reads only what it seeks to, while it runs,
-  and what it read stays in the page cache for the next op on the file until its size or
-  modification time changes. Without a mount, EMS copies each input whole into a local cache
-  before the op starts; an input stays there for `EMS_FILES_CACHE_SECONDS` (1800) after its last
-  use, within `EMS_FILES_CACHE_MB` (8192), checked against its size and modification time on the
-  endpoint, so the next op on the same file does not fetch it again. A copy in use is never
-  evicted. A mount that fails makes EMS copy instead for ten minutes.
+- **Inputs** (`file.path`) are read through the mount where they lie. A tool reads only what it
+  seeks to, while it runs, and what it read stays in the page cache for the next op on the file
+  until its size or modification time changes. The caller names an original by its own name
+  (`/old/…/IMG_0001.JPG`, not a link to it), since tools pick a format by the name as well as by
+  the bytes.
 - **Outputs** (`output.path`, `output.dir`) get a place in the request's scratch. Once the op has
-  succeeded, EMS writes each output it made to the caller's path, through the mount when there is
-  one, and every file of an output directory into the caller's directory, before it answers. A failed or cancelled op sends nothing
-  back. Paths in the result (`video.frames`' `frames[].path`) are given in the caller's spelling.
+  succeeded, EMS copies each output it made into the mount, and every file of an output directory
+  into the caller's directory, which it makes there, before it answers. A failed or cancelled op
+  sends nothing back. Paths in the result (`video.frames`' `frames[].path`) are given in the
+  caller's spelling.
 
 EMS connects with SSH using chacha20-poly1305 alone, with `hostkey` pinned, and signs in as `user`
-with `secret` as its password. It asks the endpoint for only what the request names: a `stat` of
-each input and of the directories above it, a `realpath` (whose last component's extension the
-local name keeps, since tools pick a format by it) and reads of each input, and a write of each
-output and of each file of an output directory, which the endpoint creates. It never lists a
-directory, and it never removes or renames anything there. The endpoint writes an output in place:
-a copy through the mount has every byte at the caller once it returns.
+with `secret` as its password. Through the mount it asks for only what the request names: a `stat`
+of each input and of the directories above it, reads of each input, a `mkdir` of an output
+directory, and writes of each output. It never lists a directory, and it never removes or renames
+anything there. The endpoint writes an output in place: a copy through sshfs has every byte at the
+caller once it returns.
 
-An endpoint EMS cannot reach or sign in to is `502 files_unavailable` (not permanent); an input it
-does not have is `404 not_found`, and a path it refuses is `403 path_outside_roots`.
+The container needs `/dev/fuse` and the `SYS_ADMIN` capability to mount. A host without them, an
+endpoint EMS cannot reach or sign in to, and a mount that fails during the request make it
+`502 files_unavailable` (not permanent): the caller tries again later. An input the endpoint does
+not have is `404 not_found`, and a path it refuses is `403 path_outside_roots`. A host on another
+machine than the caller is faster with a larger readahead for its FUSE mounts than the kernel's
+128 KiB, which only root on the host can set (`/sys/class/bdi/<mount>/read_ahead_kb`).
 
 ### 3.2 File input
 
@@ -977,7 +978,6 @@ settings; it is absent while the model worker is down.
 
 Environment only. `EMS_KEYS_FILE` (one key per line) or `EMS_KEY`, `EMS_ROOTS`
 (`/files:ro,/old:ro,/files-volatile:rw,/files-tmp:rw`), `EMS_PORT`, `EMS_HOST`, `EMS_SCRATCH`,
-a caller's files (`EMS_FILES_MOUNT`, `EMS_FILES_CACHE_MB`, `EMS_FILES_CACHE_SECONDS`; _3.1a_),
 the admission limits (`EMS_LIMIT_MODELS`, `EMS_LIMIT_TOOLS`, `EMS_LIMIT_ENCODES`,
 `EMS_QUEUE_DEPTH`, `EMS_INTERACTIVE_RESERVE`), `EMS_EXIFTOOL_WORKERS`, `EMS_EXPECT_GPU` (`1`: a card
 is expected, and health lists `what: "gpu"` under `degraded` when none is visible), `EMS_CARD_BUDGET_MB` (the most of the card the models
