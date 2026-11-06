@@ -22,6 +22,7 @@ import hashlib
 import os
 import posixpath
 import shutil
+import sys
 import time
 from contextlib import suppress
 from contextvars import ContextVar
@@ -30,6 +31,7 @@ from typing import Any
 
 import asyncssh
 
+from .admission import current_op
 from .errors import EmsError, FILES_UNAVAILABLE, NOT_FOUND, PATH_OUTSIDE_ROOTS, invalid
 
 HEADER = "ems-files"
@@ -94,6 +96,11 @@ def request_paths(body: Any) -> tuple[list[str], list[str], list[str]]:
 
     walk(body)
     return inputs, outputs, dirs
+
+
+def _log(message: str) -> None:
+    """One line on the service's log, for the request the running task serves."""
+    print(f"ems: {current_op.get() or 'request'}: {message}", file=sys.stderr, flush=True)
 
 
 def _caller_path(path: str) -> str:
@@ -170,6 +177,8 @@ class _Copy:
     mtime: int
     used: float
     pins: int = 0
+    # Whether the pin that returned it fetched it, rather than finding it in the cache.
+    fetched: bool = False
 
 
 @dataclass
@@ -197,6 +206,7 @@ class InputCache:
             if copy is not None and os.path.exists(copy.local):
                 copy.pins += 1
                 copy.used = time.monotonic()
+                copy.fetched = False
                 return copy
             pending = self._fetching.get(name)
             if pending is None:
@@ -214,7 +224,7 @@ class InputCache:
             await sftp.get(path, part, block_size=BLOCK_SIZE, max_requests=MAX_REQUESTS)
             os.utime(part, (mtime, mtime))
             os.replace(part, local)
-            copy = _Copy(local, size, mtime, time.monotonic(), pins=1)
+            copy = _Copy(local, size, mtime, time.monotonic(), pins=1, fetched=True)
             self._copies[name] = copy
             self._evict()
             return copy
@@ -283,10 +293,18 @@ class Staging:
             local_dir = os.path.join(self.scratch, "dir", str(index))
             os.makedirs(local_dir)
             self.dirs[path] = local_dir
+        started = time.monotonic()
+        fetched = cached = 0
         for path in dict.fromkeys(_caller_path(p) for p in inputs):
             copy = await self._retrying(path, lambda sftp, path=path: self.files.cache.fetch(sftp, self.endpoint, path))
             self._pinned.append(copy)
             self.inputs[path] = copy.local
+            if copy.fetched:
+                fetched += copy.size
+            else:
+                cached += copy.size
+        if self.inputs:
+            _log(f"{len(self.inputs)} input(s) from {self.endpoint.name}: {fetched / 1e6:.1f} MB fetched, {cached / 1e6:.1f} MB from the cache, in {time.monotonic() - started:.2f} s")
 
     async def _retrying(self, path: str, step):
         """Run one SFTP step, again on a fresh connection when the held one has gone stale."""
@@ -327,8 +345,12 @@ class Staging:
                 local = os.path.join(local_dir, name)
                 if not name.startswith(".") and os.path.isfile(local):
                     sends.append((local, posixpath.join(remote_dir, name)))
+        started = time.monotonic()
         for local, remote in sends:
             await self._retrying(remote, lambda sftp, local=local, remote=remote: sftp.put(local, remote, block_size=BLOCK_SIZE, max_requests=MAX_REQUESTS))
+        if sends:
+            size = sum(os.path.getsize(local) for local, _remote in sends)
+            _log(f"{len(sends)} output(s) to {self.endpoint.name}: {size / 1e6:.1f} MB sent back in {time.monotonic() - started:.2f} s")
 
     def caller_paths(self, value: Any) -> Any:
         """`value` with every local path of this request's in its caller's spelling."""
