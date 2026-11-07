@@ -147,6 +147,7 @@ def create_app(
             limit_encodes=settings.limit_encodes,
             weights={caller.name: caller.weight for caller in settings.keys.values()},
             affinity_wait=settings.affinity_wait,
+            families=settings.model_families,
         ),
         worker=worker,
         query_worker=query_worker,

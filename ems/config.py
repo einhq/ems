@@ -45,6 +45,8 @@ class Settings:
     # How long a caller's oldest model request may wait while its requests for a family already
     # running go first.
     affinity_wait: int
+    # How many model families' batch work may run at once (0: any number).
+    model_families: int
     # The host is meant to have a card (EMS_EXPECT_GPU=1). Without one EMS still runs, as a host
     # with no card, and says so in health's `degraded` rather than failing to start: a card lost to
     # a broken device mapping after a reboot then shows as a degradation instead of an outage.
@@ -126,6 +128,7 @@ class Settings:
             queue_depth=integer("EMS_QUEUE_DEPTH", 64),
             interactive_reserve=integer("EMS_INTERACTIVE_RESERVE", 1),
             affinity_wait=integer("EMS_AFFINITY_WAIT", 300),
+            model_families=integer("EMS_MODEL_FAMILIES", 1),
             expect_gpu=e.get("EMS_EXPECT_GPU", "") == "1",
             exiftool_workers=integer("EMS_EXIFTOOL_WORKERS", 2),
             tool_stall_seconds=integer("EMS_TOOL_STALL", 900),

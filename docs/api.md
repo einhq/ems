@@ -139,7 +139,11 @@ running requests included, divided by its weight — where a caller that wanted 
 starts level with the least use of those that do; and within that caller, in the `models` lane, to
 its oldest request for a model family running there or run last, so a loaded family is used before
 another is loaded, unless its oldest request has waited `EMS_AFFINITY_WAIT` seconds (300); else to
-its oldest. A caller that keeps more requests in flight than the lane runs gives EMS the choice;
+its oldest. The `models` lane runs batch work of at most `EMS_MODEL_FAMILIES` model families at
+once (1; 0 for any number): a request for another family waits, though slots are free, until the
+running families have none left in flight or it has waited `EMS_AFFINITY_WAIT`. The worker runs
+one request of a family at a time, so families side by side only contend for the card and the
+cores. Interactive requests are never held to it. A caller that keeps more requests in flight than the lane runs gives EMS the choice;
 one that keeps fewer chooses for itself. The queue is in memory: when EMS restarts, a waiting
 request's connection closes, and its caller asks again.
 
@@ -991,7 +995,7 @@ settings; it is absent while the model worker is down.
 Environment only. `EMS_KEYS_FILE` (a key a line, with its caller's name and weight, _2.3_) or `EMS_KEY`, `EMS_PORT`, `EMS_HOST`,
 `EMS_SCRATCH`,
 the admission limits (`EMS_LIMIT_MODELS`, `EMS_LIMIT_TOOLS`, `EMS_LIMIT_ENCODES`,
-`EMS_QUEUE_DEPTH`, `EMS_INTERACTIVE_RESERVE`, `EMS_AFFINITY_WAIT`), `EMS_EXIFTOOL_WORKERS`, `EMS_EXPECT_GPU` (`1`: a card
+`EMS_QUEUE_DEPTH`, `EMS_INTERACTIVE_RESERVE`, `EMS_AFFINITY_WAIT`, `EMS_MODEL_FAMILIES`), `EMS_EXIFTOOL_WORKERS`, `EMS_EXPECT_GPU` (`1`: a card
 is expected, and health lists `what: "gpu"` under `degraded` when none is visible), `EMS_CARD_BUDGET_MB` (the most of the card the models
 treat as there — how a smaller card is rehearsed; 0 is the whole card), `EMS_CARD_SHARE_MB` (the most
 of the card EMS's own processes hold, for a card shared with another service such as the llm: a

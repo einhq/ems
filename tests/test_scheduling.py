@@ -265,3 +265,64 @@ async def test_a_request_through_the_app_is_from_its_key(client, fake_worker):
     body = (await client.get("/v0/health", headers=AUTH)).json()
     assert "callers" in body
     assert body["callers"]["default"]["weight"] == 1
+
+
+async def test_another_family_waits_while_one_runs_though_slots_are_free():
+    admission = Admission(limit_models=4, limit_tools=1, queue_depth=8, interactive_reserve=0)
+    order: list = []
+    faces = Held(admission, "faces.detect", "a")
+    await faces.started.wait()
+    whisper = Held(admission, "speech.transcribe", "a", order=order)
+    more_faces = Held(admission, "faces.embed", "a", order=order)
+    await more_faces.started.wait()
+    await settle()
+    # Two of four slots free, and the transcript still waits for the faces to be done.
+    assert order == [("a", "faces.embed")] and admission.snapshot()["models"]["waiting"] == 1
+    faces.release.set()
+    await settle()
+    assert not whisper.started.is_set()
+    more_faces.release.set()
+    await whisper.started.wait()
+    await finish(faces, more_faces, whisper)
+
+
+async def test_a_held_back_family_goes_once_it_has_waited_long_enough():
+    admission = Admission(limit_models=4, limit_tools=1, queue_depth=8, interactive_reserve=0, affinity_wait=0.05)
+    faces = Held(admission, "faces.detect", "a")
+    await faces.started.wait()
+    whisper = Held(admission, "speech.transcribe", "a")
+    # No slot is given back meanwhile: its wait alone lets it in, beside the faces.
+    await asyncio.wait_for(whisper.started.wait(), 2)
+    assert admission.snapshot()["models"]["running"] == 2
+    await finish(faces, whisper)
+
+
+async def test_interactive_work_is_not_held_to_the_running_family():
+    admission = Admission(limit_models=4, limit_tools=1, queue_depth=8, interactive_reserve=0)
+    faces = Held(admission, "faces.detect", "a")
+    await faces.started.wait()
+    search = Held(admission, "vision.embed_text", "a", interactive=True)
+    await asyncio.wait_for(search.started.wait(), 1)
+    await finish(faces, search)
+
+
+async def test_families_zero_runs_any_number_at_once():
+    admission = Admission(limit_models=4, limit_tools=1, queue_depth=8, interactive_reserve=0, families=0)
+    faces = Held(admission, "faces.detect", "a")
+    whisper = Held(admission, "speech.transcribe", "a")
+    await asyncio.wait_for(asyncio.gather(faces.started.wait(), whisper.started.wait()), 1)
+    await finish(faces, whisper)
+
+
+async def test_one_freed_slot_starts_one_family_though_more_slots_are_free():
+    admission = Admission(limit_models=4, limit_tools=1, queue_depth=8, interactive_reserve=0)
+    whisper = Held(admission, "speech.transcribe", "a")
+    await whisper.started.wait()
+    faces = Held(admission, "faces.detect", "a")
+    ocr = Held(admission, "ocr.read", "a")
+    await settle()
+    whisper.release.set()
+    await settle()
+    # The dispatch that follows grants the faces; the ocr is another family, and waits for them.
+    assert faces.started.is_set() and not ocr.started.is_set()
+    await finish(whisper, faces, ocr)
