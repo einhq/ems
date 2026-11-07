@@ -257,6 +257,7 @@ def register(router: APIRouter, ctx: Context) -> None:
             "worker": state,
             "queues": ctx.admission.snapshot(),
             "requests": ctx.admission.requests(),
+            "callers": ctx.admission.caller_states(),
             "build": BUILD,
         }
         if query_worker is not None:

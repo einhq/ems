@@ -11,7 +11,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from . import API_VERSION
-from .admission import Admission, current_op
+from .admission import Admission, current_caller, current_op
 from .auth import require_key
 from .card import CardArbiter, CardBudget
 from .config import Settings
@@ -32,10 +32,13 @@ def log(message: str) -> None:
 
 
 class NameTheOp:
-    """Sets `current_op` (`/v0/vision/embed` -> `vision.embed`) for the request's task.
+    """Sets `current_op` (`/v0/vision/embed` -> `vision.embed`) and `current_caller` (the name
+    its key has, `Caller`) for the request's task. An unknown key names no one; `require_key`
+    refuses it.
 
     Plain ASGI rather than `@app.middleware("http")`: that one wraps the response in a stream of
-    its own, and the event-stream ops are the long ones this exists to name.
+    its own, and the event-stream ops are the long ones this exists to name. Not in `require_key`:
+    a dependency that is not async runs in a thread, and what it sets stays there.
     """
 
     def __init__(self, app):
@@ -44,7 +47,22 @@ class NameTheOp:
     async def __call__(self, scope, receive, send):
         if scope["type"] == "http":
             current_op.set(scope["path"].removeprefix("/v0/").replace("/", "."))
+            current_caller.set(caller_of(scope))
         await self.app(scope, receive, send)
+
+
+def caller_of(scope) -> str:
+    """The name of the caller whose key the request carries: `anonymous` with authentication off."""
+    app = scope.get("app")
+    keys = app.state.settings.keys if app is not None else {}
+    if not keys:
+        return "anonymous"
+    for name, value in scope.get("headers") or ():
+        if name == b"authorization":
+            scheme, _, token = value.decode("latin-1").partition(" ")
+            caller = keys.get(token.strip()) if scheme.lower() == "bearer" else None
+            return caller.name if caller is not None else "unknown"
+    return "unknown"
 
 
 def make_workers(settings: Settings, env: dict[str, str] | None = None) -> tuple[Worker, Worker | None]:
@@ -127,6 +145,8 @@ def create_app(
             queue_depth=settings.queue_depth,
             interactive_reserve=settings.interactive_reserve,
             limit_encodes=settings.limit_encodes,
+            weights={caller.name: caller.weight for caller in settings.keys.values()},
+            affinity_wait=settings.affinity_wait,
         ),
         worker=worker,
         query_worker=query_worker,

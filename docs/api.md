@@ -109,8 +109,10 @@ streaming a short op.
 
 ### 2.3 Authentication
 
-`Authorization: Bearer <key>`. Keys are lines in a keys file the operator points EMS at;
-there is one role. A missing or unknown key is `401 unauthorized`.
+`Authorization: Bearer <key>`. Keys are lines in a keys file the operator points EMS at,
+`<key> [<name> [<weight>]]`: each names a caller (`caller-<n>` when unnamed) and its weight in
+admission (_2.5_, 1 when not given); `EMS_KEY` is the caller `default`. There is one role: every
+caller may ask for everything. A missing or unknown key is `401 unauthorized`.
 
 ### 2.4 Versioning
 
@@ -126,9 +128,20 @@ it was written for.
 EMS bounds concurrent work in three lanes — `models` (requests forwarded to the model worker,
 which serialises per model family behind that), `tools` (CPU and subprocess work) and `encodes`
 (whole-file decodes: transcodes, storyboards and shot decodes, so a long one never sits ahead of the probes and
-renditions) — and reports the bounds in `capabilities.limits`. Past `queue_depth` waiters a new request is
-`503 busy` with `Retry-After`. Interactive requests may use `interactive_reserve` extra slots,
+renditions) — and reports the bounds in `capabilities.limits`. Past `queue_depth` waiters of one
+caller, across the lanes, a new request of that caller's is `503 busy` with `Retry-After`; the
+other callers are still admitted. Interactive requests may use `interactive_reserve` extra slots,
 so a crawl never starves a person waiting.
+
+A freed slot goes to the oldest interactive request waiting for it; else to the caller with a
+batch request waiting that has used EMS the least — the slot-seconds it has held in any lane, its
+running requests included, divided by its weight — where a caller that wanted nothing until now
+starts level with the least use of those that do; and within that caller, in the `models` lane, to
+its oldest request for a model family running there or run last, so a loaded family is used before
+another is loaded, unless its oldest request has waited `EMS_AFFINITY_WAIT` seconds (300); else to
+its oldest. A caller that keeps more requests in flight than the lane runs gives EMS the choice;
+one that keeps fewer chooses for itself. The queue is in memory: when EMS restarts, a waiting
+request's connection closes, and its caller asks again.
 
 ### 2.6 The card
 
@@ -863,8 +876,9 @@ Liveness and what is loaded:
                                "device": "cuda", "worker": "batch", "vram_mb": 3616, "ram_mb": 17, "load_seconds": 119.6 } ],
                  "measured": { "whisper:cuda:float16": { "vram_mb": 3616, "ram_mb": 17, "load_seconds": 119.6 } } },
     "faces": { "model": "retinaface-r34+transface", "device": "auto", "pinned": false, "copies": [] } },
-  "requests": [ { "op": "speech.transcribe", "lane": "models", "interactive": false,
+  "requests": [ { "op": "speech.transcribe", "caller": "core-home", "lane": "models", "interactive": false,
                   "queued": 1780003590.0, "started": 1780003595.0, "family": "whisper" } ],
+  "callers": { "core-home": { "weight": 1, "used_seconds": 51234.5, "running": 1, "waiting": 0 } },
   "build": { "version": "0.1.0", "commit": "e737f1d", "date": "2026-10-04T06:51:28+02:00" },
   "warnings": [ "no keys configured: authentication is off" ] }
 ```
@@ -880,8 +894,11 @@ it. No copies means not loaded. A family can have two copies, `faces:cuda` besid
 after a CUDA OOM. `running` is a request holding the family right now and `waiting` how many queue
 behind it — resident and working are different things. Absent while the worker is down.
 
-`requests` (_3.2_) lists every admission slot held or waited for, oldest first: the `op`, its
-`lane`, whether it is `interactive`, when it `queued` and, once admitted, when it `started`.
+`requests` (_3.2_) lists every admission slot held or waited for, oldest first: the `op`, the
+`caller` it is from, its `lane`, whether it is `interactive`, when it `queued` and, once admitted,
+when it `started`. `callers` names each caller configured or seen since EMS started, with its
+`weight`, the slot-seconds it has `used_seconds` (running requests included), and how many of its
+requests are `running` and `waiting` now.
 `build` (_3.2_) is the package version and, when the image was built from a git checkout, its
 `commit` and commit `date`.
 
@@ -971,10 +988,10 @@ settings; it is absent while the model worker is down.
 
 ## 6. Configuration (operator)
 
-Environment only. `EMS_KEYS_FILE` (one key per line) or `EMS_KEY`, `EMS_PORT`, `EMS_HOST`,
+Environment only. `EMS_KEYS_FILE` (a key a line, with its caller's name and weight, _2.3_) or `EMS_KEY`, `EMS_PORT`, `EMS_HOST`,
 `EMS_SCRATCH`,
 the admission limits (`EMS_LIMIT_MODELS`, `EMS_LIMIT_TOOLS`, `EMS_LIMIT_ENCODES`,
-`EMS_QUEUE_DEPTH`, `EMS_INTERACTIVE_RESERVE`), `EMS_EXIFTOOL_WORKERS`, `EMS_EXPECT_GPU` (`1`: a card
+`EMS_QUEUE_DEPTH`, `EMS_INTERACTIVE_RESERVE`, `EMS_AFFINITY_WAIT`), `EMS_EXIFTOOL_WORKERS`, `EMS_EXPECT_GPU` (`1`: a card
 is expected, and health lists `what: "gpu"` under `degraded` when none is visible), `EMS_CARD_BUDGET_MB` (the most of the card the models
 treat as there — how a smaller card is rehearsed; 0 is the whole card), `EMS_CARD_SHARE_MB` (the most
 of the card EMS's own processes hold, for a card shared with another service such as the llm: a

@@ -14,11 +14,21 @@ from dataclasses import dataclass
 
 
 @dataclass(frozen=True)
+class Caller:
+    """Who holds a key: the name the scheduler and `health` know it by, and its share of EMS
+    against the other callers' (admission.py)."""
+
+    name: str
+    weight: float = 1.0
+
+
+@dataclass(frozen=True)
 class Settings:
     port: int
     host: str
     keys_file: str
-    keys: frozenset[str]
+    # Each key, and the caller it names.
+    keys: dict[str, Caller]
     scratch: str
     worker_socket: str
     worker_script: str
@@ -32,6 +42,9 @@ class Settings:
     limit_encodes: int
     queue_depth: int
     interactive_reserve: int
+    # How long a caller's oldest model request may wait while its requests for a family already
+    # running go first.
+    affinity_wait: int
     # The host is meant to have a card (EMS_EXPECT_GPU=1). Without one EMS still runs, as a host
     # with no card, and says so in health's `degraded` rather than failing to start: a card lost to
     # a broken device mapping after a reboot then shows as a degradation instead of an outage.
@@ -112,6 +125,7 @@ class Settings:
             limit_encodes=integer("EMS_LIMIT_ENCODES", 2),
             queue_depth=integer("EMS_QUEUE_DEPTH", 64),
             interactive_reserve=integer("EMS_INTERACTIVE_RESERVE", 1),
+            affinity_wait=integer("EMS_AFFINITY_WAIT", 300),
             expect_gpu=e.get("EMS_EXPECT_GPU", "") == "1",
             exiftool_workers=integer("EMS_EXIFTOOL_WORKERS", 2),
             tool_stall_seconds=integer("EMS_TOOL_STALL", 900),
@@ -140,22 +154,32 @@ class Settings:
         )
 
 
-def load_keys(path: str, inline: str | None) -> frozenset[str]:
-    """One key per line; `EMS_KEY` adds one without a file.
+def load_keys(path: str, inline: str | None) -> dict[str, Caller]:
+    """A key a line, `<key> [<name> [<weight>]]`: the caller it names (`caller-<n>` by its place
+    among the keys when unnamed) and that caller's weight (1 when not given). `EMS_KEY` adds one
+    without a file, the caller `default`.
 
     No file and no key means no authentication at all, which is only right on a private socket
     or a development box — the log says so at startup rather than failing, because a container
     with nothing mounted is still worth being able to probe.
     """
-    keys: set[str] = set()
+    keys: dict[str, Caller] = {}
     if inline and inline.strip():
-        keys.add(inline.strip())
+        keys[inline.strip()] = Caller("default")
     try:
         with open(path, encoding="utf-8") as handle:
-            for line in handle:
-                line = line.strip()
-                if line and not line.startswith("#"):
-                    keys.add(line)
+            for number, line in enumerate(handle, 1):
+                fields = line.split()
+                if not fields or fields[0].startswith("#"):
+                    continue
+                key, name, weight = fields[0], (fields[1:2] or [f"caller-{len(keys) + 1}"])[0], (fields[2:3] or ["1"])[0]
+                try:
+                    share = float(weight)
+                except ValueError as exc:
+                    raise ValueError(f"{path}:{number}: the weight must be a number, got {weight!r}") from exc
+                if not share > 0:
+                    raise ValueError(f"{path}:{number}: the weight must be above 0, got {weight!r}")
+                keys[key] = Caller(name, share)
     except FileNotFoundError:
         pass
-    return frozenset(keys)
+    return keys
