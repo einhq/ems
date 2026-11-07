@@ -21,12 +21,6 @@ A freed slot goes to the first of:
    loaded beside or in place of it, unless the caller's oldest waiter has waited `affinity_wait`
    seconds; else its oldest waiter.
 
-That lane also runs batch work of at most `families` model families at once (0: any number): a
-request for another family waits, though slots are free, until the running ones have none left
-in flight or it has waited `affinity_wait`. The worker runs one request of a family at a time, so
-two families side by side only contend for the card and the cores: on fry, four of them at once
-took half as long again as one after another (ein/core#1068). Interactive work is never held back.
-
 The queue lives in memory only. A request waiting here is an open connection; when EMS restarts,
 its caller sees the connection close and tries again later, which is all a persistent queue would
 have bought.
@@ -97,8 +91,6 @@ class Waiter:
     family: str
     interactive: bool
     queued: float
-    # Its `requests` entry, which says it runs from the moment it is granted.
-    entry: dict
     granted: asyncio.Future = field(default_factory=lambda: asyncio.get_running_loop().create_future())
 
 
@@ -126,7 +118,7 @@ class Lane:
 
 class Admission:
     def __init__(self, *, limit_models: int, limit_tools: int, queue_depth: int, interactive_reserve: int, limit_encodes: int = 2,
-                 weights: dict[str, float] | None = None, affinity_wait: float = 300.0, families: int = 1):
+                 weights: dict[str, float] | None = None, affinity_wait: float = 300.0):
         self.lanes = {
             "models": Lane("models", limit_models, interactive_reserve, affinity=True),
             "tools": Lane("tools", limit_tools, interactive_reserve),
@@ -134,7 +126,6 @@ class Admission:
         }
         self.queue_depth = max(0, queue_depth)
         self.affinity_wait = max(0.0, affinity_wait)
-        self.families = max(0, families)
         self.callers: dict[str, Share] = {name: Share(weight=weight) for name, weight in (weights or {}).items()}
         # Every slot asked for and not yet given back, for `health`'s `requests`: which op, in
         # which lane, from whom, since when it queued and since when it runs. The lane counters say
@@ -188,17 +179,6 @@ class Admission:
         caller = self._caller(name)
         caller.used = max(caller.used, floor * caller.weight)
 
-    def _running_families(self, lane: Lane) -> set[str | None]:
-        """The families of the lane's batch work running now."""
-        return {entry.get("family") for entry in self._requests.values() if entry["lane"] == lane.name and "started" in entry and not entry["interactive"]}
-
-    def _fits(self, lane: Lane, family: str) -> bool:
-        """Whether batch work for `family` may start beside the families running in the lane."""
-        if not lane.affinity or self.families == 0:
-            return True
-        running = self._running_families(lane)
-        return family in running or len(running) < self.families
-
     def _choose(self, lane: Lane) -> Waiter | None:
         """The waiter the lane's next slot goes to, or None when none may run now."""
         interactive = [waiter for waiter in lane.waiters if waiter.interactive]
@@ -208,31 +188,23 @@ class Admission:
         if not batch or not lane.may_run(False):
             return None
         now = time.time()
-
-        def late(waiter: Waiter) -> bool:
-            return now - waiter.queued >= self.affinity_wait
-
-        ready = [waiter for waiter in batch if late(waiter) or self._fits(lane, waiter.family)]
-        if not ready:
-            return None
         oldest_of: dict[str, Waiter] = {}
-        for waiter in ready:
+        for waiter in batch:
             if waiter.caller not in oldest_of or waiter.queued < oldest_of[waiter.caller].queued:
                 oldest_of[waiter.caller] = waiter
         name = min(oldest_of, key=lambda caller: (self._use(caller, now), oldest_of[caller].queued))
-        mine = [waiter for waiter in ready if waiter.caller == name]
-        overdue = [waiter for waiter in mine if late(waiter)]
-        if overdue or not lane.affinity:
-            return min(overdue or mine, key=lambda waiter: waiter.queued)
-        hot = self._running_families(lane) | {lane.last_family}
-        warm = [waiter for waiter in mine if waiter.family in hot]
-        return min(warm or mine, key=lambda waiter: waiter.queued)
+        oldest = oldest_of[name]
+        if not lane.affinity or now - oldest.queued >= self.affinity_wait:
+            return oldest
+        hot = {entry.get("family") for entry in self._requests.values() if entry["lane"] == lane.name and "started" in entry}
+        hot.add(lane.last_family)
+        warm = [waiter for waiter in batch if waiter.caller == name and waiter.family in hot]
+        return min(warm, key=lambda waiter: waiter.queued) if warm else oldest
 
     def _dispatch(self, lane: Lane) -> None:
         while (waiter := self._choose(lane)) is not None:
             lane.waiters.remove(waiter)
             lane.running += 1
-            waiter.entry["started"] = time.time()
             waiter.granted.set_result(None)
 
     def _give_back(self, lane: Lane, entry: dict) -> None:
@@ -254,21 +226,15 @@ class Admission:
             entry["family"] = family
         try:
             # A slot no one waits ahead of is taken at once; one others wait for is the scheduler's.
-            free = lane.may_run(interactive) and not any(waiter.interactive or not interactive for waiter in lane.waiters)
-            if free and (interactive or self._fits(lane, family)):
+            if lane.may_run(interactive) and not any(waiter.interactive or not interactive for waiter in lane.waiters):
                 lane.running += 1
             else:
                 if self._waiting_of(caller) >= self.queue_depth:
                     raise EmsError(BUSY, f"{lane.name}: {caller}'s queue is full", retry_after=BUSY_RETRY_AFTER_SECONDS)
                 if not self._active(caller):
                     self._catch_up(caller, now)
-                waiter = Waiter(caller, family, interactive, now, entry)
+                waiter = Waiter(caller, family, interactive, now)
                 lane.waiters.append(waiter)
-                if lane.affinity and not interactive:
-                    # Held back for its family, it may go once it has waited long enough, slot freed or not.
-                    asyncio.get_running_loop().call_later(self.affinity_wait + 0.1, self._dispatch, lane)
-                # A waiter that may run now goes at once: this one, when only another family's is held back.
-                self._dispatch(lane)
                 self._requests[request_id] = entry
                 try:
                     await waiter.granted
@@ -279,7 +245,7 @@ class Admission:
                         # Granted as the caller went away: the slot goes straight to the next waiter.
                         self._give_back(lane, entry)
                     raise
-            entry.setdefault("started", time.time())
+            entry["started"] = time.time()
             self._requests[request_id] = entry
             token = current_request.set(entry)
             try:
