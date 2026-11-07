@@ -5,6 +5,7 @@ reaches through a real sshfs mount of it here. The tests that mount need sshfs a
 """
 
 import asyncio
+import base64
 import os
 import shutil
 import threading
@@ -16,7 +17,7 @@ from ems.ops import video
 from ems.remote import Mounts, parse_header, request_paths
 
 DATA = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
-SECRET = "a-secret-made-at-start"
+CLIENT_KEY = asyncssh.generate_private_key("ssh-ed25519")
 MOUNTABLE = os.path.exists("/dev/fuse") and shutil.which("sshfs") is not None and shutil.which("fusermount3") is not None
 needs_mount = pytest.mark.skipif(not MOUNTABLE, reason="no sshfs or FUSE here")
 
@@ -25,11 +26,11 @@ class OneUser(asyncssh.SSHServer):
     def begin_auth(self, username):
         return True
 
-    def password_auth_supported(self):
+    def public_key_auth_supported(self):
         return True
 
-    def validate_password(self, username, password):
-        return username == "ems" and password == SECRET
+    def validate_public_key(self, username, key):
+        return username == "ems" and key.export_public_key() == CLIENT_KEY.export_public_key()
 
 
 @pytest.fixture
@@ -40,6 +41,10 @@ async def mounting(client, tmp_path):
     client.app.state.ctx.files = mounts
     yield mounts
     await mounts.stop()
+
+
+def key_field(key) -> str:
+    return base64.b64encode(key.export_private_key("openssh")).decode()
 
 
 @pytest.fixture
@@ -68,15 +73,15 @@ def caller(tmp_path):
     started.wait(10)
     port = holder["server"].sockets[0].getsockname()[1]
     hostkey = key.export_public_key().decode().strip()
-    yield files, {"EMS-Files": f"address=127.0.0.1:{port}; user=ems; secret={SECRET}; hostkey={hostkey}"}
+    yield files, {"EMS-Files": f"address=127.0.0.1:{port}; user=ems; key={key_field(CLIENT_KEY)}; hostkey={hostkey}"}
     loop.call_soon_threadsafe(holder["server"].close)
     loop.call_soon_threadsafe(loop.stop)
     thread.join(10)
 
 
 def test_the_header_names_an_endpoint_and_the_body_its_paths():
-    endpoint = parse_header("address=ein.example:2224; user=ems; secret=s; hostkey=ssh-ed25519 AAAA")
-    assert (endpoint.host, endpoint.port, endpoint.user, endpoint.hostkey) == ("ein.example", 2224, "ems", "ssh-ed25519 AAAA")
+    endpoint = parse_header(f"address=ein.example:2224; user=ems; key={base64.b64encode(b'a key file').decode()}; hostkey=ssh-ed25519 AAAA")
+    assert (endpoint.host, endpoint.port, endpoint.user, endpoint.key, endpoint.hostkey) == ("ein.example", 2224, "ems", "a key file", "ssh-ed25519 AAAA")
     assert request_paths({"file": {"path": "/a"}, "targets": [{"output": {"path": "/b"}}], "output": {"dir": "/c"}}) == (["/a"], ["/b"], ["/c"])
 
 
@@ -148,7 +153,8 @@ async def test_a_missing_input_is_not_found_and_a_bad_header_invalid(client, mou
 async def test_a_caller_that_refuses_the_mount_is_a_failure_to_retry(client, mounting, caller):
     files, headers = caller
     (files / "note.txt").write_text("x")
-    wrong = {"EMS-Files": headers["EMS-Files"].replace(SECRET, "not-the-secret")}
+    other = key_field(asyncssh.generate_private_key("ssh-ed25519"))
+    wrong = {"EMS-Files": headers["EMS-Files"].replace(key_field(CLIENT_KEY), other)}
     r = await client.post("/v0/document/extract", json={"file": {"path": str(files / "note.txt")}}, headers=wrong)
     error = r.json()["error"]
     assert r.status_code == 502 and error["code"] == "files_unavailable" and error["permanent"] is False

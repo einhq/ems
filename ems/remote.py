@@ -1,10 +1,11 @@
 """The caller's files, when EMS does not mount them: an sshfs mount of the caller's endpoint.
 
 A request may carry an `EMS-Files` header naming an SFTP endpoint of its caller's:
-`address=host:port; user=…; secret=…; hostkey=ssh-ed25519 AAAA…`. Every path in that request is
-the caller's: EMS has no files of its own. It mounts the endpoint read-write with sshfs, once per
-endpoint, and the op runs on local paths for the request's, which `input`, `output` and
-`output_dir` give it:
+`address=host:port; user=…; key=…; hostkey=ssh-ed25519 AAAA…`, `key` the private key `user` signs
+in with, its OpenSSH file in base64. Every path in that request is the caller's: EMS has no files
+of its own. It mounts the endpoint read-write with sshfs, once per endpoint and over up to
+`CONNECTIONS` connections, and the op runs on local paths for the request's, which `input`,
+`output` and `output_dir` give it:
 
 - An input (`file.path`) is read through the mount where it lies, so a tool seeks and reads only
   what it needs while it runs, and the page cache keeps what was read for the next op until the
@@ -16,13 +17,15 @@ endpoint, and the op runs on local paths for the request's, which `input`, `outp
 Without a mount — no /dev/fuse or sshfs here, an endpoint that cannot be reached, a mount that
 fails during the request — the request is refused as `files_unavailable`, which the caller tries
 again later. The caller grants a request exactly its own paths for as long as it runs, so nothing
-is listed and nothing else is asked for. The connection is SSH with chacha20-poly1305 alone and the
-host key from the header pinned.
+is listed and nothing else is asked for. Each connection is SSH with chacha20-poly1305 alone and
+the host key from the header pinned.
 """
 
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import hashlib
 import os
 import posixpath
@@ -41,6 +44,9 @@ from .errors import EmsError, FILES_UNAVAILABLE, NOT_FOUND, PATH_NOT_GRANTED, in
 
 HEADER = "ems-files"
 CIPHER = "chacha20-poly1305@openssh.com"
+# sshfs gives each open file one of a mount's connections, so one large read does not hold up the
+# requests behind it, and a caller can serve the connections on several CPUs.
+CONNECTIONS = 4
 
 
 @dataclass(frozen=True)
@@ -48,7 +54,7 @@ class Endpoint:
     host: str
     port: int
     user: str
-    secret: str
+    key: str
     hostkey: str
 
     @property
@@ -65,9 +71,13 @@ def parse_header(value: str) -> Endpoint:
             fields[key.strip()] = item.strip()
     address = fields.get("address", "")
     host, sep, port = address.rpartition(":")
-    if not (sep and host and port.isdigit() and fields.get("user") and fields.get("secret") and fields.get("hostkey")):
-        raise invalid(f"{HEADER}: needs address=host:port, user, secret and hostkey")
-    return Endpoint(host.strip("[]"), int(port), fields["user"], fields["secret"], fields["hostkey"])
+    if not (sep and host and port.isdigit() and fields.get("user") and fields.get("key") and fields.get("hostkey")):
+        raise invalid(f"{HEADER}: needs address=host:port, user, key and hostkey")
+    try:
+        key = base64.b64decode(fields["key"], validate=True).decode()
+    except (binascii.Error, UnicodeDecodeError) as exc:
+        raise invalid(f"{HEADER}: key is not a key file in base64") from exc
+    return Endpoint(host.strip("[]"), int(port), fields["user"], key, fields["hostkey"])
 
 
 def request_paths(body: Any) -> tuple[list[str], list[str], list[str]]:
@@ -119,7 +129,7 @@ class Mounts:
     """sshfs mounts of callers' endpoints, one per endpoint, made on first use.
 
     A mount whose sshfs has exited, its connection gone, is made again; one of an older endpoint
-    at the same address (the caller restarted, with a new key and secret) is let go.
+    at the same address (the caller restarted, with new keys) is let go.
     """
 
     def __init__(self, root: str | None = None):
@@ -151,24 +161,28 @@ class Mounts:
             point = os.path.join(self.root, hashlib.sha256(repr(endpoint).encode()).hexdigest()[:16])
             await _unmount(point)
             os.makedirs(point, exist_ok=True)
-            known = os.path.join(self.root, os.path.basename(point) + ".known_hosts")
+            known = point + ".known_hosts"
             with open(known, "w") as f:
                 host = endpoint.host if endpoint.port == 22 else f"[{endpoint.host}]:{endpoint.port}"
                 f.write(f"{host} {endpoint.hostkey}\n")
+            # sshfs opens a connection when a file needs one, so the key stays while the mount does.
+            identity = point + ".key"
+            with suppress(FileNotFoundError):
+                os.remove(identity)
+            with open(os.open(identity, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as f:
+                f.write(endpoint.key if endpoint.key.endswith("\n") else endpoint.key + "\n")
             process = await asyncio.create_subprocess_exec(
                 "sshfs", f"{endpoint.user}@{endpoint.host}:/", point, "-f",
                 # Attributes are asked for at every open, so a file that changed is never read from the
                 # page cache (auto_cache keeps it while size and mtime stay the same).
-                "-o", f"port={endpoint.port},password_stdin,rw,cache=no,auto_cache,attr_timeout=0,entry_timeout=0,negative_timeout=0",
+                "-o", f"port={endpoint.port},max_conns={CONNECTIONS},rw,cache=no,auto_cache,attr_timeout=0,entry_timeout=0,negative_timeout=0",
                 "-o", f"UserKnownHostsFile={known},StrictHostKeyChecking=yes,HostKeyAlgorithms={endpoint.hostkey.split()[0]}",
-                "-o", f"Ciphers={CIPHER},PreferredAuthentications=password,PubkeyAuthentication=no",
+                "-o", f"Ciphers={CIPHER},IdentityFile={identity},IdentitiesOnly=yes,IdentityAgent=none,BatchMode=yes",
+                "-o", "PreferredAuthentications=publickey,PasswordAuthentication=no,KbdInteractiveAuthentication=no",
                 "-o", "ServerAliveInterval=15,ServerAliveCountMax=3",
-                stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
+                stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
                 start_new_session=True,
             )
-            process.stdin.write(endpoint.secret.encode() + b"\n")
-            await process.stdin.drain()
-            process.stdin.close()
             # A look at a mount waits on the caller's answer, so it is made off the event loop.
             deadline = time.monotonic() + 20
             while not await asyncio.to_thread(os.path.ismount, point):
@@ -198,6 +212,8 @@ class Mounts:
         await _unmount(point)
         with suppress(OSError):
             os.rmdir(point)
+        with suppress(OSError):
+            os.remove(point + ".key")
 
     async def stop(self) -> None:
         for endpoint in list(self._held):

@@ -169,12 +169,13 @@ EMS has no files of its own. A request that names files names an SFTP endpoint o
 an `EMS-Files` header, and every path in it is a path on that endpoint:
 
 ```
-EMS-Files: address=ein.example:2224; user=ems; secret=…; hostkey=ssh-ed25519 AAAA…
+EMS-Files: address=ein.example:2224; user=ems; key=…; hostkey=ssh-ed25519 AAAA…
 ```
 
-A request that names files without the header is `invalid_request`. EMS mounts the endpoint
-read-write with sshfs, once per endpoint, made on the first request and kept, and the op runs on
-local paths for the request's:
+`key` is the private key `user` signs in with, its OpenSSH file in base64. A request that names
+files without the header is `invalid_request`. EMS mounts the endpoint read-write with sshfs, once
+per endpoint, made on the first request and kept, over up to four connections (each open file uses
+one), and the op runs on local paths for the request's:
 
 - **Inputs** (`file.path`) are read through the mount where they lie. A tool reads only what it
   seeks to, while it runs, and what it read stays in the page cache for the next op on the file
@@ -189,7 +190,7 @@ local paths for the request's:
   (`.avif` asked to hold `mp4`) as `invalid_request`.
 
 EMS connects with SSH using chacha20-poly1305 alone, with `hostkey` pinned, and signs in as `user`
-with `secret` as its password. Through the mount it asks for only what the request names: a `stat`
+with `key`. Through the mount it asks for only what the request names: a `stat`
 of each input and of the directories above it, reads of each input, a `mkdir` of an output
 directory, and writes of each output. It never lists a directory, and it never removes or renames
 anything there. A caller's endpoint should write an output in place: a copy through sshfs has

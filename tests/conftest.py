@@ -17,7 +17,7 @@ KEY = "test-key"
 AUTH = {"Authorization": f"Bearer {KEY}"}
 # The header every test request names its files' endpoint in; `HostFiles` makes its paths this
 # host's own, so a test's files are plain files in its temp directory.
-FILES = {"EMS-Files": "address=caller.test:2224; user=ems; secret=s; hostkey=ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA"}
+FILES = {"EMS-Files": "address=caller.test:2224; user=ems; key=a2V5; hostkey=ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA"}
 
 
 class HostFiles(Mounts):
