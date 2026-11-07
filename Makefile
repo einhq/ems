@@ -17,17 +17,10 @@ TORCH_CUDA      ?= cu130
 FFMPEG_BUILD    ?= autobuild-2026-08-31-13-27
 FFMPEG_ASSET    ?= ffmpeg-n9.0.1-11-ge47273f4d9-linux64-lgpl-9.0
 
-# Run arguments. The four host directories are mounted at the SAME container paths the caller
-# mounts them at (/files, /old, /files-volatile, /files-tmp): the paths the caller resolves
-# inside its container are the paths EMS opens inside its own, and nothing is ever copied.
-# EMS_ROOTS names exactly those four, read-only for the originals.
+# Run arguments. EMS has no files of its own: it mounts each request's from its caller
+# (docs/api.md, 3.1a), for which the container has /dev/fuse and SYS_ADMIN.
 EMS_PORT        ?= 8181
 EMS_KEY         ?= let-me-in
-FILES_PATH      ?= /srv/files
-OLD_PATH        ?= /srv/old
-VOLATILE_PATH   ?= /srv/files-volatile
-TMP_PATH        ?= /srv/files-tmp
-EMS_ROOTS       ?= /files:ro,/old:ro,/files-volatile:rw,/files-tmp:rw
 EMS_MEMORY      ?= 16g
 GPU             ?=
 GPU_FLAG        := $(if $(GPU),--device nvidia.com/gpu=all,)
@@ -44,7 +37,7 @@ venv: ## Create the dev venv (python3-venv without ensurepip is fine; pip bootst
 test: ## Run the front's tests
 	$(PY) -m pytest -q
 
-serve: ## Serve locally from the venv (no models; EMS_ROOTS and EMS_KEY from the environment)
+serve: ## Serve locally from the venv (no models; EMS_KEY from the environment)
 	$(PY) -m ems
 
 # --- container ---
@@ -61,14 +54,12 @@ build: ## Build the image (TMPDIR on the graph root: the model layers are tens o
 		--build-arg FFMPEG_ASSET=$(FFMPEG_ASSET) \
 		.
 
-run: ## Run the container (GPU=1 for NVIDIA; FILES_PATH/OLD_PATH/VOLATILE_PATH/TMP_PATH mount at /files, /old, /files-volatile, /files-tmp)
-	@mkdir -p $(VOLATILE_PATH) $(TMP_PATH)
+run: ## Run the container (GPU=1 for NVIDIA)
 	podman run --replace -d --name $(CONTAINER_NAME) --restart always --stop-timeout 60 \
 		--health-cmd "python3 -m ems.healthcheck" --health-interval 30s --health-timeout 60s --health-retries 5 --health-start-period 120s \
 		--memory $(EMS_MEMORY) --memory-swap $(EMS_MEMORY) \
-		$(GPU_FLAG) --network=host \
+		$(GPU_FLAG) --network=host --device /dev/fuse --cap-add SYS_ADMIN \
 		-e EMS_PORT=$(EMS_PORT) -e EMS_KEY=$(EMS_KEY) \
-		-e EMS_ROOTS=$(EMS_ROOTS) \
 		$(if $(EMS_LIMIT_TOOLS),-e EMS_LIMIT_TOOLS=$(EMS_LIMIT_TOOLS),) \
 		$(if $(EMS_LIMIT_MODELS),-e EMS_LIMIT_MODELS=$(EMS_LIMIT_MODELS),) \
 		$(if $(EMS_LIMIT_ENCODES),-e EMS_LIMIT_ENCODES=$(EMS_LIMIT_ENCODES),) \
@@ -97,10 +88,6 @@ run: ## Run the container (GPU=1 for NVIDIA; FILES_PATH/OLD_PATH/VOLATILE_PATH/T
 		$(if $(EMS_WHISPER_LANGUAGE_FLOOR),-e EMS_WHISPER_LANGUAGE_FLOOR=$(EMS_WHISPER_LANGUAGE_FLOOR),) \
 		$(if $(EMS_WHISPER_LANGUAGE_WINDOWS),-e EMS_WHISPER_LANGUAGE_WINDOWS=$(EMS_WHISPER_LANGUAGE_WINDOWS),) \
 		$(if $(TZ),-e TZ=$(TZ),) \
-		-v $(FILES_PATH):/files:ro \
-		-v $(OLD_PATH):/old:ro \
-		-v $(VOLATILE_PATH):/files-volatile \
-		-v $(TMP_PATH):/files-tmp \
 		$(IMAGE_NAME)
 
 stop: ## Stop the container

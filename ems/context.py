@@ -1,4 +1,4 @@
-"""What every op needs a handle on: settings, roots, admission, the worker, the tools."""
+"""What every op needs a handle on: settings, admission, the worker, the tools, the callers' files."""
 
 from __future__ import annotations
 
@@ -11,7 +11,6 @@ from .admission import Admission
 from .card import CardArbiter
 from .config import Settings
 from .remote import Mounts
-from .roots import Roots
 from .tools.audio import AudioCache
 from .tools.exiftool import ExifTool
 from .worker import Worker
@@ -20,7 +19,6 @@ from .worker import Worker
 @dataclass
 class Context:
     settings: Settings
-    roots: Roots
     admission: Admission
     worker: Worker
     exiftool: ExifTool | None

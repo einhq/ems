@@ -14,8 +14,8 @@ async def test_unknown_type_is_refused_permanently(tmp_path):
     assert raised.value.code is UNSUPPORTED
 
 
-async def test_a_picture_is_read_by_the_text_reader_in_its_display_frame(client, fake_worker, roots):
-    ro, _ = roots
+async def test_a_picture_is_read_by_the_text_reader_in_its_display_frame(client, fake_worker, dirs):
+    ro, _ = dirs
     (ro / "sign.jpg").write_bytes(b"jpeg")
     fake_worker.on("read_text", lambda req: {"text": "Hamngatan 4\nÖppet 10–18", "lines": [], "width": 10, "height": 10, "model": "PP-OCRv6_medium"})
     r = await client.post("/v0/document/extract", json={"file": {"path": str(ro / "sign.jpg"), "mimetype": "image/jpeg", "angle": 90}, "languages": ["swe"]})
@@ -27,8 +27,8 @@ async def test_a_picture_is_read_by_the_text_reader_in_its_display_frame(client,
     assert sent["op"] == "read_text" and sent["paths"] == [str(ro / "sign.jpg")] and sent["angle"] == 90
 
 
-async def test_ocr_never_reads_no_picture(client, fake_worker, roots):
-    ro, _ = roots
+async def test_ocr_never_reads_no_picture(client, fake_worker, dirs):
+    ro, _ = dirs
     (ro / "sign.jpg").write_bytes(b"jpeg")
     body = (await client.post("/v0/document/extract", json={"file": {"path": str(ro / "sign.jpg"), "mimetype": "image/jpeg"}, "ocr": "never"})).json()
     assert body["result"]["text"] == "" and body["meta"]["producer"] == "ocr"
@@ -45,8 +45,8 @@ def _scanned_pdf(path, pages: int):
     scans[0].save(str(path), "PDF", save_all=True, append_images=scans[1:])
 
 
-async def test_a_scanned_pdf_is_read_page_by_page(client, fake_worker, roots):
-    ro, _ = roots
+async def test_a_scanned_pdf_is_read_page_by_page(client, fake_worker, dirs):
+    ro, _ = dirs
     _scanned_pdf(ro / "scan.pdf", 2)
     pages = iter(["Protokoll", "Sida två"])
     fake_worker.on("read_text", lambda req: {"text": next(pages), "lines": [], "width": 1, "height": 1, "model": "PP-OCRv6_medium"})
@@ -57,8 +57,8 @@ async def test_a_scanned_pdf_is_read_page_by_page(client, fake_worker, roots):
     assert len([q for q in fake_worker.requests if q["op"] == "read_text"]) == 2
 
 
-async def test_a_busy_reader_fails_the_document_rather_than_store_it_empty(client, fake_worker, roots):
-    ro, _ = roots
+async def test_a_busy_reader_fails_the_document_rather_than_store_it_empty(client, fake_worker, dirs):
+    ro, _ = dirs
     _scanned_pdf(ro / "scan.pdf", 1)
 
     def busy(req):
@@ -69,9 +69,9 @@ async def test_a_busy_reader_fails_the_document_rather_than_store_it_empty(clien
     assert body["ok"] is False and body["error"]["permanent"] is False
 
 
-async def test_a_broken_pdf_fails_permanently(client, roots):
+async def test_a_broken_pdf_fails_permanently(client, dirs):
     pytest.importorskip("pypdfium2")
-    ro, _ = roots
+    ro, _ = dirs
     (ro / "broken.pdf").write_bytes(b"%PDF-1.4 not really")
     body = (await client.post("/v0/document/extract", json={"file": {"path": str(ro / "broken.pdf"), "mimetype": "application/pdf"}})).json()
     assert body["ok"] is False and body["error"]["permanent"] is True

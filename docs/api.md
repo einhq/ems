@@ -74,7 +74,7 @@ Failure (HTTP status 4xx/5xx and the same envelope):
 ```
 
 `permanent: true` means the same request will fail the same way for these bytes — a truncated
-container, an unsupported format, a path outside the roots. A caller should not retry it.
+container, an unsupported format, a path the caller does not grant. A caller should not retry it.
 `permanent: false` (or absent) is transient: a queue full, a model still loading, a deadline.
 
 ### 2.2 Streaming long operations
@@ -161,59 +161,46 @@ fast it answers, never what (`model_registry.place`):
 a card the host should have and does not see, or one whose context is lost. EiN's `docs/architecture/media-hardware.md` has the
 whole picture, the pipelines' side included.
 
-## 3. Files, roots and frames
+## 3. Files and frames
 
-### 3.1 Paths and roots
+### 3.1 The caller's files
 
-EMS is configured with **roots**: directories it may read (`ro`) or read and write (`rw`).
-A request naming a path outside every root, or an output path under a read-only root, is
-`403 path_outside_roots` (permanent). Paths are resolved after following symlinks, and the
-resolved path must also lie under a root — a symlink that leaves the roots is refused. Roots are
-listed in `capabilities.roots`.
-
-An **output path** is written exactly as given. EMS writes through a private temporary file in
-the same directory and renames it into place, so a reader never sees a partial file at the
-output path; a failed op leaves nothing there. The directory must exist and be writable. The
-extension does not choose the format — the request does — but EMS refuses a mismatch it can see
-(`.avif` asked to hold `mp4`) as `invalid_request`.
-
-### 3.1a A caller's own files
-
-A caller whose files EMS does not mount — EMS on another host, or one without the caller's file
-tiers — names an SFTP endpoint of its own in an `EMS-Files` header:
+EMS has no files of its own. A request that names files names an SFTP endpoint of its caller's in
+an `EMS-Files` header, and every path in it is a path on that endpoint:
 
 ```
 EMS-Files: address=ein.example:2224; user=ems; secret=…; hostkey=ssh-ed25519 AAAA…
 ```
 
-Every path in that request is then the caller's, and no root is consulted. EMS mounts the endpoint
+A request that names files without the header is `invalid_request`. EMS mounts the endpoint
 read-write with sshfs, once per endpoint, made on the first request and kept, and the op runs on
 local paths for the request's:
 
 - **Inputs** (`file.path`) are read through the mount where they lie. A tool reads only what it
   seeks to, while it runs, and what it read stays in the page cache for the next op on the file
-  until its size or modification time changes. The caller names an original by its own name
-  (`/old/…/IMG_0001.JPG`, not a link to it), since tools pick a format by the name as well as by
-  the bytes.
-- **Outputs** (`output.path`, `output.dir`) get a place in the request's scratch. Once the op has
-  succeeded, EMS copies each output it made into the mount, and every file of an output directory
-  into the caller's directory, which it makes there, before it answers. A failed or cancelled op
-  sends nothing back. Paths in the result (`video.frames`' `frames[].path`) are given in the
-  caller's spelling.
+  until its size or modification time changes. A path's last component should end in the file's
+  own extension, since tools pick a format by the name as well as by the bytes.
+- **Outputs** (`output.path`, `output.dir`) get a place in the request's scratch, written through a
+  private temporary file and renamed into place there. Once the op has succeeded, EMS copies each
+  output it made into the mount, and every file of an output directory into the caller's
+  directory, which it makes there, before it answers. A failed or cancelled op sends nothing back.
+  Paths in the result (`video.frames`' `frames[].path`) are given in the caller's spelling. The
+  extension does not choose the format — the request does — but EMS refuses a mismatch it can see
+  (`.avif` asked to hold `mp4`) as `invalid_request`.
 
 EMS connects with SSH using chacha20-poly1305 alone, with `hostkey` pinned, and signs in as `user`
 with `secret` as its password. Through the mount it asks for only what the request names: a `stat`
 of each input and of the directories above it, reads of each input, a `mkdir` of an output
 directory, and writes of each output. It never lists a directory, and it never removes or renames
-anything there. The endpoint writes an output in place: a copy through sshfs has every byte at the
-caller once it returns.
+anything there. A caller's endpoint should write an output in place: a copy through sshfs has
+every byte at the caller once it returns, while its SFTP close may come later.
 
 The container needs `/dev/fuse` and the `SYS_ADMIN` capability to mount. A host without them, an
 endpoint EMS cannot reach or sign in to, and a mount that fails during the request make it
 `502 files_unavailable` (not permanent): the caller tries again later. An input the endpoint does
-not have is `404 not_found`, and a path it refuses is `403 path_outside_roots`. A host on another
-machine than the caller is faster with a larger readahead for its FUSE mounts than the kernel's
-128 KiB, which only root on the host can set (`/sys/class/bdi/<mount>/read_ahead_kb`).
+not have is `404 not_found`, and a path it refuses is `403 path_not_granted` (permanent). A host on
+another machine than the caller is faster with a larger readahead for its FUSE mounts than the
+kernel's 128 KiB, which only root on the host can set (`/sys/class/bdi/<mount>/read_ahead_kb`).
 
 ### 3.2 File input
 
@@ -936,7 +923,6 @@ What this EMS can do, for a caller to check before it relies on it:
 
 ```json
 { "api": "3.3.0", "ops": [ "media.probe", "faces.detect", … ],
-  "roots": [ { "path": "/files", "mode": "ro" }, { "path": "/files-volatile", "mode": "rw" } ],
   "tools": { "exiftool": "13.10", "ffprobe": "9.0.1", "ffmpeg": "9.0.1", "magick": "7.1.1" },
   "models": { "text_embed": "bge-m3", "whisper": "large-v3", "faces": "retinaface-r34+transface",
               "image_embed": "ViT-SO400M-16-SigLIP2-384__webli", "ocr": "PP-OCRv6_medium+multicentury-ppocrv6-medium+multicentury-htr-model+trocr-large-handwritten" },
@@ -958,26 +944,26 @@ settings; it is absent while the model worker is down.
 
 ## 5. Error codes
 
-| Code                 | HTTP | Permanent | Meaning                                                                                                        |
-| -------------------- | ---- | --------- | -------------------------------------------------------------------------------------------------------------- |
-| `unauthorized`       | 401  | —         | Missing or unknown key                                                                                         |
-| `invalid_request`    | 400  | yes       | Malformed body, unknown op, contradictory parameters                                                           |
-| `path_outside_roots` | 403  | yes       | Input or output path not under an allowed root                                                                 |
-| `not_found`          | 404  | yes       | Input path does not exist                                                                                      |
-| `unsupported`        | 415  | yes       | EMS has no tool or model for this format or kind                                                               |
-| `undecodable`        | 422  | yes       | The bytes cannot be opened by any decoder (see `media.probe`)                                                  |
-| `refused`            | 422  | yes       | EMS will not do this work within its own budget (a CPU encode too large)                                       |
-| `busy`               | 503  | no        | Admission queue full; `Retry-After` set                                                                        |
-| `deadline_exceeded`  | 504  | no        | Discarded from the queue past `options.deadline`                                                               |
-| `model_unavailable`  | 503  | no        | The model needed is loading, its device is unusable right now, or the card is out of memory; `Retry-After` set |
-| `tool_failed`        | 500  | no        | A tool or model failed for a reason EMS could not classify; `message` carries what it said                     |
-| `files_unavailable`  | 502  | no        | The caller's file endpoint (_3.1a_) could not be reached, refused the sign-in, or failed mid-transfer          |
-| `internal`           | 500  | no        | EMS's own fault                                                                                                |
+| Code                | HTTP | Permanent | Meaning                                                                                                        |
+| ------------------- | ---- | --------- | -------------------------------------------------------------------------------------------------------------- |
+| `unauthorized`      | 401  | —         | Missing or unknown key                                                                                         |
+| `invalid_request`   | 400  | yes       | Malformed body, unknown op, contradictory parameters                                                           |
+| `path_not_granted`  | 403  | yes       | Input or output path the caller's endpoint does not grant, or not one the request names                        |
+| `not_found`         | 404  | yes       | Input path does not exist                                                                                      |
+| `unsupported`       | 415  | yes       | EMS has no tool or model for this format or kind                                                               |
+| `undecodable`       | 422  | yes       | The bytes cannot be opened by any decoder (see `media.probe`)                                                  |
+| `refused`           | 422  | yes       | EMS will not do this work within its own budget (a CPU encode too large)                                       |
+| `busy`              | 503  | no        | Admission queue full; `Retry-After` set                                                                        |
+| `deadline_exceeded` | 504  | no        | Discarded from the queue past `options.deadline`                                                               |
+| `model_unavailable` | 503  | no        | The model needed is loading, its device is unusable right now, or the card is out of memory; `Retry-After` set |
+| `tool_failed`       | 500  | no        | A tool or model failed for a reason EMS could not classify; `message` carries what it said                     |
+| `files_unavailable` | 502  | no        | The caller's file endpoint (_3.1_) could not be reached, refused the sign-in, or failed mid-transfer           |
+| `internal`          | 500  | no        | EMS's own fault                                                                                                |
 
 ## 6. Configuration (operator)
 
-Environment only. `EMS_KEYS_FILE` (one key per line) or `EMS_KEY`, `EMS_ROOTS`
-(`/files:ro,/old:ro,/files-volatile:rw,/files-tmp:rw`), `EMS_PORT`, `EMS_HOST`, `EMS_SCRATCH`,
+Environment only. `EMS_KEYS_FILE` (one key per line) or `EMS_KEY`, `EMS_PORT`, `EMS_HOST`,
+`EMS_SCRATCH`,
 the admission limits (`EMS_LIMIT_MODELS`, `EMS_LIMIT_TOOLS`, `EMS_LIMIT_ENCODES`,
 `EMS_QUEUE_DEPTH`, `EMS_INTERACTIVE_RESERVE`), `EMS_EXIFTOOL_WORKERS`, `EMS_EXPECT_GPU` (`1`: a card
 is expected, and health lists `what: "gpu"` under `degraded` when none is visible), `EMS_CARD_BUDGET_MB` (the most of the card the models

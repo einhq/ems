@@ -119,8 +119,8 @@ def install(monkeypatch, *, frames=750, gpu=True, duration="30.0"):
     monkeypatch.setattr(shots.ffmpeg_tool, "gpu_present", lambda: gpu)
 
 
-async def test_the_op_asks_the_worker_with_its_rules_and_answers_the_cuts(client, fake_worker, roots, monkeypatch):
-    ro, _ = roots
+async def test_the_op_asks_the_worker_with_its_rules_and_answers_the_cuts(client, fake_worker, dirs, monkeypatch):
+    ro, _ = dirs
     (ro / "1920x1080.mp4").write_bytes(b"mp4")
     install(monkeypatch)
     fake_worker.on("shot_boundaries", lambda req: {"cuts": [{"t": 8.04, "score": 0.97, "kind": "cut"}], "gaps": [], "frames": 750, "model": "transnetv2"})
@@ -137,8 +137,8 @@ async def test_the_op_asks_the_worker_with_its_rules_and_answers_the_cuts(client
     assert body["meta"]["producer"].startswith("transnetv2+ffmpeg/") and body["meta"]["producer"].endswith("/cuda")
 
 
-async def test_a_video_without_leader_is_asked_for_none(client, fake_worker, roots, monkeypatch):
-    ro, _ = roots
+async def test_a_video_without_leader_is_asked_for_none(client, fake_worker, dirs, monkeypatch):
+    ro, _ = dirs
     (ro / "1920x1080.mp4").write_bytes(b"mp4")
     install(monkeypatch)
     fake_worker.on("shot_boundaries", lambda req: {"cuts": [], "gaps": [], "frames": 750, "model": "transnetv2"})
@@ -148,16 +148,16 @@ async def test_a_video_without_leader_is_asked_for_none(client, fake_worker, roo
     assert r.json()["result"]["params"]["leader"] is False
 
 
-async def test_a_turned_file_is_refused(client, roots, monkeypatch):
-    ro, _ = roots
+async def test_a_turned_file_is_refused(client, dirs, monkeypatch):
+    ro, _ = dirs
     (ro / "v.mp4").write_bytes(b"mp4")
     install(monkeypatch)
     r = await client.post("/v0/video/shots", json={"file": {"path": str(ro / "v.mp4"), "angle": 90}})
     assert r.status_code == 400 and "upright" in r.json()["error"]["message"]
 
 
-async def test_without_a_card_a_file_over_the_cpu_budget_is_refused_whole(client, fake_worker, roots, monkeypatch):
-    ro, _ = roots
+async def test_without_a_card_a_file_over_the_cpu_budget_is_refused_whole(client, fake_worker, dirs, monkeypatch):
+    ro, _ = dirs
     (ro / "tape.mp4").write_bytes(b"mp4")
     install(monkeypatch, gpu=False, duration="3600.0")
     r = await client.post("/v0/video/shots", json={"file": {"path": str(ro / "tape.mp4")}})

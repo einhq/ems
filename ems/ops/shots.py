@@ -18,6 +18,7 @@ import shutil
 from fastapi import APIRouter, Request
 from pydantic import Field
 
+from .. import remote
 from ..context import Context
 from ..errors import EmsError, REFUSED, UNDECODABLE, invalid
 from ..schemas import FileRef, WithOptions
@@ -91,7 +92,7 @@ async def decode(ctx: Context, path: str, scratch: str, *, gpu: bool, cpu_allowe
 async def shots(ctx: Context, req: ShotsRequest, progress: Progress) -> Outcome:
     if req.file.angle or req.file.mirror:
         raise invalid("shots are found in an upright file, such as a rendition: angle 0, no mirror")
-    path = ctx.roots.input(req.file.path)
+    path = remote.input(req.file.path)
     timeout = ctx.settings.tool_stall_seconds
     settings = ctx.settings
     budget = encode.Budget(settings.cpu_encode_max_mb, settings.cpu_encode_mb_per_1k_frames, settings.cpu_encode_max_segments)

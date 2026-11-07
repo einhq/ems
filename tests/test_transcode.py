@@ -65,8 +65,8 @@ def video_body(ro, rw, **extra):
     return body
 
 
-async def test_stage_one_keeps_everything_in_vram(client, roots, monkeypatch):
-    ro, rw = roots
+async def test_stage_one_keeps_everything_in_vram(client, dirs, monkeypatch):
+    ro, rw = dirs
     (ro / "clip.mp4").write_bytes(b"mp4")
     ffmpeg = FakeFfmpeg()
     install(monkeypatch, ffmpeg)
@@ -79,7 +79,8 @@ async def test_stage_one_keeps_everything_in_vram(client, roots, monkeypatch):
     assert args[args.index("-hwaccel") + 1] == "cuda" and "-display_rotation" in args
     assert args[args.index("-vf") + 1].endswith("transpose_cuda=dir=2")
     assert args[args.index("-cq") + 1] == "38" and args[args.index("-c:a") + 1] == "aac"
-    assert args[-1].startswith(str(rw / ".ems-")) and args[-1].endswith(".mp4")
+    # Encoded in the request's scratch, then copied to the caller's output.
+    assert os.path.basename(args[-1]).startswith(".ems-") and args[-1].endswith(".mp4") and not args[-1].startswith(str(rw))
     assert (rw / "1920x1080.mp4").read_bytes() == b"mp4" * 100
     assert not [f for f in os.listdir(rw) if f.startswith(".ems-")]
     assert body["result"]["path"] == str(rw / "1920x1080.mp4") and body["result"]["bytes"] == 300
@@ -87,8 +88,8 @@ async def test_stage_one_keeps_everything_in_vram(client, roots, monkeypatch):
     assert body["meta"]["producer"].endswith("/av1_nvenc/cuda")
 
 
-async def test_a_codec_nvdec_cannot_read_skips_to_the_upload_stage(client, roots, monkeypatch):
-    ro, rw = roots
+async def test_a_codec_nvdec_cannot_read_skips_to_the_upload_stage(client, dirs, monkeypatch):
+    ro, rw = dirs
     (ro / "clip.mp4").write_bytes(b"mp4")
     ffmpeg = FakeFfmpeg()
     install(monkeypatch, ffmpeg)
@@ -100,8 +101,8 @@ async def test_a_codec_nvdec_cannot_read_skips_to_the_upload_stage(client, roots
     assert r.json()["meta"]["producer"].endswith("/av1_nvenc/upload")
 
 
-async def test_the_ladder_falls_to_the_cpu_and_a_mirror_never_tries_cuda(client, roots, monkeypatch):
-    ro, rw = roots
+async def test_the_ladder_falls_to_the_cpu_and_a_mirror_never_tries_cuda(client, dirs, monkeypatch):
+    ro, rw = dirs
     (ro / "clip.mp4").write_bytes(b"mp4")
     ffmpeg = FakeFfmpeg(fail_when=("av1_nvenc",))
     install(monkeypatch, ffmpeg)
@@ -113,8 +114,8 @@ async def test_the_ladder_falls_to_the_cpu_and_a_mirror_never_tries_cuda(client,
     assert r.json()["meta"]["producer"].endswith("/libsvtav1")
 
 
-async def test_a_muted_clip_is_cut_before_encoding(client, roots, monkeypatch):
-    ro, rw = roots
+async def test_a_muted_clip_is_cut_before_encoding(client, dirs, monkeypatch):
+    ro, rw = dirs
     (ro / "clip.mp4").write_bytes(b"mp4")
     ffmpeg = FakeFfmpeg()
     install(monkeypatch, ffmpeg, gpu=False)
@@ -125,8 +126,8 @@ async def test_a_muted_clip_is_cut_before_encoding(client, roots, monkeypatch):
     assert args[args.index("-t") + 1] == "20" and "-an" in args and "libsvtav1" in args
 
 
-async def test_over_budget_is_windowed_with_one_audio_pass_and_a_join(client, roots, monkeypatch):
-    ro, rw = roots
+async def test_over_budget_is_windowed_with_one_audio_pass_and_a_join(client, dirs, monkeypatch):
+    ro, rw = dirs
     (ro / "tape.dv").write_bytes(b"dv")
     ffmpeg = FakeFfmpeg()
     install(monkeypatch, ffmpeg, probe=fake_probe(duration="5040.0", codec="dvvideo"))
@@ -147,8 +148,8 @@ async def test_over_budget_is_windowed_with_one_audio_pass_and_a_join(client, ro
     assert body["meta"]["producer"].endswith("/av1_nvenc/upload")
 
 
-async def test_a_source_whose_windows_cannot_be_placed_is_refused(client, roots, monkeypatch):
-    ro, rw = roots
+async def test_a_source_whose_windows_cannot_be_placed_is_refused(client, dirs, monkeypatch):
+    ro, rw = dirs
     (ro / "tape.dv").write_bytes(b"dv")
     ffmpeg = FakeFfmpeg()
     install(monkeypatch, ffmpeg, probe=fake_probe(duration="5040.0", codec="dvvideo"))
@@ -164,8 +165,8 @@ async def test_a_source_whose_windows_cannot_be_placed_is_refused(client, roots,
     assert r.status_code == 422 and "cannot measure" in r.json()["error"]["message"]
 
 
-async def test_a_failed_encode_leaves_nothing_and_is_not_permanent(client, roots, monkeypatch):
-    ro, rw = roots
+async def test_a_failed_encode_leaves_nothing_and_is_not_permanent(client, dirs, monkeypatch):
+    ro, rw = dirs
     (ro / "clip.mp4").write_bytes(b"mp4")
     ffmpeg = FakeFfmpeg(fail_when=("-progress",))
     install(monkeypatch, ffmpeg, gpu=False)
@@ -174,8 +175,8 @@ async def test_a_failed_encode_leaves_nothing_and_is_not_permanent(client, roots
     assert os.listdir(rw) == []
 
 
-async def test_audio_transcode_keeps_the_ceilings_and_publishes(client, roots, monkeypatch):
-    ro, rw = roots
+async def test_audio_transcode_keeps_the_ceilings_and_publishes(client, dirs, monkeypatch):
+    ro, rw = dirs
     (ro / "tape.mp3").write_bytes(b"mp3")
     ffmpeg = FakeFfmpeg()
     source = ffprobe_tool.Probe({"format": {"duration": "2756.3", "format_name": "mp3"}, "streams": [{"codec_type": "audio", "codec_name": "mp3", "bit_rate": "64000", "sample_rate": "44100", "channels": 1}]}, None)

@@ -20,6 +20,7 @@ from typing import Literal
 from fastapi import APIRouter, Request
 from pydantic import Field
 
+from .. import remote
 from ..context import Context
 from ..errors import EmsError, TOOL_FAILED, invalid
 from ..schemas import Box, FileRef, OutputSpec, Strict, WithOptions
@@ -69,7 +70,7 @@ def plan_targets(ctx: Context, targets: list[RenditionTarget]) -> tuple[list[mag
     plans: list[magick.Plan] = []
     finals: list[str] = []
     for target in targets:
-        final = ctx.roots.output(target.output.path)
+        final = remote.output(target.output.path)
         fmt = output_format(target.output)
         if target.box is not None and target.box.width is None and target.box.height is None:
             raise invalid(f"{target.output.path}: box names neither width nor height")
@@ -157,7 +158,7 @@ async def owed_angle(ctx: Context, path: str, file: FileRef, mimetype: str | Non
 
 
 async def renditions(ctx: Context, req: RenditionsRequest, progress: Progress) -> Outcome:
-    path = ctx.roots.input(req.file.path)
+    path = remote.input(req.file.path)
     async with ctx.admission.slot("tools", interactive=req.options.interactive):
         await progress.emit("render")
         mimetype = await file_mimetype(ctx, path, req.file)

@@ -9,8 +9,8 @@ needs_tools = pytest.mark.skipif(not (shutil.which("exiftool") and shutil.which(
 
 
 @needs_tools
-async def test_probe_a_real_jpeg(client, roots):
-    ro, _ = roots
+async def test_probe_a_real_jpeg(client, dirs):
+    ro, _ = dirs
     path = ro / "red.jpg"
     subprocess.run(["convert", "-size", "8x4", "xc:red", str(path)], check=True)
     r = await client.post("/v0/media/probe", json={"file": {"path": str(path)}, "hash": True})
@@ -31,8 +31,8 @@ async def test_probe_a_real_jpeg(client, roots):
 
 
 @needs_tools
-async def test_probe_streams_progress(client, roots):
-    ro, _ = roots
+async def test_probe_streams_progress(client, dirs):
+    ro, _ = dirs
     path = ro / "red.jpg"
     subprocess.run(["convert", "-size", "8x4", "xc:red", str(path)], check=True)
     async with client.stream("POST", "/v0/media/probe", json={"file": {"path": str(path)}}, headers={"Accept": "text/event-stream"}) as r:
@@ -45,9 +45,9 @@ needs_exiftool = pytest.mark.skipif(not shutil.which("exiftool"), reason="exifto
 
 
 @needs_exiftool
-async def test_probe_video_fixture_without_ffprobe_still_answers(client, roots):
+async def test_probe_video_fixture_without_ffprobe_still_answers(client, dirs):
     """Without ffprobe the video's shape and duration come from exiftool alone; with it, the streams too."""
-    ro, _ = roots
+    ro, _ = dirs
     shutil.copy(f"{DATA}/video1.mp4", ro / "video1.mp4")
     r = await client.post("/v0/media/probe", json={"file": {"path": str(ro / "video1.mp4")}})
     body = r.json()

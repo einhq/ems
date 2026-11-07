@@ -27,16 +27,13 @@ down; the front supervises and restarts it.
 ```
 POST /v0/<namespace>/<op>     JSON in, JSON out; Accept: text/event-stream for progress
 GET  /v0/health               liveness, loaded models, VRAM, degraded fallbacks
-GET  /v0/capabilities         ops, roots, tools, models, limits
+GET  /v0/capabilities         ops, tools, models, limits
 ```
 
-Files are absolute paths under configured **roots**
-(`EMS_ROOTS=/files:ro,/old:ro,/files-volatile:rw,/files-tmp:rw`); anything
-outside is refused. Mount the caller's directories at the same container paths
-on both sides and nothing is ever copied. A caller whose files are not mounted
-names an SFTP endpoint of its own in the request's `EMS-Files` header instead:
-EMS reads the inputs and writes the outputs back through an sshfs mount of it,
-for which the container needs `/dev/fuse` and `SYS_ADMIN` (docs/api.md, 3.1a).
+EMS has no files of its own. A request that names files names its caller's SFTP
+endpoint in an `EMS-Files` header, and EMS reads the inputs and writes the
+outputs back through an sshfs mount of it, for which the container needs
+`/dev/fuse` and `SYS_ADMIN` (docs/api.md, 3.1).
 
 ## Run
 

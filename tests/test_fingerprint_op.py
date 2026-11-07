@@ -8,8 +8,8 @@ from ems.tools import decode as decode_tool
 from ems.tools.run import Completed
 
 
-async def test_a_picture_gets_one_descriptor_in_its_display_frame(client, fake_worker, roots):
-    ro, _ = roots
+async def test_a_picture_gets_one_descriptor_in_its_display_frame(client, fake_worker, dirs):
+    ro, _ = dirs
     (ro / "a.jpg").write_bytes(b"jpeg")
     fake_worker.on("copy_descriptors", lambda req: {"descriptors": [[0.6, 0.8]], "model": "sscd_disc_mixup"})
     r = await client.post("/v0/fingerprint/compute", json={"file": {"path": str(ro / "a.jpg"), "angle": 90, "mirror": True, "mimetype": "image/jpeg"}})
@@ -21,8 +21,8 @@ async def test_a_picture_gets_one_descriptor_in_its_display_frame(client, fake_w
     assert sent["op"] == "copy_descriptors" and sent["paths"] == [str(ro / "a.jpg")] and sent["angle"] == 90 and sent["mirror"] is True
 
 
-async def test_a_picture_the_readers_cannot_open_is_decoded_out_of_process(client, fake_worker, roots, monkeypatch):
-    ro, _ = roots
+async def test_a_picture_the_readers_cannot_open_is_decoded_out_of_process(client, fake_worker, dirs, monkeypatch):
+    ro, _ = dirs
     original = ro / "a.raf"
     original.write_bytes(b"raw")
     decoded = ro / "decoded.jpg"
@@ -46,8 +46,8 @@ async def test_a_picture_the_readers_cannot_open_is_decoded_out_of_process(clien
     assert [q["paths"] for q in fake_worker.requests if q["op"] == "copy_descriptors"] == [[str(original)], [str(decoded)]]
 
 
-async def test_a_video_gets_a_descriptor_per_keyframe(client, fake_worker, roots, monkeypatch):
-    ro, _ = roots
+async def test_a_video_gets_a_descriptor_per_keyframe(client, fake_worker, dirs, monkeypatch):
+    ro, _ = dirs
     (ro / "v.mp4").write_bytes(b"mp4")
 
     async def fake_frames(ctx, path, out_dir, *, at, count, strategy, fmt, quality, max_edge, progress):
@@ -76,8 +76,8 @@ async def test_a_video_gets_a_descriptor_per_keyframe(client, fake_worker, roots
     assert fake_worker.requests[-1]["angle"] == 180
 
 
-async def test_a_recording_gets_its_chromaprint_and_no_model_runs(client, fake_worker, roots, monkeypatch):
-    ro, _ = roots
+async def test_a_recording_gets_its_chromaprint_and_no_model_runs(client, fake_worker, dirs, monkeypatch):
+    ro, _ = dirs
     (ro / "a.m4a").write_bytes(b"m4a")
 
     async def fake_run(args, *, timeout):
@@ -98,8 +98,8 @@ async def test_a_recording_gets_its_chromaprint_and_no_model_runs(client, fake_w
     assert fake_worker.requests == []
 
 
-async def test_a_kind_that_does_not_fit_the_file_is_refused(client, fake_worker, roots):
-    ro, _ = roots
+async def test_a_kind_that_does_not_fit_the_file_is_refused(client, fake_worker, dirs):
+    ro, _ = dirs
     (ro / "a.jpg").write_bytes(b"jpeg")
     r = await client.post("/v0/fingerprint/compute", json={"file": {"path": str(ro / "a.jpg"), "mimetype": "image/jpeg"}, "kinds": ["sscd-video"]})
     assert r.status_code == 400, r.json()

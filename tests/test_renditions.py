@@ -84,8 +84,8 @@ def test_output_format_defaults_to_avif_and_refuses_a_contradicting_name():
         image.output_format(OutputSpec(path="/rw/x", format="tiff"))
 
 
-async def test_renditions_publish_all_or_nothing(client, roots, monkeypatch):
-    ro, rw = roots
+async def test_renditions_publish_all_or_nothing(client, dirs, monkeypatch):
+    ro, rw = dirs
     shutil.copy(os.path.join(HERE, "data", "image1.jpg"), ro / "photo.jpg")
     body = {
         "file": {"path": str(ro / "photo.jpg"), "angle": 90, "mimetype": "image/jpeg"},
@@ -95,8 +95,6 @@ async def test_renditions_publish_all_or_nothing(client, roots, monkeypatch):
         ],
     }
 
-    r = await client.post("/v0/image/renditions", json={**body, "targets": [{"output": {"path": str(ro / "x.avif")}, "box": {"width": 10}}]})
-    assert r.status_code == 403
     r = await client.post("/v0/image/renditions", json={**body, "targets": [{"output": {"path": str(rw / "x.avif"), "format": "bmp"}}]})
     assert r.status_code == 400
     r = await client.post("/v0/image/renditions", json={**body, "targets": [{"output": {"path": str(rw / "x.avif")}, "box": {}}]})
@@ -138,8 +136,8 @@ async def test_renditions_publish_all_or_nothing(client, roots, monkeypatch):
     assert sorted(os.listdir(rw)) == []
 
 
-async def test_a_heif_owes_only_the_residual_turn(client, roots, monkeypatch):
-    ro, rw = roots
+async def test_a_heif_owes_only_the_residual_turn(client, dirs, monkeypatch):
+    ro, rw = dirs
     (ro / "IMG_1.HEIC").write_bytes(b"heic")
     seen = {}
 
@@ -210,8 +208,8 @@ async def test_cloned_outputs_match_independently_decoded_ones(tmp_path):
         assert ours.startswith(f"{plan.width // 2} {plan.height} ") and ours.split()[3] in ("TopLeft", "Undefined")
 
 
-async def test_a_raw_is_cut_from_libraws_decode_and_reports_the_sensor_frame(client, roots, monkeypatch):
-    ro, rw = roots
+async def test_a_raw_is_cut_from_libraws_decode_and_reports_the_sensor_frame(client, dirs, monkeypatch):
+    ro, rw = dirs
     (ro / "shot.raf").write_bytes(b"raf")
     seen = {}
 
@@ -261,8 +259,8 @@ def test_the_decode_hears_the_outputs_it_is_for():
     ]
 
 
-async def test_a_raw_libraw_cannot_demosaic_is_rendered_from_its_embedded_preview(client, roots, monkeypatch):
-    ro, rw = roots
+async def test_a_raw_libraw_cannot_demosaic_is_rendered_from_its_embedded_preview(client, dirs, monkeypatch):
+    ro, rw = dirs
     (ro / "shot.nef").write_bytes(b"nef")
     sources = []
 

@@ -7,7 +7,7 @@ async def test_unauthorized_without_key(client):
     assert r.json() == {"ok": False, "error": {"code": "unauthorized", "message": "missing or unknown key"}}
 
 
-async def test_capabilities_lists_ops_and_roots(client, tmp_path, monkeypatch):
+async def test_capabilities_lists_ops(client, tmp_path, monkeypatch):
     monkeypatch.setenv("EMS_OCR_HAND_ROOT", str(tmp_path / "absent"))
     monkeypatch.setenv("EMS_HTR_ROOT", str(tmp_path / "absent"))
     monkeypatch.setenv("EMS_HTR_EN_ROOT", str(tmp_path / "absent"))
@@ -15,8 +15,8 @@ async def test_capabilities_lists_ops_and_roots(client, tmp_path, monkeypatch):
     body = r.json()
     assert r.status_code == 200
     assert "faces.detect" in body["ops"] and "media.probe" in body["ops"]
-    assert [root["mode"] for root in body["roots"]] == ["ro", "rw"]
-    assert body["api"] == "0.1.0"
+    assert "roots" not in body
+    assert body["api"] == "0.2.0"
     assert "video.storyboard" in body["ops"] and "video.shots" in body["ops"]
     assert "ocr.read" in body["ops"] and body["models"]["ocr"] == "PP-OCRv6_medium"
     assert "vision.describe" not in body["ops"] and "text.generate" not in body["ops"] and "vlm" not in body["models"]
@@ -50,10 +50,11 @@ async def test_unknown_fields_are_refused(client):
     assert "bogus" in r.json()["error"]["message"]
 
 
-async def test_path_outside_roots(client):
-    r = await client.post("/v0/faces/detect", json={"file": {"path": "/etc/hostname"}})
-    assert r.status_code == 403
-    assert r.json()["error"] == {"code": "path_outside_roots", "message": "/etc/hostname: outside the configured roots", "permanent": True}
+async def test_a_request_that_names_files_without_their_endpoint_is_invalid(client):
+    r = await client.post("/v0/faces/detect", json={"file": {"path": "/etc/hostname"}}, headers={"EMS-Files": ""})
+    assert r.status_code == 400
+    error = r.json()["error"]
+    assert error["code"] == "invalid_request" and "EMS-Files" in error["message"] or "ems-files" in error["message"]
 
 
 async def test_health_reports_worker_and_queues(client, fake_worker):

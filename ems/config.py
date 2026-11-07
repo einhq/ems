@@ -11,7 +11,6 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
-from .roots import Root, parse_roots
 
 
 @dataclass(frozen=True)
@@ -20,7 +19,6 @@ class Settings:
     host: str
     keys_file: str
     keys: frozenset[str]
-    roots: tuple[Root, ...]
     scratch: str
     worker_socket: str
     worker_script: str
@@ -106,7 +104,6 @@ class Settings:
             host=e.get("EMS_HOST", "0.0.0.0"),
             keys_file=keys_file,
             keys=load_keys(keys_file, e.get("EMS_KEY")),
-            roots=parse_roots(e.get("EMS_ROOTS", "")),
             scratch=e.get("EMS_SCRATCH", "/tmp/ems"),
             worker_socket=e.get("EMS_WORKER_SOCKET", "/tmp/ems-model-worker.sock"),
             worker_script=e.get("EMS_WORKER_SCRIPT", os.path.join(here, "modelworker", "model_server.py")),

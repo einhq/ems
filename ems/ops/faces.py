@@ -6,6 +6,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Request
 from pydantic import Field
 
+from .. import remote
 from ..context import Context
 from ..errors import EmsError, UNDECODABLE, UNSUPPORTED
 from ..schemas import Box, FileRef, WithOptions
@@ -98,7 +99,7 @@ async def _with_fallback(ctx: Context, op: str, path: str, file: FileRef, extra:
 
 
 async def detect(ctx: Context, req: DetectRequest, progress: Progress) -> Outcome:
-    path = ctx.roots.input(req.file.path)
+    path = remote.input(req.file.path)
     async with model_slot(ctx, req.options):
         await progress.emit("detect")
         raw = await _with_fallback(ctx, "detect_faces", path, req.file, {}, req.options.deadline)
@@ -108,7 +109,7 @@ async def detect(ctx: Context, req: DetectRequest, progress: Progress) -> Outcom
 async def detect_video(ctx: Context, req: DetectVideoRequest, progress: Progress) -> Outcome:
     """The faces a video shows, each with when it is seen — one call, one decode of the video
     (`inference_ops.detect_video_faces`). A file with no picture shows none."""
-    path = ctx.roots.input(req.file.path)
+    path = remote.input(req.file.path)
     probed = await ffprobe_tool.probe(path, timeout=ctx.settings.tool_stall_seconds)
     if probed.refusal:
         raise EmsError(UNDECODABLE, f"faces.detect_video: {probed.refusal}")
@@ -163,7 +164,7 @@ async def detect_video(ctx: Context, req: DetectVideoRequest, progress: Progress
 
 
 async def embed(ctx: Context, req: EmbedRequest, progress: Progress) -> Outcome:
-    path = ctx.roots.input(req.file.path)
+    path = remote.input(req.file.path)
     async with model_slot(ctx, req.options):
         await progress.emit("embed")
         raw = await _with_fallback(ctx, "embed_face", path, req.file, {"box": req.box.model_dump()}, req.options.deadline)

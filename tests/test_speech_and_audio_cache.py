@@ -24,9 +24,9 @@ def fake_extract(monkeypatch):
     return calls
 
 
-async def test_voiceprint_is_one_call_per_recording(client, fake_worker, roots, fake_extract):
+async def test_voiceprint_is_one_call_per_recording(client, fake_worker, dirs, fake_extract):
     """Diarize, embed every turn in one worker op, stitch the windows, re-embed what was rejoined."""
-    ro, _ = roots
+    ro, _ = dirs
     (ro / "talk.mp4").write_bytes(b"mp4")
     # Two windows of 90s. One voice runs across the boundary (w0/s0 -> w1/s0), a second voice sits
     # in w0 only, and one turn is too short to embed.
@@ -74,8 +74,8 @@ async def test_voiceprint_is_one_call_per_recording(client, fake_worker, roots, 
     assert r.status_code == 400
 
 
-async def test_voiceprint_of_silence(client, fake_worker, roots, fake_extract):
-    ro, _ = roots
+async def test_voiceprint_of_silence(client, fake_worker, dirs, fake_extract):
+    ro, _ = dirs
     (ro / "hum.mp4").write_bytes(b"mp4")
     (ro / "silent.mp4").write_bytes(b"mp4")
     fake_worker.on("diarize", lambda req: {"speech": False, "duration": 5.0, "window": 90, "model": "sortformer", "turns": []})
@@ -86,8 +86,8 @@ async def test_voiceprint_of_silence(client, fake_worker, roots, fake_extract):
     assert [req["op"] for req in fake_worker.requests] == ["diarize"]
 
 
-async def test_silent_file_is_cached_as_no_audio(client, fake_worker, roots, fake_extract):
-    ro, _ = roots
+async def test_silent_file_is_cached_as_no_audio(client, fake_worker, dirs, fake_extract):
+    ro, _ = dirs
     (ro / "silent.mp4").write_bytes(b"mp4")
     for _ in range(2):
         r = await client.post("/v0/speech/transcribe", json={"file": {"path": str(ro / "silent.mp4")}})
@@ -119,9 +119,9 @@ async def test_concurrent_requests_share_one_extraction(tmp_path, fake_extract):
         await cache.stop()
 
 
-async def test_voiceprint_reply_may_exceed_the_default_line_limit(client, fake_worker, roots, fake_extract):
+async def test_voiceprint_reply_may_exceed_the_default_line_limit(client, fake_worker, dirs, fake_extract):
     """A recording's voiceprints are one reply line of megabytes, past asyncio's 64 KiB default, and it is read whole."""
-    ro, _ = roots
+    ro, _ = dirs
     (ro / "tape.mp3").write_bytes(b"mp3")
     turns = [{"start": float(i * 3), "end": float(i * 3 + 2), "localSpeaker": "w0/speaker_0"} for i in range(1000)]
     fake_worker.on("diarize", lambda req: {"speech": True, "duration": 3000.0, "window": 90, "model": "sortformer", "turns": turns})

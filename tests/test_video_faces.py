@@ -164,8 +164,8 @@ def readable_video(duration: str = "63.2"):
     return probe
 
 
-async def test_detect_video_asks_the_worker_with_the_pictures_own_length(client, fake_worker, roots, monkeypatch):
-    ro, _ = roots
+async def test_detect_video_asks_the_worker_with_the_pictures_own_length(client, fake_worker, dirs, monkeypatch):
+    ro, _ = dirs
     (ro / "v.mp4").write_bytes(b"mp4")
     monkeypatch.setattr(faces.ffprobe_tool, "probe", readable_video())
     fake_worker.on("detect_video_faces", lambda req: {
@@ -194,8 +194,8 @@ async def test_detect_video_asks_the_worker_with_the_pictures_own_length(client,
     assert sent["min_size"] == 0.02 and sent["min_confidence"] == 0.7
 
 
-async def test_a_file_without_a_picture_shows_no_faces(client, fake_worker, roots, monkeypatch):
-    ro, _ = roots
+async def test_a_file_without_a_picture_shows_no_faces(client, fake_worker, dirs, monkeypatch):
+    ro, _ = dirs
     (ro / "a.m4a").write_bytes(b"m4a")
 
     async def sound_only(path, *, timeout):
@@ -207,8 +207,8 @@ async def test_a_file_without_a_picture_shows_no_faces(client, fake_worker, root
     assert fake_worker.requests == []
 
 
-async def test_a_video_nothing_can_read_is_undecodable(client, fake_worker, roots, monkeypatch):
-    ro, _ = roots
+async def test_a_video_nothing_can_read_is_undecodable(client, fake_worker, dirs, monkeypatch):
+    ro, _ = dirs
     (ro / "v.mov").write_bytes(b"mov")
 
     async def refused(path, *, timeout):
@@ -232,11 +232,11 @@ async def test_a_video_nothing_can_read_is_undecodable(client, fake_worker, root
     assert r.json()["error"]["code"] == "undecodable"
 
 
-async def test_a_late_poster_frame_is_sought_on_the_input_first(client, roots, monkeypatch, tmp_path):
+async def test_a_late_poster_frame_is_sought_on_the_input_first(client, dirs, monkeypatch, tmp_path):
     from ems.ops import video
     from ems.tools import run as run_tool
 
-    ro, _ = roots
+    ro, _ = dirs
     (ro / "v.mp4").write_bytes(b"mp4")
     calls = []
 
@@ -398,8 +398,8 @@ def test_a_long_video_is_sampled_more_sparsely():
     assert ops.video_face_step(1.0, None) == 1.0
 
 
-async def test_detect_video_streams_how_much_is_done(client, fake_worker, roots, monkeypatch):
-    ro, _ = roots
+async def test_detect_video_streams_how_much_is_done(client, fake_worker, dirs, monkeypatch):
+    ro, _ = dirs
     (ro / "v.mp4").write_bytes(b"mp4")
     monkeypatch.setattr(faces.ffprobe_tool, "probe", readable_video())
     fake_worker.on("detect_video_faces", lambda req: {"frame": {"width": 64, "height": 36}, "interval": 1.0, "samples": 2, "faces": []})

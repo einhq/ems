@@ -54,7 +54,7 @@ def card_stats(free_mb: float | None):
 
 
 @pytest.fixture
-async def setup(client, fake_worker, tmp_path, roots):
+async def setup(client, fake_worker, tmp_path, dirs):
     """The client's EMS with a query worker and a card worker; `arm(free_mb)` turns the arbiter on."""
     query_fake = FakeModelWorker(str(tmp_path / "query.sock"))
     card_fake = FakeModelWorker(str(tmp_path / "card.sock"))
@@ -72,7 +72,7 @@ async def setup(client, fake_worker, tmp_path, roots):
         fake.on("embed_image_texts", lambda req, v=vector: {"embeddings": [v], "model": "siglip2"})
     fake_worker.on("unload", lambda req: (order.append(f"unload {req.get('families') or 'all'}"), {"unloaded": []})[1])
     fake_worker.on("embed_images", lambda req: (order.append("embed"), {"embeddings": [[1.0]], "model": "siglip2"})[1])
-    ro, _ = roots
+    ro, _ = dirs
     (ro / "a.jpg").write_bytes(b"jpeg")
     fake_worker.on("embed_texts", lambda req: {"embeddings": [[2.0]], "model": "bge-m3"})
 
@@ -151,9 +151,9 @@ async def test_documents_go_to_the_card_while_quiet(client, setup, fake_worker):
     assert arbiter.mode == "quiet"
 
 
-async def test_batch_work_stops_the_card_worker_before_it_runs(client, setup, roots):
+async def test_batch_work_stops_the_card_worker_before_it_runs(client, setup, dirs):
     arm, order, card = setup
-    ro, _ = roots
+    ro, _ = dirs
     arbiter = await arm(10000)
     await arbiter.tick()
     order.clear()
@@ -168,9 +168,9 @@ async def test_batch_work_stops_the_card_worker_before_it_runs(client, setup, ro
     assert arbiter.mode == "busy"
 
 
-async def test_batch_work_arriving_while_going_quiet_keeps_the_card(client, setup, fake_worker, roots):
+async def test_batch_work_arriving_while_going_quiet_keeps_the_card(client, setup, fake_worker, dirs):
     arm, order, card = setup
-    ro, _ = roots
+    ro, _ = dirs
     arbiter = await arm(10000)
 
     async def slow_unload(req):

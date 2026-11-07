@@ -10,6 +10,7 @@ from typing import Literal
 
 from fastapi import APIRouter, Request
 
+from .. import remote
 from ..context import Context
 from ..errors import EmsError, TOOL_FAILED
 from ..schemas import FileRef, WithOptions
@@ -212,7 +213,7 @@ def _sha256(path: str) -> str:
 
 
 async def probe_file(ctx: Context, req: ProbeRequest, progress: Progress) -> Outcome:
-    path = ctx.roots.input(req.file.path)
+    path = remote.input(req.file.path)
     timeout = ctx.settings.tool_stall_seconds
     async with ctx.admission.slot("tools", interactive=req.options.interactive):
         await progress.emit("metadata")

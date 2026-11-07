@@ -1,8 +1,7 @@
 """Requests whose files are their caller's (`EMS-Files`): read and written through an sshfs mount.
 
-The caller is an asyncssh SFTP server on loopback serving a directory outside every root, so an
-op can only reach its files through the mount: the local roots have none of them. The tests that
-mount need sshfs and /dev/fuse.
+The caller is an asyncssh SFTP server on loopback serving a directory of the test's, which EMS
+reaches through a real sshfs mount of it here. The tests that mount need sshfs and /dev/fuse.
 """
 
 import asyncio
@@ -14,7 +13,7 @@ import asyncssh
 import pytest
 
 from ems.ops import video
-from ems.remote import parse_header, request_paths
+from ems.remote import Mounts, parse_header, request_paths
 
 DATA = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 SECRET = "a-secret-made-at-start"
@@ -31,6 +30,16 @@ class OneUser(asyncssh.SSHServer):
 
     def validate_password(self, username, password):
         return username == "ems" and password == SECRET
+
+
+@pytest.fixture
+async def mounting(client, tmp_path):
+    """The app with real sshfs mounts in place of the conftest's host files."""
+    mounts = Mounts(str(tmp_path / "mounts"))
+    mounts.start()
+    client.app.state.ctx.files = mounts
+    yield mounts
+    await mounts.stop()
 
 
 @pytest.fixture
@@ -72,7 +81,7 @@ def test_the_header_names_an_endpoint_and_the_body_its_paths():
 
 
 @needs_mount
-async def test_an_input_is_read_through_the_mount_and_the_scratch_goes_with_the_request(client, caller, tmp_path):
+async def test_an_input_is_read_through_the_mount_and_the_scratch_goes_with_the_request(client, mounting, caller, tmp_path):
     files, headers = caller
     (files / "note.txt").write_text("written by Anna Andersson")
     for _ in range(2):
@@ -83,7 +92,7 @@ async def test_an_input_is_read_through_the_mount_and_the_scratch_goes_with_the_
 
 
 @needs_mount
-async def test_a_changed_input_is_read_again(client, caller):
+async def test_a_changed_input_is_read_again(client, mounting, caller):
     files, headers = caller
     note = files / "note.txt"
     note.write_text("first")
@@ -94,7 +103,7 @@ async def test_a_changed_input_is_read_again(client, caller):
 
 
 @needs_mount
-async def test_frames_go_back_to_the_callers_directory_which_is_made(client, caller, monkeypatch):
+async def test_frames_go_back_to_the_callers_directory_which_is_made(client, mounting, caller, monkeypatch):
     files, headers = caller
     shutil.copy(os.path.join(DATA, "video1.mp4"), files / "clip.mp4")
 
@@ -116,7 +125,7 @@ async def test_frames_go_back_to_the_callers_directory_which_is_made(client, cal
 
 @needs_mount
 @pytest.mark.skipif(not (shutil.which("ffmpeg") and shutil.which("ffprobe")), reason="ffmpeg is not installed")
-async def test_a_transcode_writes_the_callers_output_before_it_answers(client, caller):
+async def test_a_transcode_writes_the_callers_output_before_it_answers(client, mounting, caller):
     files, headers = caller
     shutil.copy(os.path.join(DATA, "video1.mp4"), files / "clip.mp4")
     (files / "sound.m4a").write_bytes(b"")
@@ -127,7 +136,7 @@ async def test_a_transcode_writes_the_callers_output_before_it_answers(client, c
 
 
 @needs_mount
-async def test_a_missing_input_is_not_found_and_a_bad_header_invalid(client, caller):
+async def test_a_missing_input_is_not_found_and_a_bad_header_invalid(client, mounting, caller):
     files, headers = caller
     r = await client.post("/v0/document/extract", json={"file": {"path": str(files / "gone.txt")}}, headers=headers)
     assert r.status_code == 404 and r.json()["error"]["code"] == "not_found"
@@ -136,7 +145,7 @@ async def test_a_missing_input_is_not_found_and_a_bad_header_invalid(client, cal
 
 
 @needs_mount
-async def test_a_caller_that_refuses_the_mount_is_a_failure_to_retry(client, caller):
+async def test_a_caller_that_refuses_the_mount_is_a_failure_to_retry(client, mounting, caller):
     files, headers = caller
     (files / "note.txt").write_text("x")
     wrong = {"EMS-Files": headers["EMS-Files"].replace(SECRET, "not-the-secret")}
@@ -145,10 +154,10 @@ async def test_a_caller_that_refuses_the_mount_is_a_failure_to_retry(client, cal
     assert r.status_code == 502 and error["code"] == "files_unavailable" and error["permanent"] is False
 
 
-async def test_a_host_that_cannot_mount_refuses_the_request(client, caller):
+async def test_a_host_that_cannot_mount_refuses_the_request(client, mounting, caller):
     files, headers = caller
     (files / "note.txt").write_text("x")
-    client.app.state.ctx.files.possible = False
+    mounting.possible = False
     r = await client.post("/v0/document/extract", json={"file": {"path": str(files / "note.txt")}}, headers=headers)
     error = r.json()["error"]
     assert r.status_code == 502 and error["code"] == "files_unavailable" and "cannot mount" in error["message"]

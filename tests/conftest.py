@@ -10,10 +10,26 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 
 from ems.app import create_app  # noqa: E402
 from ems.config import Settings  # noqa: E402
+from ems.remote import Mounts  # noqa: E402
 from ems.worker import Worker  # noqa: E402
 
 KEY = "test-key"
 AUTH = {"Authorization": f"Bearer {KEY}"}
+# The header every test request names its files' endpoint in; `HostFiles` makes its paths this
+# host's own, so a test's files are plain files in its temp directory.
+FILES = {"EMS-Files": "address=caller.test:2224; user=ems; secret=s; hostkey=ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA"}
+
+
+class HostFiles(Mounts):
+    """Mounts whose every endpoint is `/` of this host: the caller's paths are read and written as
+    they are, the request's staging and send-back running as they would through a mount."""
+
+    def __init__(self):
+        super().__init__()
+        self.possible = True
+
+    async def mount(self, endpoint):
+        return ""
 
 
 class FakeModelWorker:
@@ -60,7 +76,8 @@ class FakeModelWorker:
 
 
 @pytest.fixture
-def roots(tmp_path):
+def dirs(tmp_path):
+    """Two directories a test's inputs and outputs go in, as its caller's files."""
     ro = tmp_path / "ro"
     rw = tmp_path / "rw"
     ro.mkdir()
@@ -77,11 +94,9 @@ async def fake_worker(tmp_path):
 
 
 @pytest.fixture
-async def client(roots, fake_worker, tmp_path):
-    ro, rw = roots
+async def client(dirs, fake_worker, tmp_path):
     settings = Settings.from_env({
         "EMS_KEY": KEY,
-        "EMS_ROOTS": f"{ro}:ro,{rw}:rw",
         "EMS_SCRATCH": str(tmp_path / "scratch"),
         "EMS_WORKER_SOCKET": fake_worker.socket_path,
         "EMS_LIMIT_MODELS": "2",
@@ -90,7 +105,8 @@ async def client(roots, fake_worker, tmp_path):
     })
     worker = Worker("/nonexistent/model_server.py", fake_worker.socket_path, log=lambda m: None)
     app = create_app(settings, worker=worker, start_worker=False)
+    app.state.ctx.files = HostFiles()
     async with app.router.lifespan_context(app):
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://ems", headers=AUTH) as c:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://ems", headers={**AUTH, **FILES}) as c:
             c.app = app
             yield c

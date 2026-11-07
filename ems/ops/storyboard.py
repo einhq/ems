@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from fastapi import APIRouter, Request
 from pydantic import Field
 
+from .. import remote
 from ..context import Context
 from ..errors import EmsError, UNDECODABLE, invalid
 from ..schemas import FileRef, OutputSpec, WithOptions
@@ -105,7 +106,7 @@ async def storyboard(ctx: Context, req: StoryboardRequest, progress: Progress) -
     rows_px = math.ceil(req.max_tiles / req.columns) * req.tile
     if max(columns_px, rows_px) > MAX_SHEET_EDGE:
         raise invalid(f"a sheet of {req.max_tiles} tiles of {req.tile} px in {req.columns} columns can be {columns_px}x{rows_px} px; at most {MAX_SHEET_EDGE} a side")
-    path = ctx.roots.input(req.file.path)
+    path = remote.input(req.file.path)
     timeout = ctx.settings.tool_stall_seconds
 
     async with ctx.admission.slot("encodes", interactive=req.options.interactive):

@@ -27,8 +27,8 @@ def test_one_decode_draws_every_picture():
     assert "drawbox" not in plain and "colors=#ffffff" in plain
 
 
-async def test_waveform_targets_are_fitted_from_their_own_drawing(client, roots, monkeypatch):
-    ro, rw = roots
+async def test_waveform_targets_are_fitted_from_their_own_drawing(client, dirs, monkeypatch):
+    ro, rw = dirs
     (ro / "tape.mp3").write_bytes(b"mp3")
     drawn = {}
     fitted = []

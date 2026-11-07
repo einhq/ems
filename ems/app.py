@@ -19,7 +19,6 @@ from .context import Context
 from .errors import INTERNAL, INVALID_REQUEST, EmsError
 from .ops import audio, document, faces, fingerprint, image, media, ocr, shots, speech, storyboard, system, text, transcode, video, vision
 from .remote import Mounts
-from .roots import Roots
 from .tools.audio import AudioCache
 from .tools.exiftool import ExifTool
 from .tools.run import which
@@ -122,7 +121,6 @@ def create_app(
             card_worker = card_worker or make_card_worker(settings)
     ctx = Context(
         settings=settings,
-        roots=Roots(settings.roots),
         admission=Admission(
             limit_models=settings.limit_models,
             limit_tools=settings.limit_tools,
@@ -153,9 +151,9 @@ def create_app(
         if not settings.keys:
             ctx.warnings.append("no keys configured: authentication is off")
             log("no keys configured (EMS_KEYS_FILE / EMS_KEY): authentication is OFF")
-        if not settings.roots:
-            ctx.warnings.append("no roots configured: every file request will be refused")
-            log("EMS_ROOTS is empty: every file request will be refused")
+        if not ctx.files.possible:
+            ctx.warnings.append("no /dev/fuse or sshfs: every request that names files will be refused")
+            log("this host cannot mount its callers' files (no /dev/fuse or sshfs): every request that names files will be refused")
         if which("exiftool"):
             ctx.exiftool = ExifTool(settings.exiftool_workers, settings.tool_stall_seconds)
         else:

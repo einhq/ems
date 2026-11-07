@@ -16,6 +16,7 @@ from typing import Literal
 from fastapi import APIRouter, Request
 from pydantic import Field
 
+from .. import remote
 from ..context import Context
 from ..errors import EmsError, REFUSED, TOOL_FAILED, UNDECODABLE, invalid
 from ..schemas import FileRef, OutputSpec, Strict, WithOptions
@@ -191,8 +192,8 @@ async def _concat(ctx: Context, segments: list[str], audio: str | None, out: str
 
 
 async def transcode_video(ctx: Context, req: VideoTranscodeRequest, progress: Progress) -> Outcome:
-    src = ctx.roots.input(req.file.path)
-    final = ctx.roots.output(req.output.path)
+    src = remote.input(req.file.path)
+    final = remote.output(req.output.path)
     fmt = (req.output.format or "mp4").lower()
     if fmt != "mp4":
         raise invalid(f"{req.output.path}: video renditions are mp4, not {fmt}")
@@ -393,8 +394,8 @@ def audio_plan(stream: dict | None, fmt: str, spec: AudioTranscodeSpec) -> tuple
 
 
 async def transcode_audio(ctx: Context, req: AudioTranscodeRequest, progress: Progress) -> Outcome:
-    src = ctx.roots.input(req.file.path)
-    final = ctx.roots.output(req.output.path)
+    src = remote.input(req.file.path)
+    final = remote.output(req.output.path)
     fmt = (req.output.format or "m4a").lower()
     if fmt not in ("m4a", "mp4"):
         raise invalid(f"{req.output.path}: audio renditions are m4a, not {fmt}")

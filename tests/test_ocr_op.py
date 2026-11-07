@@ -22,8 +22,8 @@ class Picture:
 LINE = {"text": "Hamngatan 4", "box": [[0.1, 0.2], [0.5, 0.2], [0.5, 0.3], [0.1, 0.3]], "score": 0.97}
 
 
-async def test_a_picture_is_read_in_its_display_frame(client, fake_worker, roots):
-    ro, _ = roots
+async def test_a_picture_is_read_in_its_display_frame(client, fake_worker, dirs):
+    ro, _ = dirs
     (ro / "a.jpg").write_bytes(b"jpeg")
     fake_worker.on("read_text", lambda req: {"text": "Hamngatan 4", "lines": [LINE], "width": 4000, "height": 3000, "model": "PP-OCRv6_medium"})
     r = await client.post("/v0/ocr/read", json={"file": {"path": str(ro / "a.jpg"), "angle": 90, "mirror": True, "mimetype": "image/jpeg"}})
@@ -35,16 +35,16 @@ async def test_a_picture_is_read_in_its_display_frame(client, fake_worker, roots
     assert sent["op"] == "read_text" and sent["paths"] == [str(ro / "a.jpg")] and sent["angle"] == 90 and sent["mirror"] is True
 
 
-async def test_a_picture_without_text_answers_empty(client, fake_worker, roots):
-    ro, _ = roots
+async def test_a_picture_without_text_answers_empty(client, fake_worker, dirs):
+    ro, _ = dirs
     (ro / "a.jpg").write_bytes(b"jpeg")
     fake_worker.on("read_text", lambda req: {"text": "", "lines": [], "width": 640, "height": 480, "model": "PP-OCRv6_medium"})
     body = (await client.post("/v0/ocr/read", json={"file": {"path": str(ro / "a.jpg"), "mimetype": "image/jpeg"}})).json()
     assert body["result"]["text"] == "" and body["result"]["lines"] == []
 
 
-async def test_a_raw_the_readers_cannot_open_is_decoded_out_of_process(client, fake_worker, roots, monkeypatch):
-    ro, _ = roots
+async def test_a_raw_the_readers_cannot_open_is_decoded_out_of_process(client, fake_worker, dirs, monkeypatch):
+    ro, _ = dirs
     original = ro / "a.raf"
     original.write_bytes(b"raw")
     decoded = ro / "decoded.jpg"
@@ -66,8 +66,8 @@ async def test_a_raw_the_readers_cannot_open_is_decoded_out_of_process(client, f
     assert [q["paths"] for q in fake_worker.requests if q["op"] == "read_text"] == [[str(original)], [str(decoded)]]
 
 
-async def test_audio_has_no_text_to_read(client, fake_worker, roots):
-    ro, _ = roots
+async def test_audio_has_no_text_to_read(client, fake_worker, dirs):
+    ro, _ = dirs
     (ro / "a.mp3").write_bytes(b"mp3")
     r = await client.post("/v0/ocr/read", json={"file": {"path": str(ro / "a.mp3"), "mimetype": "audio/mpeg"}})
     assert r.status_code == 415 and r.json()["error"]["code"] == "unsupported"
@@ -278,8 +278,8 @@ def test_kept_text_is_what_the_floor_keeps():
     assert text_reader.kept_text(reading) == "Hamngatan 4\nJohn"
 
 
-async def test_a_given_language_goes_to_the_worker_and_the_language_comes_back_in_meta(client, fake_worker, roots):
-    ro, _ = roots
+async def test_a_given_language_goes_to_the_worker_and_the_language_comes_back_in_meta(client, fake_worker, dirs):
+    ro, _ = dirs
     (ro / "a.jpg").write_bytes(b"jpeg")
     fake_worker.on("read_text", lambda req: {"text": "Dear Bert", "lines": [LINE], "width": 10, "height": 10, "model": "m",
                                              "language": {"code": req.get("language"), "confidence": None, "given": True}})
@@ -288,16 +288,16 @@ async def test_a_given_language_goes_to_the_worker_and_the_language_comes_back_i
     assert fake_worker.requests[-1]["language"] == "en"
 
 
-async def test_a_language_is_two_letters(client, fake_worker, roots):
-    ro, _ = roots
+async def test_a_language_is_two_letters(client, fake_worker, dirs):
+    ro, _ = dirs
     (ro / "a.jpg").write_bytes(b"jpeg")
     body = (await client.post("/v0/ocr/read", json={"file": {"path": str(ro / "a.jpg")}, "language": "English"})).json()
     assert body["error"]["code"] == "invalid_request"
     assert not fake_worker.requests
 
 
-async def test_without_a_language_the_worker_is_not_told_one(client, fake_worker, roots):
-    ro, _ = roots
+async def test_without_a_language_the_worker_is_not_told_one(client, fake_worker, dirs):
+    ro, _ = dirs
     (ro / "a.jpg").write_bytes(b"jpeg")
     fake_worker.on("read_text", lambda req: {"text": "", "lines": [], "width": 1, "height": 1, "model": "m", "language": None})
     body = (await client.post("/v0/ocr/read", json={"file": {"path": str(ro / "a.jpg"), "mimetype": "image/jpeg"}})).json()

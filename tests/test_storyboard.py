@@ -85,8 +85,8 @@ def install(monkeypatch, *, fail_cuda=False, frames=182):
     return runs
 
 
-async def test_the_op_writes_one_sheet_and_says_how_to_read_it(client, roots, monkeypatch):
-    ro, rw = roots
+async def test_the_op_writes_one_sheet_and_says_how_to_read_it(client, dirs, monkeypatch):
+    ro, rw = dirs
     (ro / "1920x1080.mp4").write_bytes(b"mp4")
     runs = install(monkeypatch)
     r = await client.post("/v0/video/storyboard", json={"file": {"path": str(ro / "1920x1080.mp4")}, "output": {"path": str(rw / "storyboard-160.avif"), "quality": 55}})
@@ -102,8 +102,8 @@ async def test_the_op_writes_one_sheet_and_says_how_to_read_it(client, roots, mo
     assert "/cuda+magick/" in body["meta"]["producer"]
 
 
-async def test_without_the_card_the_keyframes_make_the_sheet(client, roots, monkeypatch):
-    ro, rw = roots
+async def test_without_the_card_the_keyframes_make_the_sheet(client, dirs, monkeypatch):
+    ro, rw = dirs
     (ro / "1920x1080.mp4").write_bytes(b"mp4")
     runs = install(monkeypatch, fail_cuda=True, frames=150)
     r = await client.post("/v0/video/storyboard", json={"file": {"path": str(ro / "1920x1080.mp4")}, "output": {"path": str(rw / "storyboard-160.avif")}})
@@ -115,8 +115,8 @@ async def test_without_the_card_the_keyframes_make_the_sheet(client, roots, monk
     assert "/keyframes+magick/" in body["meta"]["producer"]
 
 
-async def test_a_turned_file_or_an_oversized_sheet_is_refused(client, roots, monkeypatch):
-    ro, rw = roots
+async def test_a_turned_file_or_an_oversized_sheet_is_refused(client, dirs, monkeypatch):
+    ro, rw = dirs
     (ro / "v.mp4").write_bytes(b"mp4")
     install(monkeypatch)
     r = await client.post("/v0/video/storyboard", json={"file": {"path": str(ro / "v.mp4"), "angle": 90}, "output": {"path": str(rw / "s.avif")}})
@@ -126,8 +126,8 @@ async def test_a_turned_file_or_an_oversized_sheet_is_refused(client, roots, mon
 
 
 @pytest.mark.skipif(not (shutil.which("ffmpeg") and shutil.which("ffprobe") and shutil.which("magick")), reason="needs ffmpeg, ffprobe and magick")
-async def test_a_real_sheet_from_the_test_clip(client, roots):
-    ro, rw = roots
+async def test_a_real_sheet_from_the_test_clip(client, dirs):
+    ro, rw = dirs
     source = os.path.join(os.path.dirname(__file__), "data", "video1.mp4")
     shutil.copy(source, ro / "video1.mp4")
     r = await client.post("/v0/video/storyboard", json={"file": {"path": str(ro / "video1.mp4")}, "output": {"path": str(rw / "storyboard-160.avif")}})

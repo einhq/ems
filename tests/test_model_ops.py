@@ -66,8 +66,8 @@ async def test_a_deadline_reaches_the_worker(client, fake_worker):
     # Priority is the front's admission; the worker hears only when nobody waits any more.
     assert sent["expires_at"] == 1234.5 and "interactive" not in sent
 
-async def test_faces_detect_converts_pixels_to_fractions(client, fake_worker, roots):
-    ro, _ = roots
+async def test_faces_detect_converts_pixels_to_fractions(client, fake_worker, dirs):
+    ro, _ = dirs
     (ro / "a.jpg").write_bytes(b"jpeg")
     fake_worker.on("detect_faces", lambda req: {
         "frame": {"width": 200, "height": 100},
@@ -89,8 +89,8 @@ async def test_faces_detect_converts_pixels_to_fractions(client, fake_worker, ro
     assert fake_worker.requests[-1]["angle"] == 90 and fake_worker.requests[-1]["path"] == str(ro / "a.jpg")
 
 
-async def test_faces_embed_reports_pose(client, fake_worker, roots):
-    ro, _ = roots
+async def test_faces_embed_reports_pose(client, fake_worker, dirs):
+    ro, _ = dirs
     (ro / "a.jpg").write_bytes(b"jpeg")
     fake_worker.on("embed_face", lambda req: {"embedding": [1.0], "confidence": 0.8, "pose": {"pitch": 1, "yaw": -30, "roll": 2}})
     r = await client.post("/v0/faces/embed", json={"file": {"path": str(ro / "a.jpg")}, "box": {"x": 0.1, "y": 0.1, "width": 0.2, "height": 0.2}})
@@ -102,8 +102,8 @@ async def test_faces_embed_reports_pose(client, fake_worker, roots):
     assert r.json()["result"] == {"embedding": [1.0], "confidence": 0.8}
 
 
-async def test_faces_embed_null_when_no_face(client, fake_worker, roots):
-    ro, _ = roots
+async def test_faces_embed_null_when_no_face(client, fake_worker, dirs):
+    ro, _ = dirs
     (ro / "a.jpg").write_bytes(b"jpeg")
     fake_worker.on("embed_face", lambda req: None)
     r = await client.post("/v0/faces/embed", json={"file": {"path": str(ro / "a.jpg")}, "box": {"x": 0.1, "y": 0.1, "width": 0.2, "height": 0.2}})
@@ -137,8 +137,8 @@ async def test_worker_down_is_model_unavailable(client, fake_worker):
     assert r.json()["error"]["code"] == "model_unavailable"
 
 
-async def test_streaming_emits_progress_then_result(client, fake_worker, roots):
-    ro, _ = roots
+async def test_streaming_emits_progress_then_result(client, fake_worker, dirs):
+    ro, _ = dirs
     (ro / "a.jpg").write_bytes(b"jpeg")
     fake_worker.on("embed_images", lambda req: {"embeddings": [[0.5, 0.5]], "model": "siglip2"})
     events = []

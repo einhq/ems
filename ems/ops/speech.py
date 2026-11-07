@@ -13,6 +13,7 @@ from contextlib import asynccontextmanager
 from fastapi import APIRouter, Request
 from pydantic import Field
 
+from .. import remote
 from ..context import Context
 from ..schemas import Box, FileRef, Strict, WithOptions
 from ..streaming import Outcome, Progress, run_op
@@ -87,7 +88,7 @@ def _silent_transcript() -> dict:
 
 
 async def transcribe(ctx: Context, req: TranscribeRequest, progress: Progress) -> Outcome:
-    path = ctx.roots.input(req.file.path)
+    path = remote.input(req.file.path)
     async with model_slot(ctx, req.options):
         async with extracted_audio(ctx, path, progress) as wav:
             if wav is None:
@@ -116,7 +117,7 @@ async def transcribe(ctx: Context, req: TranscribeRequest, progress: Progress) -
 
 
 async def diarize(ctx: Context, req: DiarizeRequest, progress: Progress) -> Outcome:
-    path = ctx.roots.input(req.file.path)
+    path = remote.input(req.file.path)
     async with model_slot(ctx, req.options):
         async with extracted_audio(ctx, path, progress) as wav:
             if wav is None:
@@ -153,7 +154,7 @@ async def voiceprint(ctx: Context, req: VoiceprintRequest, progress: Progress) -
     stitching joined back together. The caller never sees the window: it is sized for the
     card EMS runs on, which the caller has no way to know.
     """
-    path = ctx.roots.input(req.file.path)
+    path = remote.input(req.file.path)
     deadline = req.options.deadline
     async with model_slot(ctx, req.options):
         async with extracted_audio(ctx, path, progress) as wav:
@@ -209,7 +210,7 @@ async def voiceprint(ctx: Context, req: VoiceprintRequest, progress: Progress) -
 
 
 async def active_speaker(ctx: Context, req: ActiveSpeakerRequest, progress: Progress) -> Outcome:
-    path = ctx.roots.input(req.file.path)
+    path = remote.input(req.file.path)
     async with model_slot(ctx, req.options):
         async with extracted_audio(ctx, path, progress) as wav:
             if wav is None:
@@ -228,7 +229,7 @@ async def active_speaker(ctx: Context, req: ActiveSpeakerRequest, progress: Prog
 async def active_speakers(ctx: Context, req: ActiveSpeakersRequest, progress: Progress) -> Outcome:
     """Per speaker of a recording, the visible face whose lips move with its voice — one call,
     one decode of the video (`inference_ops.active_speakers`)."""
-    path = ctx.roots.input(req.file.path)
+    path = remote.input(req.file.path)
     async with model_slot(ctx, req.options):
         async with extracted_audio(ctx, path, progress) as wav:
             if wav is None:

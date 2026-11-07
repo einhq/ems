@@ -7,6 +7,7 @@ import shutil
 from fastapi import APIRouter, Request
 from pydantic import Field
 
+from .. import remote
 from ..context import Context
 from ..errors import EmsError, UNSUPPORTED
 from ..schemas import FileRef, WithOptions
@@ -31,7 +32,7 @@ class EmbedTextRequest(WithOptions):
 
 async def embed(ctx: Context, req: EmbedRequest, progress: Progress) -> Outcome:
     """A picture's vector in the image-text space; a video's, one per keyframe."""
-    path = ctx.roots.input(req.file.path)
+    path = remote.input(req.file.path)
     mimetype = await mimetype_of(ctx, req.file, path)
     kind = kind_of(mimetype)
     deadline = req.options.deadline

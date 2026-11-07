@@ -6,8 +6,8 @@ from ems.ops import vision
 from ems.tools import decode as decode_tool
 
 
-async def test_image_embed_returns_one_vector_named_by_the_worker(client, fake_worker, roots):
-    ro, _ = roots
+async def test_image_embed_returns_one_vector_named_by_the_worker(client, fake_worker, dirs):
+    ro, _ = dirs
     (ro / "a.jpg").write_bytes(b"jpeg")
     fake_worker.on("embed_images", lambda req: {"embeddings": [[0.6, 0.8]], "model": "ViT-SO400M-16-SigLIP2-384__webli"})
     r = await client.post("/v0/vision/embed", json={"file": {"path": str(ro / "a.jpg"), "angle": 90, "mirror": True, "mimetype": "image/jpeg"}})
@@ -20,8 +20,8 @@ async def test_image_embed_returns_one_vector_named_by_the_worker(client, fake_w
     assert sent["op"] == "embed_images" and sent["paths"] == [str(ro / "a.jpg")] and sent["angle"] == 90 and sent["mirror"] is True
 
 
-async def test_image_embed_decodes_out_of_process_when_the_reader_cannot(client, fake_worker, roots, monkeypatch):
-    ro, _ = roots
+async def test_image_embed_decodes_out_of_process_when_the_reader_cannot(client, fake_worker, dirs, monkeypatch):
+    ro, _ = dirs
     original = ro / "a.raf"
     original.write_bytes(b"raw")
     decoded = ro / "decoded.jpg"
@@ -46,8 +46,8 @@ async def test_image_embed_decodes_out_of_process_when_the_reader_cannot(client,
     assert [q["paths"] for q in fake_worker.requests if q["op"] == "embed_images"] == [[str(original)], [str(decoded)]]
 
 
-async def test_video_embed_returns_a_vector_per_keyframe(client, fake_worker, roots, monkeypatch):
-    ro, _ = roots
+async def test_video_embed_returns_a_vector_per_keyframe(client, fake_worker, dirs, monkeypatch):
+    ro, _ = dirs
     (ro / "v.mp4").write_bytes(b"mp4")
 
     async def fake_frames(ctx, path, out_dir, *, at, count, strategy, fmt, quality, max_edge, progress):
@@ -71,8 +71,8 @@ async def test_video_embed_returns_a_vector_per_keyframe(client, fake_worker, ro
     assert fake_worker.requests[-1]["angle"] == 270
 
 
-async def test_audio_is_not_a_picture(client, fake_worker, roots):
-    ro, _ = roots
+async def test_audio_is_not_a_picture(client, fake_worker, dirs):
+    ro, _ = dirs
     (ro / "a.mp3").write_bytes(b"mp3")
     r = await client.post("/v0/vision/embed", json={"file": {"path": str(ro / "a.mp3"), "mimetype": "audio/mpeg"}})
     body = r.json()

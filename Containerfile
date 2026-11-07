@@ -6,11 +6,9 @@
 # Build:
 #   podman build -t ems -f Containerfile .
 #
-# Run (GPU, with the roots the caller shares — identical paths on both sides):
-#   podman run --rm --device nvidia.com/gpu=all --network=host \
-#     -e EMS_KEY=let-me-in -e EMS_ROOTS=/files:ro,/old:ro,/files-volatile:rw,/files-tmp:rw \
-#     -v /srv/files:/files:ro -v /srv/old:/old:ro -v /srv/files-volatile:/files-volatile -v /srv/files-tmp:/files-tmp \
-#     ems
+# Run (GPU, mounting its callers' files with sshfs, docs/api.md 3.1a):
+#   podman run --rm --device nvidia.com/gpu=all --device /dev/fuse --cap-add SYS_ADMIN --network=host \
+#     -e EMS_KEY=let-me-in ems
 #
 # podman's build cache is keyed on the parent layer plus the instruction, so an edit rebuilds
 # every layer after it. The ~30 GB of wheels and baked weights come first, the pins that move
@@ -453,12 +451,9 @@ COPY notice /usr/share/doc/ein-ems
 # Compile once so the first request does not.
 RUN python3 -m compileall -q ems scripts
 
-# Defaults an operator overrides per deployment. EMS_ROOTS is empty on purpose: a container
-# started without naming what it may read refuses every file request instead of serving the
-# disk it happens to see.
+# Defaults an operator overrides per deployment.
 ENV EMS_PORT=8181
 ENV EMS_HOST=0.0.0.0
-ENV EMS_ROOTS=""
 ENV EMS_SCRATCH=/tmp/ems
 ENV EMS_KEYS_FILE=/etc/ems.keys
 # The model worker's own knobs, in the EMS namespace (worker.py maps EMS_* → CFG_*). These

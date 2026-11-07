@@ -19,6 +19,7 @@ from typing import Literal
 
 from fastapi import APIRouter, Request
 
+from .. import remote
 from ..context import Context
 from ..errors import EmsError, TOOL_FAILED, UNSUPPORTED
 from ..schemas import FileRef, WithOptions
@@ -173,7 +174,7 @@ async def extract(path: str, mimetype: str | None, ocr: str, reader: Reader, scr
 
 
 async def run_extract(ctx: Context, req: DocumentRequest, progress: Progress) -> Outcome:
-    path = ctx.roots.input(req.file.path)
+    path = remote.input(req.file.path)
     mimetype = await mimetype_of(ctx, req.file, path)
     reader = Reader(ctx, req)
     await progress.emit("extract", message=kind_of(mimetype))

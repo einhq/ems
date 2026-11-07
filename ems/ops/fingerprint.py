@@ -14,6 +14,7 @@ from typing import Literal
 
 from fastapi import APIRouter, Request
 
+from .. import remote
 from ..context import Context
 from ..errors import EmsError, TOOL_FAILED, UNSUPPORTED, invalid
 from ..schemas import FileRef, WithOptions
@@ -86,7 +87,7 @@ async def chromaprint(ctx: Context, path: str) -> list[dict]:
 
 
 async def compute(ctx: Context, req: FingerprintRequest, progress: Progress) -> Outcome:
-    path = ctx.roots.input(req.file.path)
+    path = remote.input(req.file.path)
     mimetype = await mimetype_of(ctx, req.file, path)
     kind = kind_of(mimetype)
     kinds = req.kinds if req.kinds is not None else DEFAULT_KINDS.get(kind)

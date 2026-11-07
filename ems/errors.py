@@ -3,7 +3,7 @@
 Every failure a caller sees is `{ok: false, error: {code, message, permanent}}` with the HTTP
 status the code implies. `permanent` is the part worth getting right: it is what tells a caller
 with a retry queue whether to try again. A truncated container, an unsupported format and a
-path outside the roots will fail the same way forever; a full queue, a loading model and a
+path the caller does not grant will fail the same way forever; a full queue, a loading model and a
 missed deadline will not.
 """
 
@@ -21,7 +21,7 @@ class Code:
 
 UNAUTHORIZED = Code("unauthorized", 401, None)
 INVALID_REQUEST = Code("invalid_request", 400, True)
-PATH_OUTSIDE_ROOTS = Code("path_outside_roots", 403, True)
+PATH_NOT_GRANTED = Code("path_not_granted", 403, True)
 NOT_FOUND = Code("not_found", 404, True)
 UNSUPPORTED = Code("unsupported", 415, True)
 UNDECODABLE = Code("undecodable", 422, True)

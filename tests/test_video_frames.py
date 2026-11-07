@@ -5,17 +5,18 @@ import os
 from ems.ops import video
 
 
-async def test_frames_need_a_selection_and_a_writable_dir(client, roots, monkeypatch):
-    ro, rw = roots
+async def test_frames_need_a_selection_and_go_to_the_output_dir(client, dirs, monkeypatch):
+    ro, rw = dirs
     (ro / "v.mp4").write_bytes(b"mp4")
     r = await client.post("/v0/video/frames", json={"file": {"path": str(ro / "v.mp4")}, "output": {"dir": str(rw / "frames")}})
     assert r.status_code == 400 and "at" in r.json()["error"]["message"]
-    r = await client.post("/v0/video/frames", json={"file": {"path": str(ro / "v.mp4")}, "at": [1.0], "output": {"dir": str(ro / "frames")}})
-    assert r.status_code == 403
 
     async def fake(ctx, path, out_dir, *, at, count, strategy, fmt, quality, max_edge, progress, angle, mirror):
-        assert at == [1.0, 2.5] and out_dir == str(rw / "frames")
+        assert at == [1.0, 2.5] and not out_dir.startswith(str(rw))
         assert (angle, mirror) == (90, True)
+        for name in ("frame-000.jpg", "frame-001.jpg"):
+            with open(f"{out_dir}/{name}", "wb") as f:
+                f.write(b"jpeg")
         return [{"path": f"{out_dir}/frame-000.jpg", "t": 1.0}, {"path": f"{out_dir}/frame-001.jpg", "t": 2.5}]
 
     monkeypatch.setattr(video, "extract_frames", fake)
@@ -23,13 +24,13 @@ async def test_frames_need_a_selection_and_a_writable_dir(client, roots, monkeyp
     body = r.json()
     assert r.status_code == 200, body
     assert body["result"]["frames"] == [{"path": str(rw / "frames" / "frame-000.jpg"), "t": 1.0}, {"path": str(rw / "frames" / "frame-001.jpg"), "t": 2.5}]
-    assert (rw / "frames").is_dir()
+    assert (rw / "frames" / "frame-001.jpg").read_bytes() == b"jpeg"
 
 
-async def test_poster_takes_one_frame_and_fits_it_like_a_photo(client, roots, monkeypatch):
+async def test_poster_takes_one_frame_and_fits_it_like_a_photo(client, dirs, monkeypatch):
     from ems.tools import magick
 
-    ro, rw = roots
+    ro, rw = dirs
     (ro / "v.mp4").write_bytes(b"mp4")
     seen = {}
 
@@ -60,10 +61,10 @@ async def test_poster_takes_one_frame_and_fits_it_like_a_photo(client, roots, mo
     assert body["meta"]["producer"].startswith("ffmpeg/")
 
 
-async def test_a_poster_past_the_end_of_the_picture_is_its_first_frame(client, roots, monkeypatch):
+async def test_a_poster_past_the_end_of_the_picture_is_its_first_frame(client, dirs, monkeypatch):
     from ems.tools import magick
 
-    ro, rw = roots
+    ro, rw = dirs
     (ro / "v.mp4").write_bytes(b"mp4")
     asked = []
 
@@ -88,10 +89,10 @@ async def test_a_poster_past_the_end_of_the_picture_is_its_first_frame(client, r
     assert r.json()["result"]["t"] == 0.0
 
 
-async def test_a_blank_poster_gives_way_to_a_later_frame_that_shows_something(client, roots, monkeypatch):
+async def test_a_blank_poster_gives_way_to_a_later_frame_that_shows_something(client, dirs, monkeypatch):
     from ems.tools import magick
 
-    ro, rw = roots
+    ro, rw = dirs
     (ro / "v.mp4").write_bytes(b"mp4")
     asked = []
 
@@ -142,8 +143,8 @@ async def _const(value):
     return value
 
 
-async def test_a_video_with_no_frame_at_all_is_undecodable(client, roots, monkeypatch):
-    ro, rw = roots
+async def test_a_video_with_no_frame_at_all_is_undecodable(client, dirs, monkeypatch):
+    ro, rw = dirs
     (ro / "v.mp4").write_bytes(b"mp4")
     asked = []
 
@@ -161,11 +162,11 @@ async def test_a_video_with_no_frame_at_all_is_undecodable(client, roots, monkey
     assert os.listdir(rw) == []
 
 
-async def test_a_seek_past_the_end_is_no_frame_whatever_ffmpeg_exits(client, roots, monkeypatch, tmp_path):
+async def test_a_seek_past_the_end_is_no_frame_whatever_ffmpeg_exits(client, dirs, monkeypatch, tmp_path):
     from ems.ops.video import NoFrame, extract_poster
     from ems.tools import run as run_tool
 
-    ro, rw = roots
+    ro, rw = dirs
     (ro / "v.mp4").write_bytes(b"mp4")
 
     async def failing_ffmpeg(args, *, timeout, **kw):
@@ -204,13 +205,13 @@ async def test_a_failed_decode_is_the_files_fault_only_when_ffprobe_refuses_it(m
     assert error.code.name == "tool_failed" and not error.permanent
 
 
-async def test_count_spreads_the_frames_over_the_whole_picture(client, roots, monkeypatch, tmp_path):
+async def test_count_spreads_the_frames_over_the_whole_picture(client, dirs, monkeypatch, tmp_path):
     from ems.ops.video import extract_frames
     from ems.streaming import Progress
     from ems.tools import ffprobe
     from ems.tools import run as run_tool
 
-    ro, _ = roots
+    ro, _ = dirs
     (ro / "v.mp4").write_bytes(b"mp4")
     seeks = []
 
@@ -245,13 +246,13 @@ async def test_count_spreads_the_frames_over_the_whole_picture(client, roots, mo
     assert [(s, t) for s, t, _ in seeks] == [(10.0, None), (30.0, None), (50.0, None), (70.0, None)]
 
 
-async def test_frames_are_turned_by_the_callers_angle_alone(client, roots, monkeypatch, tmp_path):
+async def test_frames_are_turned_by_the_callers_angle_alone(client, dirs, monkeypatch, tmp_path):
     from ems.ops.video import SQUARE_PIXELS_FILTER, extract_frames
     from ems.streaming import Progress
     from ems.tools import ffprobe
     from ems.tools import run as run_tool
 
-    ro, _ = roots
+    ro, _ = dirs
     (ro / "v.mp4").write_bytes(b"mp4")
     calls = []
 

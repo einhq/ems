@@ -26,6 +26,7 @@ import shutil
 from fastapi import APIRouter, Request
 from pydantic import Field
 
+from .. import remote
 from ..context import Context
 from ..errors import EmsError, TOOL_FAILED, invalid
 from ..schemas import FileRef, Strict, WithOptions
@@ -104,7 +105,7 @@ async def draw(ctx: Context, path: str, scratch: str, boxes: list[tuple[int, int
 
 
 async def waveform(ctx: Context, req: WaveformRequest, progress: Progress) -> Outcome:
-    path = ctx.roots.input(req.file.path)
+    path = remote.input(req.file.path)
     boxes = [drawing_box(target, req.style.aspect) for target in req.targets]
     async with ctx.admission.slot("tools", interactive=req.options.interactive):
         scratch = ctx.scratch_dir("waveform")

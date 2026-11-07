@@ -2,8 +2,9 @@
 
 A request may carry an `EMS-Files` header naming an SFTP endpoint of its caller's:
 `address=host:port; user=…; secret=…; hostkey=ssh-ed25519 AAAA…`. Every path in that request is
-then the caller's, not a local one. EMS mounts the endpoint read-write with sshfs, once per
-endpoint, and the op runs on local paths for the request's (`Roots` asks `current` first):
+the caller's: EMS has no files of its own. It mounts the endpoint read-write with sshfs, once per
+endpoint, and the op runs on local paths for the request's, which `input`, `output` and
+`output_dir` give it:
 
 - An input (`file.path`) is read through the mount where it lies, so a tool seeks and reads only
   what it needs while it runs, and the page cache keeps what was read for the next op until the
@@ -36,7 +37,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .admission import current_op
-from .errors import EmsError, FILES_UNAVAILABLE, NOT_FOUND, PATH_OUTSIDE_ROOTS, invalid
+from .errors import EmsError, FILES_UNAVAILABLE, NOT_FOUND, PATH_NOT_GRANTED, invalid
 
 HEADER = "ems-files"
 CIPHER = "chacha20-poly1305@openssh.com"
@@ -104,7 +105,7 @@ def _log(message: str) -> None:
 
 def _caller_path(path: str) -> str:
     if not path.startswith("/"):
-        raise EmsError(PATH_OUTSIDE_ROOTS, f"{path}: not an absolute path")
+        raise EmsError(PATH_NOT_GRANTED, f"{path}: not an absolute path")
     return posixpath.normpath(path)
 
 
@@ -250,26 +251,26 @@ class Staging:
         except FileNotFoundError as exc:
             raise EmsError(NOT_FOUND, f"{path}: no such file") from exc
         except PermissionError as exc:
-            raise EmsError(PATH_OUTSIDE_ROOTS, f"{path}: not granted to this request") from exc
+            raise EmsError(PATH_NOT_GRANTED, f"{path}: not granted to this request") from exc
         except OSError as exc:
             raise EmsError(FILES_UNAVAILABLE, f"{path}: {exc}") from exc
 
     def input(self, path: str) -> str:
         local = self.inputs.get(_caller_path(path))
         if local is None:
-            raise EmsError(PATH_OUTSIDE_ROOTS, f"{path}: not an input of this request")
+            raise EmsError(PATH_NOT_GRANTED, f"{path}: not an input of this request")
         return local
 
     def output(self, path: str) -> str:
         local = self.outputs.get(_caller_path(path))
         if local is None:
-            raise EmsError(PATH_OUTSIDE_ROOTS, f"{path}: not an output of this request")
+            raise EmsError(PATH_NOT_GRANTED, f"{path}: not an output of this request")
         return local
 
     def output_dir(self, path: str) -> str:
         local = self.dirs.get(_caller_path(path))
         if local is None:
-            raise EmsError(PATH_OUTSIDE_ROOTS, f"{path}: not an output directory of this request")
+            raise EmsError(PATH_NOT_GRANTED, f"{path}: not an output directory of this request")
         return local
 
     async def send_back(self) -> None:
@@ -291,7 +292,7 @@ class Staging:
             for local, remote in sends:
                 await asyncio.to_thread(shutil.copyfile, local, self.point + remote)
         except PermissionError as exc:
-            raise EmsError(PATH_OUTSIDE_ROOTS, f"{exc.filename}: not granted to this request") from exc
+            raise EmsError(PATH_NOT_GRANTED, f"{exc.filename}: not granted to this request") from exc
         except OSError as exc:
             raise EmsError(FILES_UNAVAILABLE, f"{self.endpoint.name}: sending an output back: {exc}") from exc
         size = sum(os.path.getsize(local) for local, _remote in sends)
@@ -321,5 +322,29 @@ class Staging:
         shutil.rmtree(self.scratch, ignore_errors=True)
 
 
-# The staging of the request the running task serves, if its files are its caller's.
+# The staging of the request the running task serves.
 current: ContextVar[Staging | None] = ContextVar("ems_files_staging", default=None)
+
+
+def _staging(path: str) -> Staging:
+    staged = current.get()
+    if not isinstance(path, str) or not path:
+        raise invalid("a file path is required")
+    if staged is None:
+        raise invalid(f"{path}: a request that names files names their endpoint in {HEADER}")
+    return staged
+
+
+def input(path: str) -> str:  # noqa: A001 - the op's word for it
+    """The local path an op reads an input of the running request's at."""
+    return _staging(path).input(path)
+
+
+def output(path: str) -> str:
+    """The local path an op writes an output of the running request's to; its directory exists."""
+    return _staging(path).output(path)
+
+
+def output_dir(path: str) -> str:
+    """The local directory an op writes an output directory's files into; it exists."""
+    return _staging(path).output_dir(path)

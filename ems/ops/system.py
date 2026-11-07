@@ -316,7 +316,6 @@ def register(router: APIRouter, ctx: Context) -> None:
             "signatures": signatures,
             "api": API_VERSION,
             "ops": [route.path.removeprefix("/v0/").replace("/", ".") for route in router.routes if "POST" in getattr(route, "methods", set())],
-            "roots": ctx.roots.describe(),
             "tools": tools,
             "models": {
                 # What text.embed writes as its producer; a change is a re-embed of every stored

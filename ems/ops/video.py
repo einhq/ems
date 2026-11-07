@@ -12,6 +12,7 @@ from typing import Literal
 from fastapi import APIRouter, Request
 from pydantic import Field
 
+from .. import remote
 from ..context import Context
 from ..errors import EmsError, UNDECODABLE, invalid
 from ..schemas import FileRef, Strict, WithOptions
@@ -143,10 +144,10 @@ async def _frame_from(path: str, out: str, *, start: float, length: float | None
 
 
 async def frames(ctx: Context, req: FramesRequest, progress: Progress) -> Outcome:
-    path = ctx.roots.input(req.file.path)
+    path = remote.input(req.file.path)
     if not req.at and not req.count:
         raise invalid("frames needs `at` (seconds) or `count`")
-    out_dir = ctx.roots.output_dir(req.output.dir)
+    out_dir = remote.output_dir(req.output.dir)
     async with ctx.admission.slot("tools", interactive=req.options.interactive):
         await progress.emit("frames")
         got = await extract_frames(ctx, path, out_dir, at=req.at, count=req.count, strategy=req.strategy, fmt=req.output.format, quality=req.output.quality, max_edge=req.output.max, progress=progress, angle=req.file.angle, mirror=req.file.mirror)
@@ -278,7 +279,7 @@ async def unblank_poster(ctx: Context, path: str, out: str, *, t: float, deinter
 
 
 async def poster(ctx: Context, req: PosterRequest, progress: Progress) -> Outcome:
-    path = ctx.roots.input(req.file.path)
+    path = remote.input(req.file.path)
     async with ctx.admission.slot("tools", interactive=req.options.interactive):
         scratch = ctx.scratch_dir("poster")
         try:
