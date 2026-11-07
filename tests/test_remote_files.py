@@ -1,36 +1,32 @@
 """Requests whose files are their caller's (`EMS-Files`): read and written through an sshfs mount.
 
-The caller is an asyncssh SFTP server on loopback serving a directory of the test's, which EMS
-reaches through a real sshfs mount of it here. The tests that mount need sshfs and /dev/fuse.
+The caller is OpenSSH's sftp-server on loopback, behind what an ems-files endpoint puts in front
+of SFTP: the challenge answered with the secret (plain), or TLS with both certificates pinned.
+EMS reaches it through a real sshfs mount, each connection made by files_connect.py. The tests
+that mount need sshfs, /dev/fuse, socat and sftp-server, and openssl for TLS.
 """
 
-import asyncio
 import base64
+import hashlib
+import hmac
 import os
+import secrets
 import shutil
+import socket
+import subprocess
 import threading
+import time
 
-import asyncssh
 import pytest
 
 from ems.ops import video
 from ems.remote import Mounts, parse_header, request_paths
+from ems.errors import EmsError
 
 DATA = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
-CLIENT_KEY = asyncssh.generate_private_key("ssh-ed25519")
-MOUNTABLE = os.path.exists("/dev/fuse") and shutil.which("sshfs") is not None and shutil.which("fusermount3") is not None
-needs_mount = pytest.mark.skipif(not MOUNTABLE, reason="no sshfs or FUSE here")
-
-
-class OneUser(asyncssh.SSHServer):
-    def begin_auth(self, username):
-        return True
-
-    def public_key_auth_supported(self):
-        return True
-
-    def validate_public_key(self, username, key):
-        return username == "ems" and key.export_public_key() == CLIENT_KEY.export_public_key()
+SFTP_SERVER = next((p for p in ("/usr/lib/openssh/sftp-server", "/usr/libexec/openssh/sftp-server", "/usr/libexec/sftp-server") if os.path.exists(p)), None)
+MOUNTABLE = os.path.exists("/dev/fuse") and all(shutil.which(tool) for tool in ("sshfs", "fusermount3", "socat")) and SFTP_SERVER is not None
+needs_mount = pytest.mark.skipif(not MOUNTABLE, reason="no sshfs, FUSE, socat or sftp-server here")
 
 
 @pytest.fixture
@@ -43,45 +39,100 @@ async def mounting(client, tmp_path):
     await mounts.stop()
 
 
-def key_field(key) -> str:
-    return base64.b64encode(key.export_private_key("openssh")).decode()
+def b64(text: str) -> str:
+    return base64.b64encode(text.encode()).decode()
 
 
-@pytest.fixture
-def caller(tmp_path):
-    """The caller's files, and the `EMS-Files` header that names them.
+def serve_plain(secret: str) -> tuple[int, callable]:
+    """sftp-server for each connection that answers the challenge; the port, and what stops it."""
+    listener = socket.create_server(("127.0.0.1", 0))
+    stopping = threading.Event()
 
-    The server runs on a loop of its own, in its own thread: EMS's look at a mount of it blocks
-    until the server answers, as it would with a caller in another process.
-    """
+    def one(conn: socket.socket) -> None:
+        with conn:
+            nonce = secrets.token_bytes(32)
+            conn.sendall(b"EMS-Files " + nonce.hex().encode() + b"\n")
+            answer = conn.makefile("rb").readline().strip()
+            if hmac.compare_digest(answer, hmac.new(secret.encode(), nonce, hashlib.sha256).hexdigest().encode()):
+                subprocess.run([SFTP_SERVER], stdin=conn.fileno(), stdout=conn.fileno(), check=False)
+
+    def accept() -> None:
+        while not stopping.is_set():
+            try:
+                conn, _ = listener.accept()
+            except OSError:
+                return
+            threading.Thread(target=one, args=(conn,), daemon=True).start()
+
+    threading.Thread(target=accept, daemon=True).start()
+
+    def stop() -> None:
+        stopping.set()
+        listener.close()
+
+    return listener.getsockname()[1], stop
+
+
+def certificate(directory, name: str) -> tuple[str, str]:
+    """A self-signed certificate for `name` and its key, PEM, as an ems-files endpoint makes them."""
+    key, cert = directory / f"{name}.key", directory / f"{name}.crt"
+    subprocess.run(
+        ["openssl", "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes", "-days", "1",
+         "-keyout", str(key), "-out", str(cert), "-subj", f"/CN={name}", "-addext", f"subjectAltName=DNS:{name}"],
+        check=True, capture_output=True,
+    )
+    return cert.read_text(), key.read_text()
+
+
+def serve_tls(directory, client_cert: str) -> tuple[int, str, callable]:
+    """sftp-server for each TLS connection that presents `client_cert`; the port, the server's certificate, and what stops it."""
+    cert, key = certificate(directory, "ems-files")
+    (directory / "server.pem").write_text(cert + key)
+    (directory / "accepted.crt").write_text(client_cert)
+    with socket.create_server(("127.0.0.1", 0)) as probe:
+        port = probe.getsockname()[1]
+    server = subprocess.Popen(
+        ["socat", f"OPENSSL-LISTEN:{port},bind=127.0.0.1,reuseaddr,fork,cert={directory / 'server.pem'},cafile={directory / 'accepted.crt'},verify=1", f"EXEC:{SFTP_SERVER}"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        with socket.socket() as attempt:
+            if attempt.connect_ex(("127.0.0.1", port)) == 0:
+                break
+        time.sleep(0.05)
+    return port, cert, lambda: (server.terminate(), server.wait(10))
+
+
+@pytest.fixture(params=["plain", "tls"])
+def caller(request, tmp_path):
+    """The caller's files, and the `EMS-Files` header that names them, plain and over TLS."""
     files = tmp_path / "caller"
     files.mkdir()
-    key = asyncssh.generate_private_key("ssh-ed25519")
-    loop = asyncio.new_event_loop()
-    started = threading.Event()
-    holder = {}
-
-    async def serve():
-        holder["server"] = await asyncssh.create_server(
-            OneUser, "127.0.0.1", 0, server_host_keys=[key], sftp_factory=asyncssh.SFTPServer,
-            encryption_algs=["chacha20-poly1305@openssh.com"],
-        )
-        started.set()
-
-    thread = threading.Thread(target=lambda: (loop.run_until_complete(serve()), loop.run_forever()), daemon=True)
-    thread.start()
-    started.wait(10)
-    port = holder["server"].sockets[0].getsockname()[1]
-    hostkey = key.export_public_key().decode().strip()
-    yield files, {"EMS-Files": f"address=127.0.0.1:{port}; user=ems; key={key_field(CLIENT_KEY)}; hostkey={hostkey}"}
-    loop.call_soon_threadsafe(holder["server"].close)
-    loop.call_soon_threadsafe(loop.stop)
-    thread.join(10)
+    if request.param == "tls":
+        if not shutil.which("openssl"):
+            pytest.skip("no openssl here to make certificates")
+        credentials = tmp_path / "credentials"
+        credentials.mkdir()
+        client_cert, client_key = certificate(credentials, "ems")
+        port, server_cert, stop = serve_tls(credentials, client_cert)
+        header = f"address=127.0.0.1:{port}; tls={b64(server_cert)}; client={b64(client_cert + client_key)}"
+    else:
+        secret = secrets.token_hex(32)
+        port, stop = serve_plain(secret)
+        header = f"address=127.0.0.1:{port}; secret={secret}"
+    yield files, {"EMS-Files": header}
+    stop()
 
 
-def test_the_header_names_an_endpoint_and_the_body_its_paths():
-    endpoint = parse_header(f"address=ein.example:2224; user=ems; key={base64.b64encode(b'a key file').decode()}; hostkey=ssh-ed25519 AAAA")
-    assert (endpoint.host, endpoint.port, endpoint.user, endpoint.key, endpoint.hostkey) == ("ein.example", 2224, "ems", "a key file", "ssh-ed25519 AAAA")
+def test_the_header_names_an_endpoint_and_how_it_is_reached():
+    plain = parse_header("address=ein.example:2224; secret=5ec7e7")
+    assert (plain.host, plain.port, plain.secret, plain.tls) == ("ein.example", 2224, "5ec7e7", "")
+    tls = parse_header(f"address=[ein.example]:2224; tls={b64('server cert')}; client={b64('client cert and key')}")
+    assert (tls.host, tls.port, tls.secret, tls.tls, tls.client) == ("ein.example", 2224, "", "server cert", "client cert and key")
+    for wrong in ("address=ein.example:2224", "secret=5ec7e7", "address=ein.example:2224; tls=bm90", "address=ein.example:2224; tls=@@; client=@@"):
+        with pytest.raises(EmsError):
+            parse_header(wrong)
     assert request_paths({"file": {"path": "/a"}, "targets": [{"output": {"path": "/b"}}], "output": {"dir": "/c"}}) == (["/a"], ["/b"], ["/c"])
 
 
@@ -150,11 +201,17 @@ async def test_a_missing_input_is_not_found_and_a_bad_header_invalid(client, mou
 
 
 @needs_mount
-async def test_a_caller_that_refuses_the_mount_is_a_failure_to_retry(client, mounting, caller):
+async def test_a_caller_that_refuses_the_mount_is_a_failure_to_retry(client, mounting, caller, tmp_path):
+    """Another secret, or another client certificate than the one the caller accepts."""
     files, headers = caller
     (files / "note.txt").write_text("x")
-    other = key_field(asyncssh.generate_private_key("ssh-ed25519"))
-    wrong = {"EMS-Files": headers["EMS-Files"].replace(key_field(CLIENT_KEY), other)}
+    endpoint = parse_header(headers["EMS-Files"])
+    if endpoint.secret:
+        wrong = {"EMS-Files": f"address=127.0.0.1:{endpoint.port}; secret={secrets.token_hex(32)}"}
+    else:
+        (tmp_path / "other").mkdir()
+        other = "".join(certificate(tmp_path / "other", "ems"))
+        wrong = {"EMS-Files": f"address=127.0.0.1:{endpoint.port}; tls={b64(endpoint.tls)}; client={b64(other)}"}
     r = await client.post("/v0/document/extract", json={"file": {"path": str(files / "note.txt")}}, headers=wrong)
     error = r.json()["error"]
     assert r.status_code == 502 and error["code"] == "files_unavailable" and error["permanent"] is False

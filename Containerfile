@@ -432,9 +432,9 @@ ENV PATH="/opt/ffmpeg/bin:$PATH"
 # The HTTP front. Pinned floors only; the model stack above is what decides compatibility.
 RUN pip install --no-cache-dir "fastapi>=0.115" "uvicorn[standard]>=0.30"
 
-# sshfs, which mounts a caller's files when they are not mounted here (ems/remote.py); the
-# container needs /dev/fuse and SYS_ADMIN for it.
-RUN apt-get update && apt-get install -y --no-install-recommends sshfs openssh-client \
+# sshfs, which mounts a caller's files (ems/remote.py), and socat, which carries each of its
+# connections (ems/files_connect.py); the container needs /dev/fuse and SYS_ADMIN for it.
+RUN apt-get update && apt-get install -y --no-install-recommends sshfs socat \
     && rm -rf /var/lib/apt/lists/*
 
 # Nothing installed above brought back PyAV, the CPU onnxruntime or Debian's FFmpeg libraries.

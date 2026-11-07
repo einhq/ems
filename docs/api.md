@@ -166,14 +166,23 @@ whole picture, the pipelines' side included.
 ### 3.1 The caller's files
 
 EMS has no files of its own. A request that names files names an SFTP endpoint of its caller's in
-an `EMS-Files` header, and every path in it is a path on that endpoint:
+an `EMS-Files` header, and every path in it is a path on that endpoint. The endpoint speaks SFTP
+straight on the connection, with no SSH, reached one of two ways:
 
 ```
-EMS-Files: address=ein.example:2224; user=ems; key=…; hostkey=ssh-ed25519 AAAA…
+EMS-Files: address=ein.example:2224; secret=…
+EMS-Files: address=ein.example:2224; tls=…; client=…
 ```
 
-`key` is the private key `user` signs in with, its OpenSSH file in base64. A request that names
-files without the header is `invalid_request`. EMS mounts the endpoint read-write with sshfs, once
+- **Plain** (`secret`): the endpoint's first line is `EMS-Files <nonce>`, the nonce 32 bytes in
+  hex. EMS answers `HMAC-SHA256(secret, nonce)` in hex on a line of its own, and the SFTP stream
+  follows. Nothing is encrypted: for an endpoint on the same machine or network, where the request
+  to EMS is plain HTTP too.
+- **TLS** (`tls`, `client`): `tls` is the endpoint's certificate, PEM in base64, which EMS pins; it
+  names `ems-files`. `client` is the certificate and private key EMS presents, PEM in base64, the
+  one client certificate the endpoint accepts.
+
+A request that names files without the header is `invalid_request`. EMS mounts the endpoint read-write with sshfs, once
 per endpoint, made on the first request and kept, over up to four connections (each open file uses
 one), and the op runs on local paths for the request's:
 
@@ -189,15 +198,14 @@ one), and the op runs on local paths for the request's:
   extension does not choose the format — the request does — but EMS refuses a mismatch it can see
   (`.avif` asked to hold `mp4`) as `invalid_request`.
 
-EMS connects with SSH using chacha20-poly1305 alone, with `hostkey` pinned, and signs in as `user`
-with `key`. Through the mount it asks for only what the request names: a `stat`
+sshfs reads at most 64 KiB per request. Through the mount EMS asks for only what the request names: a `stat`
 of each input and of the directories above it, reads of each input, a `mkdir` of an output
 directory, and writes of each output. It never lists a directory, and it never removes or renames
 anything there. A caller's endpoint should write an output in place: a copy through sshfs has
 every byte at the caller once it returns, while its SFTP close may come later.
 
 The container needs `/dev/fuse` and the `SYS_ADMIN` capability to mount. A host without them, an
-endpoint EMS cannot reach or sign in to, and a mount that fails during the request make it
+endpoint EMS cannot reach or that refuses its answer or certificate, and a mount that fails during the request make it
 `502 files_unavailable` (not permanent): the caller tries again later. An input the endpoint does
 not have is `404 not_found`, and a path it refuses is `403 path_not_granted` (permanent). A host on
 another machine than the caller is faster with a larger readahead for its FUSE mounts than the
