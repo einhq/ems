@@ -18,7 +18,7 @@ FFMPEG_BUILD    ?= autobuild-2026-08-31-13-27
 FFMPEG_ASSET    ?= ffmpeg-n9.0.1-11-ge47273f4d9-linux64-lgpl-9.0
 
 # Run arguments. EMS has no files of its own: it mounts each request's from its caller
-# (docs/api.md, 3.1a), for which the container has /dev/fuse and SYS_ADMIN.
+# (docs/api.md, 3.1), for which the container has /dev/fuse and SYS_ADMIN.
 EMS_PORT        ?= 8181
 EMS_KEY         ?= let-me-in
 EMS_MEMORY      ?= 16g

@@ -6,7 +6,7 @@
 # Build:
 #   podman build -t ems -f Containerfile .
 #
-# Run (GPU, mounting its callers' files with sshfs, docs/api.md 3.1a):
+# Run (GPU, mounting its callers' files with sshfs, docs/api.md 3.1):
 #   podman run --rm --device nvidia.com/gpu=all --device /dev/fuse --cap-add SYS_ADMIN --network=host \
 #     -e EMS_KEY=let-me-in ems
 #
