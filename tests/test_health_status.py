@@ -208,3 +208,17 @@ async def test_a_request_names_the_family_it_is_using(client, fake_worker):
     finally:
         current_request.reset(token)
     assert entry["family"] == "text-embed"
+
+
+def test_meminfo_gives_the_machines_total_and_available_memory():
+    from ems.ops.system import parse_meminfo
+
+    text = "MemTotal:       32768000 kB\nMemFree:         1000000 kB\nMemAvailable:   16384000 kB\nBuffers: 1 kB\n"
+    assert parse_meminfo(text) == {"total_mb": 32000, "available_mb": 16000}
+    assert parse_meminfo("MemFree: 1 kB\n") is None
+
+
+async def test_health_says_the_machines_memory(client, fake_worker):
+    body = (await client.get("/v0/health")).json()
+    # The test host has a /proc/meminfo; its numbers are its own, so only their shape is checked.
+    assert body["memory"]["total_mb"] > 0 and body["memory"]["available_mb"] <= body["memory"]["total_mb"]

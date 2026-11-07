@@ -879,6 +879,7 @@ Liveness and what is loaded:
   "requests": [ { "op": "speech.transcribe", "caller": "core-home", "lane": "models", "interactive": false,
                   "queued": 1780003590.0, "started": 1780003595.0, "family": "whisper" } ],
   "callers": { "core-home": { "weight": 1, "used_seconds": 51234.5, "running": 1, "waiting": 0 } },
+  "memory": { "total_mb": 31890, "available_mb": 14210, "used_mb": 9120, "limit_mb": 24576 },
   "build": { "version": "0.1.0", "commit": "e737f1d", "date": "2026-10-04T06:51:28+02:00" },
   "warnings": [ "no keys configured: authentication is off" ] }
 ```
@@ -898,7 +899,9 @@ behind it — resident and working are different things. Absent while the worker
 `caller` it is from, its `lane`, whether it is `interactive`, when it `queued` and, once admitted,
 when it `started`. `callers` names each caller configured or seen since EMS started, with its
 `weight`, the slot-seconds it has `used_seconds` (running requests included), and how many of its
-requests are `running` and `waiting` now.
+requests are `running` and `waiting` now. `memory` is the machine EMS runs on: its `total_mb` and
+`available_mb` as `/proc/meminfo` says (a container reads the host's there), and what EMS's own
+container holds of it, `used_mb`, against its cap, `limit_mb` (cgroup v2; absent where there is none).
 `build` (_3.2_) is the package version and, when the image was built from a git checkout, its
 `commit` and commit `date`.
 

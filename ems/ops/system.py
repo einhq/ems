@@ -135,6 +135,47 @@ async def _gpu(workers: dict[str, int | None]) -> dict:
     return gpu
 
 
+def parse_meminfo(text: str) -> dict | None:
+    """The machine's total and available memory from `/proc/meminfo`, in MB: a container reads the
+    host's there, which is what the dashboard means by the media service's machine."""
+    values: dict[str, int] = {}
+    for line in text.splitlines():
+        name, _, rest = line.partition(":")
+        fields = rest.split()
+        if name in ("MemTotal", "MemAvailable") and fields and fields[0].isdigit():
+            values[name] = int(fields[0])  # kB
+    if "MemTotal" not in values:
+        return None
+    memory = {"total_mb": round(values["MemTotal"] / 1024)}
+    if "MemAvailable" in values:
+        memory["available_mb"] = round(values["MemAvailable"] / 1024)
+    return memory
+
+
+def _read(path: str) -> str | None:
+    try:
+        with open(path, encoding="ascii") as handle:
+            return handle.read()
+    except OSError:
+        return None
+
+
+def _memory() -> dict | None:
+    """The machine's memory, and what EMS's own container uses of it and may (cgroup v2): absent
+    fields where the host does not say, the whole answer absent where `/proc/meminfo` is unreadable."""
+    meminfo = _read("/proc/meminfo")
+    memory = parse_meminfo(meminfo) if meminfo is not None else None
+    if memory is None:
+        return None
+    current = (_read("/sys/fs/cgroup/memory.current") or "").strip()
+    if current.isdigit():
+        memory["used_mb"] = round(int(current) / 1024 / 1024)
+    limit = (_read("/sys/fs/cgroup/memory.max") or "").strip()
+    if limit.isdigit():
+        memory["limit_mb"] = round(int(limit) / 1024 / 1024)
+    return memory
+
+
 def _models_from_worker(health: dict | None) -> dict:
     """The worker reports `loaded` as `family[:device…]` keys; group them by family."""
     models: dict[str, dict] = {}
@@ -294,6 +335,9 @@ def register(router: APIRouter, ctx: Context) -> None:
                 # Every model op on the card fails until the worker has replaced itself.
                 degraded.append({"what": "gpu", "reason": gpu_failure.get("error", "cuda context lost"), "since": gpu_failure.get("since")})
             body["degraded"] = degraded
+        memory = _memory()
+        if memory is not None:
+            body["memory"] = memory
         body["audio_cache"] = ctx.audio.snapshot()
         if ctx.warnings:
             body["warnings"] = list(ctx.warnings)
