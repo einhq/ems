@@ -271,6 +271,21 @@ def _worker_state(worker: Worker, reply: dict | None) -> tuple[dict | None, dict
     return reply, state
 
 
+def all_ops(router: APIRouter) -> list[str]:
+    """Every op the router has, served or not: the POST routes, named as `capabilities` names them."""
+    return [route.path.removeprefix("/v0/").replace("/", ".") for route in router.routes if "POST" in getattr(route, "methods", set())]
+
+
+def _gpu_summary(gpu: dict) -> dict:
+    """The card as `capabilities` describes it: whether there is one, and what it is."""
+    summary: dict = {"present": bool(gpu.get("present"))}
+    if gpu.get("name"):
+        summary["name"] = gpu["name"]
+    if gpu.get("mem_total_mb"):
+        summary["memory_mb"] = gpu["mem_total_mb"]
+    return summary
+
+
 def register(router: APIRouter, ctx: Context) -> None:
     @router.get("/health")
     async def health():
@@ -360,7 +375,10 @@ def register(router: APIRouter, ctx: Context) -> None:
         return {
             "signatures": signatures,
             "api": API_VERSION,
-            "ops": [route.path.removeprefix("/v0/").replace("/", ".") for route in router.routes if "POST" in getattr(route, "methods", set())],
+            "name": ctx.settings.name,
+            "build": BUILD,
+            "gpu": _gpu_summary(await _gpu({})),
+            "ops": [op for op in all_ops(router) if ctx.settings.serves(op)],
             "tools": tools,
             "models": {
                 # What text.embed writes as its producer; a change is a re-embed of every stored

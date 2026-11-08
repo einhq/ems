@@ -23,6 +23,8 @@ UNAUTHORIZED = Code("unauthorized", 401, None)
 INVALID_REQUEST = Code("invalid_request", 400, True)
 PATH_NOT_GRANTED = Code("path_not_granted", 403, True)
 NOT_FOUND = Code("not_found", 404, True)
+# The op is one this instance was not set up to serve (EMS_OPS): about the instance, not the file.
+OP_NOT_SERVED = Code("op_not_served", 404, True)
 UNSUPPORTED = Code("unsupported", 415, True)
 UNDECODABLE = Code("undecodable", 422, True)
 REFUSED = Code("refused", 422, True)

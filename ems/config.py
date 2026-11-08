@@ -8,9 +8,10 @@ spawned (see worker.py), so an operator sets one namespace.
 
 from __future__ import annotations
 
+import fnmatch
 import os
+import socket
 from dataclasses import dataclass
-
 
 
 @dataclass(frozen=True)
@@ -96,6 +97,16 @@ class Settings:
     # card another service shares (the assistant's llm), set to the share that service leaves EMS:
     # neither then loads into the other's part, whichever started first (ein/core#515).
     card_share_mb: int = 0
+    # What this instance calls itself in `capabilities`, for a caller that uses several.
+    name: str = ""
+    # The ops this instance serves, as globs over their names (`media.*`); any other answers
+    # `op_not_served`. Nothing is left out by what the host lacks: a model without a card runs on
+    # the CPU, slower, and which of those are too slow is the operator's choice.
+    ops: tuple[str, ...] = ("*",)
+
+    def serves(self, op: str) -> bool:
+        """Whether `op` (`vision.embed`) is one of the ops this instance serves."""
+        return any(fnmatch.fnmatchcase(op, glob) for glob in self.ops)
 
     @staticmethod
     def from_env(env: dict[str, str] | None = None) -> "Settings":
@@ -151,6 +162,8 @@ class Settings:
             card_context_mb=integer("EMS_CARD_CONTEXT_MB", 400),
             card_margin_mb=integer("EMS_CARD_MARGIN_MB", 1024),
             card_share_mb=integer("EMS_CARD_SHARE_MB", 0),
+            name=e.get("EMS_NAME", "").strip() or socket.gethostname(),
+            ops=tuple(glob.strip() for glob in e.get("EMS_OPS", "*").split(",") if glob.strip()) or ("*",),
         )
 
 

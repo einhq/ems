@@ -1,5 +1,7 @@
 """Envelopes, auth, validation and the system endpoints, through the ASGI app."""
 
+import dataclasses
+
 
 async def test_unauthorized_without_key(client):
     r = await client.get("/v0/health", headers={"Authorization": ""})
@@ -16,7 +18,7 @@ async def test_capabilities_lists_ops(client, tmp_path, monkeypatch):
     assert r.status_code == 200
     assert "faces.detect" in body["ops"] and "media.probe" in body["ops"]
     assert "roots" not in body
-    assert body["api"] == "0.3.2"
+    assert body["api"] == "0.3.3"
     assert "video.storyboard" in body["ops"] and "video.shots" in body["ops"]
     assert "ocr.read" in body["ops"] and body["models"]["ocr"] == "PP-OCRv6_medium"
     assert "vision.describe" not in body["ops"] and "text.generate" not in body["ops"] and "vlm" not in body["models"]
@@ -176,3 +178,58 @@ async def test_health_without_nvidia_smi_reports_presence_alone(client, monkeypa
     monkeypatch.setattr(system, "which", lambda name: None)
     r = await client.get("/v0/health")
     assert set(r.json()["gpu"]) == {"present"}
+
+
+async def test_capabilities_say_which_instance_this_is(client):
+    from ems.ops import system
+
+    body = (await client.get("/v0/capabilities")).json()
+    assert body["name"] == client.app.state.settings.name and body["name"]
+    assert body["build"] == system.BUILD
+    assert set(body["gpu"]) <= {"present", "name", "memory_mb"} and isinstance(body["gpu"]["present"], bool)
+
+
+def test_the_gpu_summary_names_the_card_and_its_memory():
+    from ems.ops import system
+
+    assert system._gpu_summary({"present": False}) == {"present": False}
+    card = {"present": True, "name": "NVIDIA GeForce RTX 5060 Ti", "mem_total_mb": 16311, "util_pct": 3}
+    assert system._gpu_summary(card) == {"present": True, "name": "NVIDIA GeForce RTX 5060 Ti", "memory_mb": 16311}
+
+
+def test_ems_ops_is_a_list_of_globs_and_everything_by_default():
+    from ems.config import Settings
+
+    assert Settings.from_env({}).ops == ("*",) and Settings.from_env({}).serves("speech.transcribe")
+    assert Settings.from_env({"EMS_NAME": " laptop "}).name == "laptop"
+    settings = Settings.from_env({"EMS_OPS": "media.*, vision.embed,"})
+    assert settings.ops == ("media.*", "vision.embed")
+    assert settings.serves("media.probe") and settings.serves("vision.embed")
+    assert not settings.serves("vision.embed_text") and not settings.serves("speech.transcribe")
+
+
+async def test_an_op_outside_ems_ops_is_not_served(client):
+    client.app.state.settings = dataclasses.replace(client.app.state.settings, ops=("media.*", "text.embed"))
+    client.app.state.ctx.settings = client.app.state.settings
+    r = await client.post("/v0/faces/detect", json={"file": {"path": "/x"}})
+    assert r.status_code == 404
+    assert r.json()["error"]["code"] == "op_not_served" and r.json()["error"]["permanent"] is True
+    # Before the body is looked at: a request that would be invalid is still refused as not served.
+    r = await client.post("/v0/faces/detect", json={"bogus": 1})
+    assert r.json()["error"]["code"] == "op_not_served"
+    ops = (await client.get("/v0/capabilities")).json()["ops"]
+    assert "media.probe" in ops and "text.embed" in ops and "faces.detect" not in ops
+    assert (await client.get("/v0/health")).status_code == 200
+    # The key is checked first.
+    r = await client.post("/v0/faces/detect", json={}, headers={"Authorization": ""})
+    assert r.status_code == 401
+
+
+async def test_a_glob_that_matches_no_op_is_a_warning(dirs, fake_worker, tmp_path):
+    from ems.app import create_app
+    from ems.config import Settings
+    from ems.worker import Worker
+
+    settings = Settings.from_env({"EMS_KEY": "k", "EMS_SCRATCH": str(tmp_path / "s"), "EMS_OPS": "media.*,vision.embedd"})
+    app = create_app(settings, worker=Worker("/nonexistent", fake_worker.socket_path, log=lambda m: None), start_worker=False)
+    assert app.state.ctx.warnings == ["EMS_OPS names vision.embedd, which matches no op"]

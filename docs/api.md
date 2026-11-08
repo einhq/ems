@@ -951,7 +951,9 @@ not as an idle one.
 What this EMS can do, for a caller to check before it relies on it:
 
 ```json
-{ "api": "3.3.0", "ops": [ "media.probe", "faces.detect", … ],
+{ "api": "0.3.3", "name": "fry", "build": { "version": "0.1.0", "commit": "fb6a7d9", "date": "2026-11-07T18:02:11+01:00" },
+  "gpu": { "present": true, "name": "NVIDIA GeForce RTX 5060 Ti", "memory_mb": 16311 },
+  "ops": [ "media.probe", "faces.detect", … ],
   "tools": { "exiftool": "13.10", "ffprobe": "9.0.1", "ffmpeg": "9.0.1", "magick": "7.1.1" },
   "models": { "text_embed": "bge-m3", "whisper": "large-v3", "faces": "retinaface-r34+transface",
               "image_embed": "ViT-SO400M-16-SigLIP2-384__webli", "ocr": "PP-OCRv6_medium+multicentury-ppocrv6-medium+multicentury-htr-model+trocr-large-handwritten" },
@@ -959,6 +961,12 @@ What this EMS can do, for a caller to check before it relies on it:
   "encode": { "video_encoder": "av1_nvenc", "cpu_budget": "4000/170/64" },
   "signatures": { "transcribe": "large-v3/…" } }
 ```
+
+`name` is what this instance calls itself (`EMS_NAME`, the hostname by default), `build` the
+same as health's, and `gpu` whether a card is visible and, when `nvidia-smi` answers, which and how
+much memory it has. `ops` lists the ops this instance serves (`EMS_OPS`, _6_), not every op EMS
+has: another answers `op_not_served`. A caller using several instances sends each one only the ops
+it lists.
 
 `encode.video_encoder` is what `video.transcode` will run first, and `encode.cpu_budget` the
 signature of the CPU-decode budget a refusal is measured against — a caller that records
@@ -979,6 +987,7 @@ settings; it is absent while the model worker is down.
 | `invalid_request`   | 400  | yes       | Malformed body, unknown op, contradictory parameters                                                           |
 | `path_not_granted`  | 403  | yes       | Input or output path the caller's endpoint does not grant, or not one the request names                        |
 | `not_found`         | 404  | yes       | Input path does not exist                                                                                      |
+| `op_not_served`     | 404  | yes       | This instance does not serve the op (`EMS_OPS`); about the instance, not the file: another may serve it        |
 | `unsupported`       | 415  | yes       | EMS has no tool or model for this format or kind                                                               |
 | `undecodable`       | 422  | yes       | The bytes cannot be opened by any decoder (see `media.probe`)                                                  |
 | `refused`           | 422  | yes       | EMS will not do this work within its own budget (a CPU encode too large)                                       |
@@ -992,7 +1001,10 @@ settings; it is absent while the model worker is down.
 ## 6. Configuration (operator)
 
 Environment only. `EMS_KEYS_FILE` (a key a line, with its caller's name and weight, _2.3_) or `EMS_KEY`, `EMS_PORT`, `EMS_HOST`,
-`EMS_SCRATCH`,
+`EMS_SCRATCH`, `EMS_NAME` (what `capabilities` calls this instance; the hostname), `EMS_OPS` (the ops
+this instance serves, a comma list of globs over their names such as
+`media.*,image.*,video.frames,vision.embed`; `*`, every op, by default — a glob that matches no op is
+a warning in health),
 the admission limits (`EMS_LIMIT_MODELS`, `EMS_LIMIT_TOOLS`, `EMS_LIMIT_ENCODES`,
 `EMS_QUEUE_DEPTH`, `EMS_INTERACTIVE_RESERVE`, `EMS_AFFINITY_WAIT`), `EMS_EXIFTOOL_WORKERS`, `EMS_EXPECT_GPU` (`1`: a card
 is expected, and health lists `what: "gpu"` under `degraded` when none is visible), `EMS_CARD_BUDGET_MB` (the most of the card the models

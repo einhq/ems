@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fnmatch
 import os
 import sys
 from contextlib import asynccontextmanager
@@ -16,7 +17,7 @@ from .auth import require_key
 from .card import CardArbiter, CardBudget
 from .config import Settings
 from .context import Context
-from .errors import INTERNAL, INVALID_REQUEST, EmsError
+from .errors import INTERNAL, INVALID_REQUEST, OP_NOT_SERVED, EmsError
 from .ops import audio, document, faces, fingerprint, image, media, ocr, shots, speech, storyboard, system, text, transcode, video, vision
 from .remote import Mounts
 from .tools.audio import AudioCache
@@ -63,6 +64,13 @@ def caller_of(scope) -> str:
             caller = keys.get(token.strip()) if scheme.lower() == "bearer" else None
             return caller.name if caller is not None else "unknown"
     return "unknown"
+
+
+def require_served(request: Request) -> None:
+    """Refuses an op outside EMS_OPS before its body is read, so a caller learns it from any request."""
+    op = request.url.path.removeprefix("/v0/").replace("/", ".")
+    if request.method == "POST" and not request.app.state.settings.serves(op):
+        raise EmsError(OP_NOT_SERVED, f"{op} is not served by this instance ({request.app.state.settings.name})")
 
 
 def make_workers(settings: Settings, env: dict[str, str] | None = None) -> tuple[Worker, Worker | None]:
@@ -204,11 +212,15 @@ def create_app(
 
     app.add_middleware(NameTheOp)
 
-    router = APIRouter(prefix="/v0", dependencies=[Depends(require_key)])
+    router = APIRouter(prefix="/v0", dependencies=[Depends(require_key), Depends(require_served)])
     for module in OP_MODULES:
         module.register(router, ctx)
     system.register(router, ctx)
     app.include_router(router)
+    known = system.all_ops(router)
+    for glob in settings.ops:
+        if not any(fnmatch.fnmatchcase(op, glob) for op in known):
+            ctx.warnings.append(f"EMS_OPS names {glob}, which matches no op")
 
     @app.exception_handler(EmsError)
     async def ems_error(_request: Request, exc: EmsError):
