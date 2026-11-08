@@ -82,7 +82,34 @@ async def test_capabilities_carries_the_transcribe_signature(client, fake_worker
     assert r.json()["signatures"] == {"transcribe": "whisper-large-v3:vad=0.2/400/500,nospeech=0.6,lang=auto,words=0"}
     await fake_worker.stop()
     r = await client.get("/v0/capabilities")
+    assert r.json()["signatures"] == {"transcribe": "whisper-large-v3:vad=0.2/400/500,nospeech=0.6,lang=auto,words=0"}
+
+
+async def test_capabilities_leaves_the_signature_out_until_the_worker_has_given_one(client, fake_worker):
+    await fake_worker.stop()
+    r = await client.get("/v0/capabilities")
     assert r.json()["signatures"] == {}
+
+
+async def test_capabilities_does_not_wait_for_a_loading_worker(client, fake_worker, monkeypatch):
+    import asyncio
+    import time
+
+    from ems.ops import system
+
+    monkeypatch.setattr(system, "HEALTH_WAIT_SECONDS", 0.2)
+    fake_worker.on("transcribe_signature", lambda req: {"signature": "first"})
+    assert (await client.get("/v0/capabilities")).json()["signatures"] == {"transcribe": "first"}
+
+    async def loading(req):
+        await asyncio.sleep(5)
+        return {"signature": "second"}
+
+    fake_worker.on("transcribe_signature", loading)
+    started = time.monotonic()
+    r = await client.get("/v0/capabilities")
+    assert time.monotonic() - started < 2
+    assert r.json()["signatures"] == {"transcribe": "first"}
 
 
 def test_parse_smi_reads_the_first_card_and_refuses_a_card_that_does_not_answer():

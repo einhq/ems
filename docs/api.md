@@ -977,7 +977,9 @@ on a host with a card, `on=cpu:int8` on one without; `EMS_WHISPER_CARD_COMPUTE`,
 `EMS_WHISPER_CPU_COMPUTE`). A host decodes in that one place only — a card short of room makes the
 request wait (`model_unavailable`) rather than move it to the CPU — so a transcript never depends
 on what else was on the card. A caller holding old transcripts can tell which were made with other
-settings; it is absent while the model worker is down.
+settings. The worker is given as long as health gives it, 2 s; one that is down or still loading
+its models is represented by the last signature it gave, so the field is absent only until the
+worker has answered once.
 
 ## 5. Error codes
 
