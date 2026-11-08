@@ -110,8 +110,8 @@ def caller(request, tmp_path):
     files = tmp_path / "caller"
     files.mkdir()
     if request.param == "tls":
-        if not shutil.which("openssl"):
-            pytest.skip("no openssl here to make certificates")
+        if not (shutil.which("openssl") and shutil.which("socat") and SFTP_SERVER):
+            pytest.skip("no openssl, socat or sftp-server here to serve files over TLS")
         credentials = tmp_path / "credentials"
         credentials.mkdir()
         client_cert, client_key = certificate(credentials, "ems")
