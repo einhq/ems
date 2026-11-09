@@ -880,6 +880,7 @@ Liveness and what is loaded:
                   "queued": 1780003590.0, "started": 1780003595.0, "family": "whisper" } ],
   "callers": { "core-home": { "weight": 1, "used_seconds": 51234.5, "running": 1, "waiting": 0 } },
   "memory": { "total_mb": 31890, "available_mb": 14210, "used_mb": 9120, "limit_mb": 24576 },
+  "cpu": { "busy_ticks": 81234567, "total_ticks": 412345678, "cores": 6, "load1": 3.12 },
   "build": { "version": "0.1.0", "commit": "e737f1d", "date": "2026-10-04T06:51:28+02:00" },
   "warnings": [ "no keys configured: authentication is off" ] }
 ```
@@ -902,6 +903,9 @@ when it `started`. `callers` names each caller configured or seen since EMS star
 requests are `running` and `waiting` now. `memory` is the machine EMS runs on: its `total_mb` and
 `available_mb` as `/proc/meminfo` says (a container reads the host's there), and what EMS's own
 container holds of it, `used_mb`, against its cap, `limit_mb` (cgroup v2; absent where there is none).
+`cpu` (_0.3.4_) is the same machine's processors: `busy_ticks` and `total_ticks`, its CPU time over
+all cores since it started as `/proc/stat` counts it, which gives the share busy between two
+answers; its `cores`; and `load1`, its 1-minute load. Absent where `/proc/stat` is unreadable.
 `build` (_3.2_) is the package version and, when the image was built from a git checkout, its
 `commit` and commit `date`.
 
@@ -951,7 +955,7 @@ not as an idle one.
 What this EMS can do, for a caller to check before it relies on it:
 
 ```json
-{ "api": "0.3.3", "name": "fry", "build": { "version": "0.1.0", "commit": "fb6a7d9", "date": "2026-11-07T18:02:11+01:00" },
+{ "api": "0.3.4", "name": "fry", "build": { "version": "0.1.0", "commit": "fb6a7d9", "date": "2026-11-07T18:02:11+01:00" },
   "gpu": { "present": true, "name": "NVIDIA GeForce RTX 5060 Ti", "memory_mb": 16311 },
   "ops": [ "media.probe", "faces.detect", … ],
   "tools": { "exiftool": "13.10", "ffprobe": "9.0.1", "ffmpeg": "9.0.1", "magick": "7.1.1" },

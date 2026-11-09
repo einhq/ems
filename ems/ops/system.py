@@ -175,6 +175,37 @@ def _memory() -> dict | None:
     return memory
 
 
+def parse_proc_stat(text: str) -> dict | None:
+    """The machine's CPU time over all cores from `/proc/stat`'s `cpu` line, in clock ticks: busy, and
+    busy plus idle. Idle and iowait are the time no task ran; guest time is inside user and nice."""
+    for line in text.splitlines():
+        fields = line.split()
+        if fields[:1] != ["cpu"]:
+            continue
+        ticks = fields[1:9]
+        if len(ticks) < 5 or not all(tick.isdigit() for tick in ticks):
+            return None
+        values = [int(tick) for tick in ticks]
+        total = sum(values)
+        return {"busy_ticks": total - values[3] - values[4], "total_ticks": total}
+    return None
+
+
+def _cpu() -> dict | None:
+    """The machine's CPU: its cumulative ticks (a share busy needs two readings, which the caller
+    has), its cores and its 1-minute load. Absent where `/proc/stat` is unreadable."""
+    stat = _read("/proc/stat")
+    cpu = parse_proc_stat(stat) if stat is not None else None
+    if cpu is None:
+        return None
+    cpu["cores"] = os.cpu_count() or 1
+    try:
+        cpu["load1"] = round(os.getloadavg()[0], 2)
+    except OSError:
+        pass
+    return cpu
+
+
 def _models_from_worker(health: dict | None) -> dict:
     """The worker reports `loaded` as `family[:device…]` keys; group them by family."""
     models: dict[str, dict] = {}
@@ -352,6 +383,9 @@ def register(router: APIRouter, ctx: Context) -> None:
         memory = _memory()
         if memory is not None:
             body["memory"] = memory
+        cpu = _cpu()
+        if cpu is not None:
+            body["cpu"] = cpu
         body["audio_cache"] = ctx.audio.snapshot()
         if ctx.warnings:
             body["warnings"] = list(ctx.warnings)

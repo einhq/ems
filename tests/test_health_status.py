@@ -218,6 +218,21 @@ def test_meminfo_gives_the_machines_total_and_available_memory():
     assert parse_meminfo("MemFree: 1 kB\n") is None
 
 
+def test_proc_stat_gives_the_machines_busy_and_total_ticks():
+    from ems.ops.system import parse_proc_stat
+
+    text = "cpu  100 5 50 800 20 3 2 0 0 0\ncpu0 50 2 25 400 10 1 1 0 0 0\n"
+    assert parse_proc_stat(text) == {"busy_ticks": 160, "total_ticks": 980}
+    assert parse_proc_stat("intr 1 2 3\n") is None
+
+
+async def test_health_says_the_machines_cpu(client, fake_worker):
+    body = (await client.get("/v0/health")).json()
+    # The test host's own counters, so only their shape is checked.
+    cpu = body["cpu"]
+    assert 0 <= cpu["busy_ticks"] <= cpu["total_ticks"] and cpu["cores"] >= 1
+
+
 async def test_health_says_the_machines_memory(client, fake_worker):
     body = (await client.get("/v0/health")).json()
     # The test host has a /proc/meminfo; its numbers are its own, so only their shape is checked.
