@@ -43,6 +43,9 @@ class Settings:
     limit_encodes: int
     queue_depth: int
     interactive_reserve: int
+    # The most live streams read at once (`watches`): each holds a decode and asks for a face
+    # detection a few times a second while there is motion.
+    watches: int
     # How long a caller's oldest model request may wait while its requests for a family already
     # running go first.
     affinity_wait: int
@@ -136,6 +139,7 @@ class Settings:
             limit_encodes=integer("EMS_LIMIT_ENCODES", 2),
             queue_depth=integer("EMS_QUEUE_DEPTH", 64),
             interactive_reserve=integer("EMS_INTERACTIVE_RESERVE", 1),
+            watches=integer("EMS_WATCHES", 4),
             affinity_wait=integer("EMS_AFFINITY_WAIT", 300),
             expect_gpu=e.get("EMS_EXPECT_GPU", "") == "1",
             exiftool_workers=integer("EMS_EXIFTOOL_WORKERS", 2),

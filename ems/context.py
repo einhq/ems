@@ -13,6 +13,7 @@ from .config import Settings
 from .remote import Mounts
 from .tools.audio import AudioCache
 from .tools.exiftool import ExifTool
+from .watches import Watches
 from .worker import Worker
 
 
@@ -31,6 +32,8 @@ class Context:
     card: CardArbiter | None = None
     # The sshfs mounts of the callers whose requests name their files (ems/remote.py).
     files: Mounts | None = None
+    # The live streams read for their faces (ems/watches.py); set once the app is made.
+    watches: Watches | None = None
 
     def for_queries(self, family: str) -> Worker:
         """Where a search query for `family` is embedded: the card worker while it holds the family

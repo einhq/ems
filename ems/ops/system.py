@@ -430,6 +430,7 @@ def register(router: APIRouter, ctx: Context) -> None:
                 "encodes": ctx.settings.limit_encodes,
                 "queue_depth": ctx.settings.queue_depth,
                 "interactive_reserve": ctx.settings.interactive_reserve,
+                "watches": ctx.settings.watches,
             },
             # What decides a transcode's fate on this box: the encoder that will run and the
             # CPU-decode budget a refusal is measured against. A caller records the budget's

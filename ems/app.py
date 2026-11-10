@@ -18,14 +18,15 @@ from .card import CardArbiter, CardBudget
 from .config import Settings
 from .context import Context
 from .errors import INTERNAL, INVALID_REQUEST, OP_NOT_SERVED, EmsError
-from .ops import audio, document, faces, fingerprint, image, media, ocr, shots, speech, storyboard, system, text, transcode, video, vision
+from .ops import audio, document, faces, fingerprint, image, media, ocr, shots, speech, storyboard, system, text, transcode, video, vision, watches
 from .remote import Mounts
 from .tools.audio import AudioCache
 from .tools.exiftool import ExifTool
 from .tools.run import which
+from .watches import Watches, ffmpeg_crop, ffmpeg_frames
 from .worker import QUERY_FAMILIES, Worker
 
-OP_MODULES = (media, image, video, storyboard, shots, audio, transcode, fingerprint, document, ocr, faces, speech, vision, text)
+OP_MODULES = (media, image, video, storyboard, shots, audio, transcode, fingerprint, document, ocr, faces, speech, vision, text, watches)
 
 
 def log(message: str) -> None:
@@ -172,6 +173,7 @@ def create_app(
         audio=AudioCache(settings.scratch, ttl_seconds=settings.audio_cache_seconds, budget_mb=settings.audio_cache_mb, timeout=settings.tool_stall_seconds),
         files=Mounts(),
     )
+    ctx.watches = Watches(settings.watches, source=ffmpeg_frames, find=watches.frame_finder(ctx), crop=ffmpeg_crop, log=log)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -196,6 +198,7 @@ def create_app(
         try:
             yield
         finally:
+            await ctx.watches.stop()
             await ctx.card.stop()
             if start_worker:
                 if query_worker is not None:

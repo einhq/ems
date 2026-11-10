@@ -955,13 +955,13 @@ not as an idle one.
 What this EMS can do, for a caller to check before it relies on it:
 
 ```json
-{ "api": "0.3.4", "name": "fry", "build": { "version": "0.1.0", "commit": "fb6a7d9", "date": "2026-11-07T18:02:11+01:00" },
+{ "api": "0.3.5", "name": "fry", "build": { "version": "0.1.0", "commit": "fb6a7d9", "date": "2026-11-07T18:02:11+01:00" },
   "gpu": { "present": true, "name": "NVIDIA GeForce RTX 5060 Ti", "memory_mb": 16311 },
   "ops": [ "media.probe", "faces.detect", … ],
   "tools": { "exiftool": "13.10", "ffprobe": "9.0.1", "ffmpeg": "9.0.1", "magick": "7.1.1" },
   "models": { "text_embed": "bge-m3", "whisper": "large-v3", "faces": "retinaface-r34+transface",
               "image_embed": "ViT-SO400M-16-SigLIP2-384__webli", "ocr": "PP-OCRv6_medium+multicentury-ppocrv6-medium+multicentury-htr-model+trocr-large-handwritten" },
-  "limits": { "models": 8, "tools": 6, "encodes": 2, "queue_depth": 64, "interactive_reserve": 1 },
+  "limits": { "models": 8, "tools": 6, "encodes": 2, "queue_depth": 64, "interactive_reserve": 1, "watches": 4 },
   "encode": { "video_encoder": "av1_nvenc", "cpu_budget": "4000/170/64" },
   "signatures": { "transcribe": "large-v3/…" } }
 ```
@@ -984,6 +984,86 @@ on what else was on the card. A caller holding old transcripts can tell which we
 settings. The worker is given as long as health gives it, 2 s; one that is down or still loading
 its models is represented by the last signature it gave, so the field is absent only until the
 worker has answered once.
+
+### 4.24 `watches` — a live stream read for faces _(implemented, 0.3.5)_
+
+A watch reads a live stream for as long as its caller wants, and tells what it sees there as
+events: the faces, motion, and the source going and coming back. EMS knows streams, not cameras:
+the caller names the stream and the id the watch has, and what a face is (a person, a camera's
+device) is the caller's. As everywhere, EMS answers vectors, never names. Nothing of a watch is
+kept: it lives in EMS's memory, and its caller states it again when EMS has started anew.
+
+```
+PUT    /v0/watches/<id>          make it, or make it again when its body changed
+GET    /v0/watches               every watch and how it is doing
+GET    /v0/watches/<id>          one
+DELETE /v0/watches/<id>          stop it
+GET    /v0/watches/<id>/events   what it sees, text/event-stream
+```
+
+```json
+PUT /v0/watches/front-door-sub
+{ "source": "rtsp://ein:…@host.containers.internal:8554/front-door-sub",
+  "faces": { "fps": 3, "min_size": 0.03, "min_confidence": 0.7 },
+  "motion": true,
+  "mask": [ { "x": 0.0, "y": 0.0, "width": 0.3, "height": 0.1 } ],
+  "angle": 0, "mirror": false, "crops": true }
+```
+
+| Field                                    | Default   | Meaning                                                                                                                                               |
+| ---------------------------------------- | --------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `source`                                 |           | What to read: an `rtsp://` (over TCP), `http(s)://` stream ffmpeg reads; a path on EMS's own disk is read again and again at its own pace, for a test |
+| `faces.fps`                              | 3         | Frames looked at a second, 0.2 to 10                                                                                                                  |
+| `faces.min_size`, `faces.min_confidence` | 0.03, 0.7 | As `faces.detect_video`'s: smaller or less certain faces are left out                                                                                 |
+| `motion`                                 | true      | Look for faces only while frames change, or a face is being followed, and tell motion; false looks at every frame                                     |
+| `mask`                                   | none      | Regions left out, fractions of the display frame: no motion counted there, no face told whose centre is there                                         |
+| `angle`, `mirror`                        | 0, false  | The display frame, as for a file (_3.3_)                                                                                                              |
+| `crops`                                  | true      | A JPEG of each face told, in its events                                                                                                               |
+
+The id is 1 to 128 letters, digits, `.`, `_` or `-`. The same body put again leaves the watch
+running and answers `made: false`; another body stops it and starts it anew. Past `EMS_WATCHES`
+watches (4) a new one is `busy`. Each answer's `result` is the watch's status:
+
+```json
+{
+  "id": "front-door-sub",
+  "source": "rtsp://ein:***@host.containers.internal:8554/front-door-sub",
+  "state": "running",
+  "since": "2026-11-10T16:02:11.402Z",
+  "frames": 5412,
+  "looked": 312,
+  "faces": 4,
+  "following": 1,
+  "motion": true,
+  "made": true
+}
+```
+
+`state` is `connecting`, `running` or `lost` (with `error`, why); `frames` is how many frames were
+read, `looked` how many were looked at for faces, `faces` how many faces were told, `following` how
+many are being followed now. The source's password is never shown.
+
+The source is read with ffmpeg, `faces.fps` frames a second in the display frame, the longer side
+at most 1024 px. A frame is looked at for faces while it differs from the one before or a face is
+being followed, by the faces model as an interactive request (_2.5_); the faces are followed from
+frame to frame as `faces.detect_video` follows them, a face gone for two seconds having left. A
+source that ends or fails is read again after a pause that doubles from a second to a minute.
+
+**Events.** The stream starts with `state`, the watch's status, and every event after it carries
+`type`, `watch`, `at` (the wall clock, ISO 8601) and `t` (seconds since the watch started):
+
+| Event                        | Data                                                                                                                                                                                                                                             |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `face`                       | A face seen twice, within a second or so of its coming: `track` (a number, the same for its `face.end`), `box`, `confidence`, `landmarks`, `pose`, `frame` as in `faces.detect`, `embedding` (the mean of its best detections so far) and `crop` |
+| `face.end`                   | The face gone, or the source lost: its best detection and `crop`, the mean of its best detections' vectors, `appearances` (`[[start, end]]` in `t`'s seconds) and `detections`                                                                   |
+| `motion`, `motion.end`       | Frames began to change, and stopped for three seconds; with `motion: true` only                                                                                                                                                                  |
+| `source.lost`, `source.back` | The source ended or failed (`reason`), and is read again                                                                                                                                                                                         |
+| `end`                        | The watch was deleted; the stream ends                                                                                                                                                                                                           |
+
+`crop` is `{ "type": "image/jpeg", "data": <base64> }`: the face with three tenths of its size
+again on each side, from the frame of the detection. A comment line every fifteen seconds keeps a
+quiet stream open. A subscriber that falls 256 events behind is let go and its stream ends; a
+watch runs on whether anyone listens or not.
 
 ## 5. Error codes
 
@@ -1012,7 +1092,7 @@ this instance serves, a comma list of globs over their names such as
 `media.*,image.*,video.frames,vision.embed`; `*`, every op, by default — a glob that matches no op is
 a warning in health),
 the admission limits (`EMS_LIMIT_MODELS`, `EMS_LIMIT_TOOLS`, `EMS_LIMIT_ENCODES`,
-`EMS_QUEUE_DEPTH`, `EMS_INTERACTIVE_RESERVE`, `EMS_AFFINITY_WAIT`), `EMS_EXIFTOOL_WORKERS`, `EMS_EXPECT_GPU` (`1`: a card
+`EMS_QUEUE_DEPTH`, `EMS_INTERACTIVE_RESERVE`, `EMS_AFFINITY_WAIT`), `EMS_WATCHES` (the most watches at once, 4), `EMS_EXIFTOOL_WORKERS`, `EMS_EXPECT_GPU` (`1`: a card
 is expected, and health lists `what: "gpu"` under `degraded` when none is visible), `EMS_CARD_BUDGET_MB` (the most of the card the models
 treat as there — how a smaller card is rehearsed; 0 is the whole card), `EMS_CARD_SHARE_MB` (the most
 of the card EMS's own processes hold, for a card shared with another service such as the llm: a
