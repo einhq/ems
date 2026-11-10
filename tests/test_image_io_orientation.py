@@ -69,3 +69,22 @@ def test_display_readers_ignore_irot_and_exif_orientation(tmp_path):
     # And the turn the caller states is the one applied.
     turned = image_io.open_display_bgr(str(exif_only), 90, False)
     assert turned.shape[1] == HEIGHT and turned.shape[0] == WIDTH
+
+
+@pytest.mark.skipif(not (shutil.which("convert") and shutil.which("exiftool") and _readers_present()), reason="needs ImageMagick, exiftool and numpy")
+@pytest.mark.parametrize("orientation", range(1, 9))
+def test_tiff_opens_as_stored_whatever_its_orientation(tmp_path, orientation):
+    # PIL turns a TIFF by its Orientation as it loads; image_io turns it back.
+    import image_io
+
+    plain = tmp_path / "plain.png"
+    subprocess.run(["convert", "-size", f"{WIDTH}x{HEIGHT}", "gradient:blue-yellow", "-fill", "red", "-draw", "rectangle 0,0 9,9", str(plain)], check=True)
+    tagged = tmp_path / "tagged.tif"
+    subprocess.run(["convert", str(plain), f"tiff:{tagged}"], check=True)
+    subprocess.run(["exiftool", f"-IFD0:Orientation={orientation}", "-n", "-overwrite_original", str(tagged)], check=True, capture_output=True)
+
+    raster = image_io.open_display_bgr(str(tagged), 0, False)
+    assert raster.shape[:2] == (HEIGHT, WIDTH)
+    # The red corner is still top left (BGR).
+    blue, green, red = raster[2, 2]
+    assert red > 200 and green < 50 and blue < 50

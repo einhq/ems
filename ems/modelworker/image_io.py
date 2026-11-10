@@ -15,12 +15,17 @@ Two packages close it:
     that carries no usable preview.
 
 Dispatch is by *failure*, not by extension: PIL is asked first and LibRaw picks up whatever PIL
-cannot identify. A format table here would be one more list of RAW formats, free to drift.
+cannot identify. A format table here would be one more list of RAW formats, free to drift. The
+one exception is a TIFF: CR2, NEF and DNG are TIFF containers, and PIL reads their first IFD,
+which is a preview on a CR2 and a 160x120 thumbnail on a NEF. So a TIFF is offered to LibRaw
+too, and one it opens is a RAW; LibRaw refuses a plain TIFF in a few milliseconds.
 
 ## The frame, which is not uniform
 
   - **RAW comes back unrotated.** rawpy hands over the embedded preview as stored — a RAF
     tagged `Rotate 270 CW` opens landscape.
+  - **TIFF comes back unrotated, by undoing PIL.** PIL turns a TIFF by its EXIF Orientation as
+    it loads and drops the tag, so the tag is read before the load and the turn reversed after.
   - **HEIF comes back rotated.** pi-heif *is* libheif, and it applies the container's
     `irot`/`imir` on decode: a 4032x3024 file opens 3024x4032. It also rewrites the
     EXIF orientation to 1 and keeps no record of what it did — there is no
@@ -40,6 +45,8 @@ import io
 # Below this the embedded image is a contact-sheet thumbnail rather than a picture — embedding or
 # detecting on one would succeed on a blur, which is worse than the failure it replaces.
 MIN_PREVIEW_EDGE = 512
+# The EXIF and TIFF tag.
+ORIENTATION = 0x0112
 
 _heif_registered = False
 
@@ -112,13 +119,48 @@ def open_rgb(path: str, min_side: int = 0):
     _register_heif()
 
     try:
-        # .convert() forces pixel data to load, so an image outlives a caller's temp dir.
         image = Image.open(path)
-        if min_side > 0:
-            image.draft("RGB", (min_side, min_side))
-        return image.convert("RGB")
     except UnidentifiedImageError:
         return _open_raw(path)
+    if image.format == "TIFF":
+        if _libraw_opens(path):
+            image.close()
+            return _open_raw(path)
+        orientation = image.tag_v2.get(ORIENTATION)
+        return _untransposed(image.convert("RGB"), orientation)
+    if min_side > 0:
+        image.draft("RGB", (min_side, min_side))
+    # .convert() forces pixel data to load, so an image outlives a caller's temp dir.
+    return image.convert("RGB")
+
+
+def _libraw_opens(path: str) -> bool:
+    """Whether LibRaw takes the file for a camera RAW."""
+    try:
+        import rawpy
+    except ImportError:
+        return False
+    try:
+        with rawpy.imread(path):
+            return True
+    except rawpy.LibRawError:
+        return False
+
+
+def _untransposed(image, orientation):
+    """`image` as stored, before PIL's TIFF reader turned it by `orientation`."""
+    from PIL import Image
+
+    method = {
+        2: Image.Transpose.FLIP_LEFT_RIGHT,
+        3: Image.Transpose.ROTATE_180,
+        4: Image.Transpose.FLIP_TOP_BOTTOM,
+        5: Image.Transpose.TRANSPOSE,
+        6: Image.Transpose.ROTATE_90,
+        7: Image.Transpose.TRANSVERSE,
+        8: Image.Transpose.ROTATE_270,
+    }.get(orientation)
+    return image.transpose(method) if method is not None else image
 
 
 def open_display(path: str, angle=0, mirror=False, min_side: int = 0):
