@@ -277,10 +277,13 @@ def input_args(source: str) -> list[str]:
 
 async def ffmpeg_segments(source: str, folder: str, first: int) -> AsyncIterator[tuple[str, float]]:
     """The source copied into MPEG-TS segments by ffmpeg, its picture as it came and its sound as
-    AAC, each segment told by ffmpeg's segment list as it closes."""
+    AAC, each segment told by ffmpeg's segment list as it closes. A live stream's packets are
+    stamped with the wall clock as they arrive: an RTSP stream's first ones often carry no time,
+    which the muxer refuses."""
+    live = ["-fflags", "+genpts+discardcorrupt", "-use_wallclock_as_timestamps", "1"] if "://" in source else []
     args = [
-        "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", *input_args(source),
-        "-map", "0:v:0", "-map", "0:a:0?", "-c:v", "copy", "-c:a", "aac",
+        "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", *live, *input_args(source),
+        "-map", "0:v:0", "-map", "0:a:0?", "-c:v", "copy", "-c:a", "aac", "-avoid_negative_ts", "make_zero",
         "-f", "segment", "-segment_time", str(SEGMENT_SECONDS), "-segment_format", "mpegts", "-segment_start_number", str(first),
         "-segment_list", "pipe:1", "-segment_list_type", "csv", os.path.join(folder, "%010d.ts"),
     ]
