@@ -22,7 +22,7 @@ from conftest import AUTH, KEY, FakeModelWorker  # noqa: E402
 from ems import watches as watches_module  # noqa: E402
 from ems.app import create_app  # noqa: E402
 from ems.card import CardArbiter, watching  # noqa: E402
-from ems.clips import ffmpeg_join, ffmpeg_segments  # noqa: E402
+from ems.clips import ClipsSpec, Recorder, ffmpeg_join, ffmpeg_segments  # noqa: E402
 from ems.config import Settings  # noqa: E402
 from ems.ops import watches as watches_op  # noqa: E402
 from ems.watches import Frame, Watches, WatchSpec, masked_source, ppm_size  # noqa: E402
@@ -88,7 +88,7 @@ async def segments(source: str, folder: str, first: int):
     number = first
     while True:
         await asyncio.sleep(SEGMENT)
-        path = os.path.join(folder, f"{number:010d}.ts")
+        path = os.path.join(folder, f"{number:010d}.mp4")
         with open(path, "wb") as handle:
             handle.write(f"{number};".encode())
         yield path, SEGMENT
@@ -352,7 +352,7 @@ async def test_ffmpeg_records_segments_and_joins_them_into_an_mp4(tmp_path):
             if len(got) == 2:
                 break
         await recording.aclose()
-    assert [os.path.basename(path) for path, _ in got] == ["0000000007.ts", "0000000008.ts"]
+    assert [os.path.basename(path) for path, _ in got] == ["0000000007.mp4", "0000000008.mp4"]
     assert all(1.5 < length < 2.5 for _, length in got)
     out = tmp_path / "clip.mp4"
     await ffmpeg_join([path for path, _ in got], str(out), "2026-11-11T07:53:00.250Z")
@@ -361,3 +361,43 @@ async def test_ffmpeg_records_segments_and_joins_them_into_an_mp4(tmp_path):
     assert info["format"]["tags"]["creation_time"].startswith("2026-11-11T07:53:00")
     assert sorted(stream["codec_name"] for stream in info["streams"]) == ["aac", "h264"]
     assert 3.5 < float(info["format"]["duration"]) < 4.5
+
+
+class Ffmpeg:
+    """A stand-in for an ffmpeg process: names one segment, then runs until killed, having said
+    something on its error output meanwhile, as a camera's decoder does."""
+
+    def __init__(self):
+        self.returncode = None
+        self.stdout = asyncio.StreamReader()
+        self.stdout.feed_data(b"0000000000.mp4,0.000000,2.000000\n")
+        self.stderr = asyncio.StreamReader()
+        self.stderr.feed_data(b"[h264 @ 0x1] Missing reference picture\n")
+        self.stderr.feed_eof()
+
+    def kill(self):
+        self.returncode = -9
+        self.stdout.feed_eof()
+
+    async def wait(self):
+        return self.returncode
+
+
+async def test_a_recording_that_is_stopped_stops(tmp_path, monkeypatch):
+    """A recorder cancelled while ffmpeg runs ends, rather than taking what the killed ffmpeg said
+    for a source that dropped and reading it again."""
+
+    async def spawn(*args, **kwargs):
+        return Ffmpeg()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    recorder = Recorder("porch", ClipsSpec(), "rtsp://192.0.2.31/main", str(tmp_path / "porch"), segments=ffmpeg_segments, join=ffmpeg_join, tell=lambda kind, data: None, log=lambda m: None)
+    recorder.start()
+    async with asyncio.timeout(5):
+        while not recorder.segments:
+            await asyncio.sleep(0.01)
+    assert recorder.task is not None
+    recorder.task.cancel()
+    done, _ = await asyncio.wait({recorder.task}, timeout=5)
+    assert done and recorder.task.cancelled()
+    await recorder.stop()

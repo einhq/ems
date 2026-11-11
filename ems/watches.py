@@ -533,6 +533,9 @@ async def _ffmpeg_frames(spec: WatchSpec, nvdec: bool) -> AsyncIterator[Frame]:
     args += [*input_args(spec.source), "-an", "-vf", filters(spec, nvdec), "-f", "image2pipe", "-vcodec", "ppm", "pipe:1"]
     process = await asyncio.create_subprocess_exec(*args, stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     assert process.stdout is not None and process.stderr is not None
+    # Whether ffmpeg stopped of itself, when what it said is why; not when the reader was
+    # cancelled or closed, which an error raised here would hide.
+    ended = False
     try:
         while True:
             header = b""
@@ -550,14 +553,15 @@ async def _ffmpeg_frames(spec: WatchSpec, nvdec: bool) -> AsyncIterator[Frame]:
             width, height = size
             pixels = await process.stdout.readexactly(width * height * 3)
             yield Frame(width, height, pixels, header + pixels)
+        ended = True
     except asyncio.IncompleteReadError:
-        pass
+        ended = True
     finally:
         if process.returncode is None:
             process.kill()
         stderr = (await process.stderr.read()).decode(errors="replace").strip()
         await process.wait()
-        if stderr:
+        if stderr and ended:
             raise ConnectionError(stderr.splitlines()[-1])
 
 

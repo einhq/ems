@@ -1,7 +1,7 @@
 """Event clips: a watch's stream kept a little while, and cut into a video around what the watch
 saw there (_4.24_).
 
-A recorder copies its stream, not re-encoding the picture, into MPEG-TS segments of about
+A recorder copies its stream, not re-encoding the picture, into MP4 segments of about
 SEGMENT_SECONDS each (each starts at a key frame, so a camera's own key-frame interval can make
 them longer) in a folder of its own, and keeps only as many as the latest `pre` seconds and the
 clips still being cut need. A trigger opens a clip from `pre` seconds before it to `post` after,
@@ -14,6 +14,7 @@ read again after a pause that doubles up to a minute, and a clip open then is cu
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import secrets
 import shutil
@@ -276,33 +277,39 @@ def input_args(source: str) -> list[str]:
 
 
 async def ffmpeg_segments(source: str, folder: str, first: int) -> AsyncIterator[tuple[str, float]]:
-    """The source copied into MPEG-TS segments by ffmpeg, its picture as it came and its sound as
-    AAC, each segment told by ffmpeg's segment list as it closes. Each segment's timestamps start
-    at zero: an RTSP stream with B-frames gives its first packets no time, which a segment's muxer
-    refuses when it carries the stream's own on (`ffmpeg_join` puts them end to end again)."""
+    """The source copied into MP4 segments by ffmpeg, its picture as it came and its sound as AAC,
+    each segment told by ffmpeg's segment list as it closes. A live stream's packets are timed by
+    the wall clock as they arrive, and each segment's start at zero: through an RTSP restreamer a
+    stream's first packets can come with no time, which a muxer refuses. Each segment is a whole
+    MP4, so `ffmpeg_join` knows every stream's parameters whichever segment it starts at."""
+    live = ["-fflags", "+genpts+discardcorrupt", "-use_wallclock_as_timestamps", "1"] if "://" in source else []
     args = [
-        "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-fflags", "+genpts", *input_args(source),
+        "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", *live, *input_args(source),
         "-map", "0:v:0", "-map", "0:a:0?", "-c:v", "copy", "-c:a", "aac", "-avoid_negative_ts", "make_zero",
-        "-f", "segment", "-segment_time", str(SEGMENT_SECONDS), "-segment_format", "mpegts", "-reset_timestamps", "1", "-segment_start_number", str(first),
-        "-segment_list", "pipe:1", "-segment_list_type", "csv", os.path.join(folder, "%010d.ts"),
+        "-f", "segment", "-segment_time", str(SEGMENT_SECONDS), "-segment_format", "mp4", "-reset_timestamps", "1", "-segment_start_number", str(first),
+        "-segment_list", "pipe:1", "-segment_list_type", "csv", os.path.join(folder, "%010d.mp4"),
     ]
     process = await asyncio.create_subprocess_exec(*args, stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     assert process.stdout is not None and process.stderr is not None
+    # Whether ffmpeg stopped of itself, when what it said is why; not when the recorder was
+    # cancelled or closed, which an error raised here would hide.
+    ended = False
     try:
         while line := await process.stdout.readline():
             name, start, end = line.decode().strip().rsplit(",", 2)
             yield os.path.join(folder, os.path.basename(name)), max(0.0, float(end) - float(start))
+        ended = True
     finally:
         if process.returncode is None:
             process.kill()
         stderr = (await process.stderr.read()).decode(errors="replace").strip()
         await process.wait()
-        if stderr:
+        if stderr and ended:
             raise ConnectionError(stderr.splitlines()[-1])
 
 
 async def ffmpeg_join(paths: list[str], out: str, made: str) -> None:
-    """MPEG-TS segments joined end to end into an MP4 by ffmpeg's concat demuxer, which moves each
+    """Segments joined end to end into an MP4 by ffmpeg's concat demuxer, which moves each
     segment's timestamps on past the one before; copied, its index at the front and its
     `creation_time` the moment it starts."""
     listing = f"{out}.txt"
@@ -316,6 +323,8 @@ async def ffmpeg_join(paths: list[str], out: str, made: str) -> None:
     try:
         _, err = await process.communicate()
     finally:
-        os.remove(listing)
+        # Gone already when the watch was deleted meanwhile, its folder with it.
+        with contextlib.suppress(FileNotFoundError):
+            os.remove(listing)
     if process.returncode != 0:
         raise RuntimeError(err.decode(errors="replace").strip() or f"ffmpeg exited {process.returncode}")
