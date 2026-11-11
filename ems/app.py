@@ -23,6 +23,7 @@ from .remote import Mounts
 from .tools.audio import AudioCache
 from .tools.exiftool import ExifTool
 from .tools.run import which
+from .clips import ffmpeg_join, ffmpeg_segments
 from .watches import Watches, ffmpeg_crop, ffmpeg_frames
 from .worker import QUERY_FAMILIES, Worker
 
@@ -175,7 +176,10 @@ def create_app(
         files=Mounts(),
     )
     kept = watches.FacesKept(ctx, log)
-    ctx.watches = Watches(settings.watches, source=ffmpeg_frames, find=watches.frame_finder(ctx, kept), crop=ffmpeg_crop, log=log, idle=kept.release)
+    ctx.watches = Watches(
+        settings.watches, source=ffmpeg_frames, find=watches.frame_finder(ctx, kept), crop=ffmpeg_crop, log=log, idle=kept.release,
+        folder=os.path.join(settings.scratch, "watches"), segments=ffmpeg_segments, join=ffmpeg_join,
+    )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):

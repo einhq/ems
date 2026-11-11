@@ -1,17 +1,20 @@
 """`PUT|GET|DELETE /v0/watches/<id>`, `GET /v0/watches` and `GET /v0/watches/<id>/events`: a live
-stream read for its faces and motion, told as server-sent events (ems/watches.py, _4.24_)."""
+stream read for its faces and motion, told as server-sent events (ems/watches.py, _4.24_); and
+`/v0/watches/<id>/clips`, the clips it cut of its stream (ems/clips.py)."""
 
 from __future__ import annotations
 
 import asyncio
 import json
 import os
+import time
 
 from fastapi import APIRouter, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 
 from .. import API_VERSION
 from ..card import watching
+from ..clips import ClipRequest
 from ..context import Context
 from ..errors import EmsError
 from ..watches import Frame, WatchSpec
@@ -116,6 +119,26 @@ def register(router: APIRouter, ctx: Context) -> None:
     @router.delete("/watches/{watch_id}")
     async def watches_delete(watch_id: str):
         await ctx.watches.delete(watch_id)
+        return _ok(None)
+
+    @router.post("/watches/{watch_id}/clips")
+    async def clips_request(watch_id: str, body: ClipRequest):
+        watch = ctx.watches.get(watch_id)
+        return _ok({"clip": watch.records().trigger("request", time.monotonic(), body.post)})
+
+    @router.get("/watches/{watch_id}/clips")
+    async def clips_list(watch_id: str):
+        return _ok(ctx.watches.get(watch_id).records().ready())
+
+    @router.get("/watches/{watch_id}/clips/{clip_id}")
+    async def clips_get(watch_id: str, clip_id: str):
+        clip = ctx.watches.get(watch_id).records().get(clip_id)
+        assert clip.path is not None
+        return FileResponse(clip.path, media_type="video/mp4", headers={"Cache-Control": "no-store"})
+
+    @router.delete("/watches/{watch_id}/clips/{clip_id}")
+    async def clips_delete(watch_id: str, clip_id: str):
+        ctx.watches.get(watch_id).records().drop(clip_id)
         return _ok(None)
 
     @router.get("/watches/{watch_id}/events")

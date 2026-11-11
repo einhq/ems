@@ -1,11 +1,14 @@
 """Watches: a stream's frames looked at for faces while they change, a face told once it was seen
 twice and again when it is gone, motion, a source that drops and comes back, the same watch stated
-twice, and the routes — with the frames, the worker and the crops stubbed."""
+twice, clips cut around a face and on a request, and the routes — with the frames, the worker, the
+crops and the recording stubbed; and ffmpeg's recording and joining of a real stream."""
 
 import asyncio
 import base64
 import json
 import os
+import shutil
+import subprocess
 import sys
 
 import httpx
@@ -19,6 +22,7 @@ from conftest import AUTH, KEY, FakeModelWorker  # noqa: E402
 from ems import watches as watches_module  # noqa: E402
 from ems.app import create_app  # noqa: E402
 from ems.card import CardArbiter, watching  # noqa: E402
+from ems.clips import ffmpeg_join, ffmpeg_segments  # noqa: E402
 from ems.config import Settings  # noqa: E402
 from ems.ops import watches as watches_op  # noqa: E402
 from ems.watches import Frame, Watches, WatchSpec, masked_source, ppm_size  # noqa: E402
@@ -75,6 +79,29 @@ async def crop(frame: Frame, x: int, y: int, width: int, height: int) -> bytes:
     return f"crop {x},{y} {width}x{height}".encode()
 
 
+SEGMENT = 0.1
+
+
+async def segments(source: str, folder: str, first: int):
+    """A recording stub: a segment a tenth of a second long every tenth of a second, its bytes its
+    number."""
+    number = first
+    while True:
+        await asyncio.sleep(SEGMENT)
+        path = os.path.join(folder, f"{number:010d}.ts")
+        with open(path, "wb") as handle:
+            handle.write(f"{number};".encode())
+        yield path, SEGMENT
+        number += 1
+
+
+async def join(paths: list[str], out: str, made: str) -> None:
+    with open(out, "wb") as handle:
+        for path in paths:
+            with open(path, "rb") as part:
+                handle.write(part.read())
+
+
 @pytest.fixture
 async def ems(tmp_path, monkeypatch):
     # A face gone for a fifth of a second has left, rather than two: the test does not wait.
@@ -91,7 +118,10 @@ async def ems(tmp_path, monkeypatch):
 
     def watches(source) -> Watches:
         kept = watches_op.FacesKept(ctx, lambda m: None)
-        ctx.watches = Watches(settings.watches, source=source, find=watches_op.frame_finder(ctx, kept), crop=crop, log=lambda m: None, idle=kept.release)
+        ctx.watches = Watches(
+            settings.watches, source=source, find=watches_op.frame_finder(ctx, kept), crop=crop, log=lambda m: None, idle=kept.release,
+            folder=str(tmp_path / "watches"), segments=segments, join=join,
+        )
         return ctx.watches
 
     watches.ctx = ctx
@@ -248,3 +278,86 @@ def test_a_source_is_shown_without_its_password_and_ffmpeg_headers_are_read():
     assert masked_source("rtsp://192.0.2.30/sub") == "rtsp://192.0.2.30/sub"
     assert ppm_size(b"P6\n640 360\n255\n") == (640, 360)
     assert ppm_size(b"P6\n640 360\n25") is None
+
+
+def numbers(clip: bytes) -> list[int]:
+    return [int(number) for number in clip.decode().split(";") if number]
+
+
+async def test_a_face_cuts_a_clip_from_before_it_until_after_it_is_gone(ems):
+    client, watches, _ = ems
+    script = Script([frame(10, False), frame(100, True), frame(10, True), frame(10, True), *[frame(10, False)] * 8])
+    watch_set = watches(script)
+    clips = {"on": ["face"], "pre": 0.5, "post": 1}
+    put = await client.put("/v0/watches/front-door", json={"source": "rtsp://192.0.2.30/sub", "faces": {"fps": 5}, "clips": clips})
+    assert put.json()["result"]["clips"]["state"] in ("connecting", "recording")
+    _, queue = watch_set.subscribe("front-door")
+    heard = await events_until(queue, "clip")
+    kinds = [event["type"] for event in heard]
+    assert kinds.index("face") < kinds.index("clip")
+    clip = heard[-1]
+    assert clip["reasons"] == ["face"]
+    assert clip["start"] < clip["end"]
+    # Half a second before the face, and a second after it was last followed.
+    assert clip["duration"] >= 1.4
+    listed = (await client.get("/v0/watches/front-door/clips")).json()["result"]
+    assert [each["clip"] for each in listed] == [clip["clip"]]
+    got = await client.get(f"/v0/watches/front-door/clips/{clip['clip']}")
+    assert got.status_code == 200 and got.headers["content-type"] == "video/mp4"
+    parts = numbers(got.content)
+    assert parts == list(range(parts[0], parts[-1] + 1)) and len(got.content) == clip["size"]
+    assert (await client.delete(f"/v0/watches/front-door/clips/{clip['clip']}")).status_code == 200
+    assert (await client.get(f"/v0/watches/front-door/clips/{clip['clip']}")).status_code == 404
+    # Once a segment has come since, only what a clip may still need is kept: the latest half second.
+    await asyncio.sleep(0.3)
+    status = (await client.get("/v0/watches/front-door")).json()["result"]["clips"]
+    assert status["made"] == 1 and status["segments"] <= 7
+
+
+async def test_a_request_cuts_a_clip_and_a_watch_without_clips_refuses_one(ems):
+    client, watches, _ = ems
+    watch_set = watches(Script([frame(10, False)] * 200))
+    await client.put("/v0/watches/porch", json={"source": "rtsp://192.0.2.31/sub", "clips": {"pre": 0.2, "post": 1}})
+    _, queue = watch_set.subscribe("porch")
+    asked = await client.post("/v0/watches/porch/clips", json={"post": 2})
+    clip_id = asked.json()["result"]["clip"]
+    again = (await client.post("/v0/watches/porch/clips", json={})).json()["result"]["clip"]
+    assert again == clip_id
+    heard = await events_until(queue, "clip")
+    assert heard[-1]["clip"] == clip_id and heard[-1]["reasons"] == ["request"]
+    assert 2 <= heard[-1]["duration"] < 3
+    await client.delete("/v0/watches/porch")
+    # A watch deleted takes its recording and its clips with it.
+    assert os.path.isdir(watch_set.folder) and not os.path.exists(os.path.join(watch_set.folder, "porch"))
+    await client.put("/v0/watches/porch", json={"source": "rtsp://192.0.2.31/sub"})
+    refused = await client.post("/v0/watches/porch/clips", json={})
+    assert refused.status_code == 400 and refused.json()["error"]["code"] == "invalid_request"
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="no ffmpeg")
+async def test_ffmpeg_records_segments_and_joins_them_into_an_mp4(tmp_path):
+    source = tmp_path / "camera.mkv"
+    subprocess.run(
+        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc=size=320x180:rate=25", "-f", "lavfi", "-i", "sine",
+         "-t", "3", "-c:v", "libx264", "-g", "25", "-c:a", "pcm_alaw", str(source)],
+        check=True,
+    )
+    folder = tmp_path / "segments"
+    folder.mkdir()
+    got = []
+    async with asyncio.timeout(30):
+        recording = ffmpeg_segments(str(source), str(folder), 7)
+        async for path, length in recording:
+            got.append((path, length))
+            if len(got) == 2:
+                break
+        await recording.aclose()
+    assert [os.path.basename(path) for path, _ in got] == ["0000000007.ts", "0000000008.ts"]
+    assert all(1.5 < length < 2.5 for _, length in got)
+    out = tmp_path / "clip.mp4"
+    await ffmpeg_join([path for path, _ in got], str(out), "2026-11-11T07:53:00.250Z")
+    probe = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "stream=codec_name:format=duration:format_tags=creation_time", "-of", "json", str(out)], check=True, capture_output=True, text=True)
+    info = json.loads(probe.stdout)
+    assert info["format"]["tags"]["creation_time"].startswith("2026-11-11T07:53:00")
+    assert sorted(stream["codec_name"] for stream in info["streams"]) == ["aac", "h264"]
+    assert 3.5 < float(info["format"]["duration"]) < 4.5

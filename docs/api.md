@@ -960,7 +960,7 @@ not as an idle one.
 What this EMS can do, for a caller to check before it relies on it:
 
 ```json
-{ "api": "0.3.5", "name": "fry", "build": { "version": "0.1.0", "commit": "fb6a7d9", "date": "2026-11-07T18:02:11+01:00" },
+{ "api": "0.3.7", "name": "fry", "build": { "version": "0.1.0", "commit": "fb6a7d9", "date": "2026-11-07T18:02:11+01:00" },
   "gpu": { "present": true, "name": "NVIDIA GeForce RTX 5060 Ti", "memory_mb": 16311 },
   "ops": [ "media.probe", "faces.detect", … ],
   "tools": { "exiftool": "13.10", "ffprobe": "9.0.1", "ffmpeg": "9.0.1", "magick": "7.1.1" },
@@ -990,10 +990,11 @@ settings. The worker is given as long as health gives it, 2 s; one that is down 
 its models is represented by the last signature it gave, so the field is absent only until the
 worker has answered once.
 
-### 4.24 `watches` — a live stream read for faces _(implemented, 0.3.5)_
+### 4.24 `watches` — a live stream read for faces _(implemented, 0.3.5; clips 0.3.7)_
 
 A watch reads a live stream for as long as its caller wants, and tells what it sees there as
-events: the faces, motion, and the source going and coming back. EMS knows streams, not cameras:
+events: the faces, motion, and the source going and coming back; with `clips`, it records the
+stream as well and cuts a video around what it saw. EMS knows streams, not cameras:
 the caller names the stream and the id the watch has, and what a face is (a person, a camera's
 device) is the caller's. As everywhere, EMS answers vectors, never names. Nothing of a watch is
 kept: it lives in EMS's memory, and its caller states it again when EMS has started anew.
@@ -1004,6 +1005,10 @@ GET    /v0/watches               every watch and how it is doing
 GET    /v0/watches/<id>          one
 DELETE /v0/watches/<id>          stop it
 GET    /v0/watches/<id>/events   what it sees, text/event-stream
+POST   /v0/watches/<id>/clips    a clip around now
+GET    /v0/watches/<id>/clips    the clips cut and not yet dropped
+GET    /v0/watches/<id>/clips/<clip>     one, video/mp4
+DELETE /v0/watches/<id>/clips/<clip>     drop it
 ```
 
 ```json
@@ -1012,7 +1017,9 @@ PUT /v0/watches/front-door-sub
   "faces": { "fps": 3, "min_size": 0.03, "min_confidence": 0.7 },
   "motion": true,
   "mask": [ { "x": 0.0, "y": 0.0, "width": 0.3, "height": 0.1 } ],
-  "angle": 0, "mirror": false, "crops": true }
+  "angle": 0, "mirror": false, "crops": true,
+  "clips": { "on": ["face", "motion"], "pre": 5, "post": 10, "max": 120,
+             "source": "rtsp://ein:…@host.containers.internal:8554/front-door-main" } }
 ```
 
 | Field                                    | Default   | Meaning                                                                                                                                               |
@@ -1024,6 +1031,11 @@ PUT /v0/watches/front-door-sub
 | `mask`                                   | none      | Regions left out, fractions of the display frame: no motion counted there, no face told whose centre is there                                         |
 | `angle`, `mirror`                        | 0, false  | The display frame, as for a file (_3.3_)                                                                                                              |
 | `crops`                                  | true      | A JPEG of each face told, in its events                                                                                                               |
+| `clips`                                  | none      | Record the stream and cut clips of it (below); no recording without                                                                                   |
+| `clips.on`                               | both      | What opens a clip and keeps it open while it lasts: `face` (a face followed), `motion` (frames changing; with `motion: true`)                         |
+| `clips.pre`, `clips.post`                | 5, 10     | Seconds of the stream before what opened it (0 to 30), and after it ended (1 to 60)                                                                   |
+| `clips.max`                              | 120       | The longest clip, in seconds (10 to 600)                                                                                                              |
+| `clips.source`                           | `source`  | The stream recorded, when not the one watched: a camera's main stream beside the sub-stream its faces are looked for in                               |
 
 The id is 1 to 128 letters, digits, `.`, `_` or `-`. The same body put again leaves the watch
 running and answers `made: false`; another body stops it and starts it anew. Past `EMS_WATCHES`
@@ -1046,7 +1058,10 @@ watches (4) a new one is `busy`. Each answer's `result` is the watch's status:
 
 `state` is `connecting`, `running` or `lost` (with `error`, why); `frames` is how many frames were
 read, `looked` how many were looked at for faces, `faces` how many faces were told, `following` how
-many are being followed now. The source's password is never shown.
+many are being followed now. The source's password is never shown. A watch with `clips` has
+`clips` in its status as well: `state` (`connecting`, `recording` or `lost`, with `error`), how many
+`segments` are kept, how many clips it `made`, how many are `ready` to fetch, and the `open` one's
+id while one is.
 
 The source is read with ffmpeg, `faces.fps` frames a second in the display frame, the longer side
 at most 1024 px, decoded by NVDEC on a host with a card (_0.3.6_) and on the CPU without one or for a
@@ -1067,12 +1082,32 @@ source that ends or fails is read again after a pause that doubles from a second
 | `face.end`                   | The face gone, or the source lost: its best detection and `crop`, the mean of its best detections' vectors, `appearances` (`[[start, end]]` in `t`'s seconds) and `detections`                                                                   |
 | `motion`, `motion.end`       | Frames began to change, and stopped for three seconds; with `motion: true` only                                                                                                                                                                  |
 | `source.lost`, `source.back` | The source ended or failed (`reason`), and is read again                                                                                                                                                                                         |
+| `clip`                       | A clip is ready: `clip` (its id), `start` and `end` (the wall clock, ISO 8601), `duration` (seconds), `size` (bytes) and `reasons` (`face`, `motion`, `request`: what opened or lengthened it)                                                   |
+| `clip.failed`                | A clip could not be cut: `clip` and `reason`                                                                                                                                                                                                     |
 | `end`                        | The watch was deleted; the stream ends                                                                                                                                                                                                           |
 
 `crop` is `{ "type": "image/jpeg", "data": <base64> }`: the face with three tenths of its size
 again on each side, from the frame of the detection. A comment line every fifteen seconds keeps a
 quiet stream open. A subscriber that falls 256 events behind is let go and its stream ends; a
 watch runs on whether anyone listens or not.
+
+**Clips.** A watch with `clips` copies its stream, the picture as it comes and the sound as AAC, in
+segments of about two seconds that each start at a key frame, and keeps only the latest `pre`
+seconds and what a clip being cut needs. A `face` (or `motion`, as `on` says) opens a clip from
+`pre` seconds before it until `post` seconds after the face is no longer followed or the frames
+stop changing; another while it is open lengthens it, up to `max`, so one visit is one clip. A clip
+starts and ends at a segment's edge, so it holds at least what was asked and up to a key-frame
+interval more on each side. Once the stream past its end has been recorded the segments are joined,
+not re-encoded, into an MP4 with its index at the front and its start as `creation_time`, and `clip`
+tells it. The caller fetches it
+with `GET /v0/watches/<id>/clips/<clip>` and drops it with `DELETE`; one not dropped goes after an
+hour, and all of a watch's go with the watch, when it is deleted or put with another body. A source
+that drops cuts the open clip from what came.
+
+`POST /v0/watches/<id>/clips` with `{ "post": 10 }` (`post` optional, the watch's by default)
+opens a clip now, or lengthens the open one, for `request`, and answers `{ "clip": <id> }`: the id
+its `clip` event will carry. A watch without `clips` answers `invalid_request`; an unknown clip is
+`not_found`.
 
 ## 5. Error codes
 

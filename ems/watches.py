@@ -13,7 +13,8 @@ is (ems/ops/watches.py, ems/card.py).
 
 Nothing of a watch is kept: it lives in memory, and a caller states its watches again when EMS
 starts. A source that drops is read again after a pause that doubles up to a minute, and the
-watch says so (`source.lost`, `source.back`).
+watch says so (`source.lost`, `source.back`). A watch with `clips` records its stream as well, and
+cuts a clip around a face or motion (ems/clips.py).
 """
 
 from __future__ import annotations
@@ -31,6 +32,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 from pydantic import Field
 
+from .clips import ClipsSpec, Joiner, Recorder, SegmentSource, input_args
 from .errors import BUSY, INVALID_REQUEST, NOT_FOUND, EmsError
 from .schemas import Box, Strict
 from .tools import ffmpeg as ffmpeg_tool
@@ -78,6 +80,8 @@ class WatchSpec(Strict):
     mirror: bool = False
     # A JPEG of each face told, in its events.
     crops: bool = True
+    # Clips of the stream around what is seen; none without.
+    clips: ClipsSpec | None = None
 
 
 @dataclass
@@ -209,7 +213,7 @@ def follow(tracks: list[Track], found: list[dict]) -> list[tuple[Track | None, d
 class Watch:
     """One watch: its spec, its reading loop, what it has seen, and who listens."""
 
-    def __init__(self, watch_id: str, spec: WatchSpec, *, source: FrameSource, find: FaceFinder, crop: CropEncoder, log: Callable[[str], None]):
+    def __init__(self, watch_id: str, spec: WatchSpec, *, source: FrameSource, find: FaceFinder, crop: CropEncoder, log: Callable[[str], None], recorder: Callable[[Watch], Recorder] | None = None):
         self.id = watch_id
         self.spec = spec
         self.source = source
@@ -229,6 +233,7 @@ class Watch:
         self.next_track = 1
         self.subscribers: set[asyncio.Queue] = set()
         self.task: asyncio.Task | None = None
+        self.recorder = recorder(self) if recorder is not None and spec.clips is not None else None
 
     def status(self) -> dict:
         return {
@@ -241,11 +246,19 @@ class Watch:
             "faces": self.faces,
             "following": len(self.tracks),
             "motion": self.moving,
+            **({"clips": self.recorder.status()} if self.recorder else {}),
             **({"error": self.error} if self.error else {}),
         }
 
     def start(self) -> None:
         self.task = asyncio.create_task(self.run(), name=f"watch {self.id}")
+        if self.recorder is not None:
+            self.recorder.start()
+
+    def records(self) -> Recorder:
+        if self.recorder is None:
+            raise EmsError(INVALID_REQUEST, f"watch {self.id} records no clips")
+        return self.recorder
 
     async def stop(self) -> None:
         if self.task is not None:
@@ -254,11 +267,16 @@ class Watch:
                 await self.task
             except (asyncio.CancelledError, Exception):
                 pass
+        if self.recorder is not None:
+            await self.recorder.stop()
         for queue in list(self.subscribers):
             let_go(queue)
 
     def tell(self, kind: str, data: dict) -> None:
-        """An event to every subscriber; one that has fallen too far behind is let go."""
+        """An event to every subscriber; one that has fallen too far behind is let go. A face or
+        motion opens a clip when the watch records them."""
+        if self.recorder is not None and kind in self.recorder.spec.on:
+            self.recorder.trigger(kind, time.monotonic())
         event = {"type": kind, "watch": self.id, "at": now_iso(), "t": round(time.monotonic() - self.started, 3), **data}
         for queue in list(self.subscribers):
             try:
@@ -314,6 +332,10 @@ class Watch:
         if not self.spec.motion or self.moving or self.tracks:
             await self.look(frame, now)
         await self.end_gone(now)
+        if self.recorder is not None:
+            on = self.recorder.spec.on
+            if ("face" in on and any(track.told for track in self.tracks)) or ("motion" in on and self.moving):
+                self.recorder.extend(time.monotonic())
         return after
 
     async def look(self, frame: Frame, now: float) -> None:
@@ -404,14 +426,23 @@ class Watches:
     """Every watch of this EMS, by id. `idle` is called once the last of them has stopped."""
 
     def __init__(self, limit: int, *, source: FrameSource, find: FaceFinder, crop: CropEncoder, log: Callable[[str], None],
-                 idle: Callable[[], Awaitable[None]] | None = None):
+                 folder: str, segments: SegmentSource, join: Joiner, idle: Callable[[], Awaitable[None]] | None = None):
         self.limit = limit
         self.source = source
         self.find = find
         self.crop = crop
         self.log = log
         self.idle = idle
+        # Where each watch's recording is kept, in a folder named by its id.
+        self.folder = folder
+        self.segments = segments
+        self.join = join
         self.watches: dict[str, Watch] = {}
+
+    def recorder(self, watch: Watch) -> Recorder:
+        clips = watch.spec.clips
+        assert clips is not None
+        return Recorder(watch.id, clips, clips.source or watch.spec.source, os.path.join(self.folder, watch.id), segments=self.segments, join=self.join, tell=watch.tell, log=self.log)
 
     def get(self, watch_id: str) -> Watch:
         watch = self.watches.get(watch_id)
@@ -431,7 +462,7 @@ class Watches:
             raise EmsError(BUSY, f"this EMS runs at most {self.limit} watches (EMS_WATCHES)")
         if known is not None:
             await self._drop(watch_id)
-        watch = Watch(watch_id, spec, source=self.source, find=self.find, crop=self.crop, log=self.log)
+        watch = Watch(watch_id, spec, source=self.source, find=self.find, crop=self.crop, log=self.log, recorder=self.recorder)
         self.watches[watch_id] = watch
         watch.start()
         return watch, True
@@ -495,17 +526,11 @@ async def ffmpeg_frames(spec: WatchSpec) -> AsyncIterator[Frame]:
 
 
 async def _ffmpeg_frames(spec: WatchSpec, nvdec: bool) -> AsyncIterator[Frame]:
-    """One read of the source: a network stream as it comes, over TCP for RTSP; a local file at its
-    own pace, again and again, for a test."""
-    source = spec.source
+    """One read of the source (`input_args`)."""
     args = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin"]
-    if source.startswith(("rtsp://", "rtsps://")):
-        args += ["-rtsp_transport", "tcp", "-timeout", "10000000"]
-    elif "://" not in source:
-        args += ["-re", "-stream_loop", "-1"]
     if nvdec:
         args += ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]
-    args += ["-i", source, "-an", "-vf", filters(spec, nvdec), "-f", "image2pipe", "-vcodec", "ppm", "pipe:1"]
+    args += [*input_args(spec.source), "-an", "-vf", filters(spec, nvdec), "-f", "image2pipe", "-vcodec", "ppm", "pipe:1"]
     process = await asyncio.create_subprocess_exec(*args, stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     assert process.stdout is not None and process.stderr is not None
     try:
