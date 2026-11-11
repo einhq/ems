@@ -154,6 +154,7 @@ def create_app(
             queue_depth=settings.queue_depth,
             interactive_reserve=settings.interactive_reserve,
             limit_encodes=settings.limit_encodes,
+            limit_watches=settings.watches,
             weights={caller.name: caller.weight for caller in settings.keys.values()},
             affinity_wait=settings.affinity_wait,
         ),
@@ -173,7 +174,8 @@ def create_app(
         audio=AudioCache(settings.scratch, ttl_seconds=settings.audio_cache_seconds, budget_mb=settings.audio_cache_mb, timeout=settings.tool_stall_seconds),
         files=Mounts(),
     )
-    ctx.watches = Watches(settings.watches, source=ffmpeg_frames, find=watches.frame_finder(ctx), crop=ffmpeg_crop, log=log)
+    kept = watches.FacesKept(ctx, log)
+    ctx.watches = Watches(settings.watches, source=ffmpeg_frames, find=watches.frame_finder(ctx, kept), crop=ffmpeg_crop, log=log, idle=kept.release)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):

@@ -74,3 +74,11 @@ def test_only_the_card_worker_imports_ahead(monkeypatch):
     ms._preload_started()
     ms._preload(ms._stop, frozenset())
     assert imported == [] and registry.pinned_ready.is_set()
+
+
+def test_unpin_leaves_a_family_to_eviction_and_a_recycle_without_it(monkeypatch):
+    setup(monkeypatch, role="batch")
+    registry.PINNED_FAMILIES.update({"faces", "text-embed"})
+    assert ms.handle({"op": "unpin", "families": ["faces", "ocr"]}) == {"unpinned": ["faces"]}
+    assert registry.PINNED_FAMILIES == {"text-embed"}
+    assert os.environ["CFG_MODEL_PINNED"] == "text-embed"

@@ -2,12 +2,14 @@
 events, under an id the caller chose (_4.24_).
 
 A watch reads its source with ffmpeg, a few frames a second in the display frame, each frame a PPM
-on ffmpeg's output. A frame is looked at for faces while it differs from the one before (`motion`)
+on ffmpeg's output; NVDEC decodes it where the host has a card. A frame is looked at for faces while it differs from the one before (`motion`)
 or a face is being followed; the model worker finds the faces (`detect_faces`), and they are
 followed from frame to frame by `face_tracks`' rules: a face continues its track by overlapping
 box and likeness, or by likeness alone, and a track ends when its face has been gone for
 `face_tracks.max_gap`. A track is told once it has been seen twice (`face`), and again when it
 ends (`face.end`), with its best detection, the mean of its best vectors and a JPEG of the face.
+While any watch runs the faces family stays loaded, and its frames leave the card arbiter as it
+is (ems/ops/watches.py, ems/card.py).
 
 Nothing of a watch is kept: it lives in memory, and a caller states its watches again when EMS
 starts. A source that drops is read again after a pause that doubles up to a minute, and the
@@ -31,6 +33,7 @@ from pydantic import Field
 
 from .errors import BUSY, INVALID_REQUEST, NOT_FOUND, EmsError
 from .schemas import Box, Strict
+from .tools import ffmpeg as ffmpeg_tool
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "modelworker"))
 import face_tracks  # noqa: E402
@@ -398,14 +401,16 @@ class Watch:
 
 
 class Watches:
-    """Every watch of this EMS, by id."""
+    """Every watch of this EMS, by id. `idle` is called once the last of them has stopped."""
 
-    def __init__(self, limit: int, *, source: FrameSource, find: FaceFinder, crop: CropEncoder, log: Callable[[str], None]):
+    def __init__(self, limit: int, *, source: FrameSource, find: FaceFinder, crop: CropEncoder, log: Callable[[str], None],
+                 idle: Callable[[], Awaitable[None]] | None = None):
         self.limit = limit
         self.source = source
         self.find = find
         self.crop = crop
         self.log = log
+        self.idle = idle
         self.watches: dict[str, Watch] = {}
 
     def get(self, watch_id: str) -> Watch:
@@ -425,13 +430,18 @@ class Watches:
         if known is None and len(self.watches) >= self.limit:
             raise EmsError(BUSY, f"this EMS runs at most {self.limit} watches (EMS_WATCHES)")
         if known is not None:
-            await self.delete(watch_id)
+            await self._drop(watch_id)
         watch = Watch(watch_id, spec, source=self.source, find=self.find, crop=self.crop, log=self.log)
         self.watches[watch_id] = watch
         watch.start()
         return watch, True
 
     async def delete(self, watch_id: str) -> None:
+        await self._drop(watch_id)
+        if not self.watches and self.idle is not None:
+            await self.idle()
+
+    async def _drop(self, watch_id: str) -> None:
         watch = self.get(watch_id)
         del self.watches[watch_id]
         await watch.stop()
@@ -447,25 +457,55 @@ class Watches:
         return watch, queue
 
 
-def filters(spec: WatchSpec) -> str:
+def filters(spec: WatchSpec, nvdec: bool = False) -> str:
     """ffmpeg's filters for a watch: its frames a second, turned into the display frame, no side
-    longer than MAX_EDGE."""
+    longer than MAX_EDGE. Frames NVDEC decoded stay on the card until `fps` has let them through."""
     turn = {0: [], 90: ["transpose=2"], 180: ["hflip", "vflip"], 270: ["transpose=1"]}[spec.angle]
-    chain = [f"fps={spec.faces.fps}", *turn, *(["hflip"] if spec.mirror else [])]
+    chain = [f"fps={spec.faces.fps}", *(["hwdownload", "format=nv12"] if nvdec else []), *turn, *(["hflip"] if spec.mirror else [])]
     chain.append(f"scale=w='min({MAX_EDGE},iw)':h='min({MAX_EDGE},ih)':force_original_aspect_ratio=decrease:force_divisible_by=2")
     return ",".join(chain)
 
 
+# Sources NVDEC gave nothing of where the CPU did, and when: read on the CPU for NVDEC_AGAIN_AFTER
+# seconds, in case NVDEC's failure was the source's own coming back.
+_cpu_only: dict[str, float] = {}
+NVDEC_AGAIN_AFTER = 3600.0
+
+
 async def ffmpeg_frames(spec: WatchSpec) -> AsyncIterator[Frame]:
-    """The source's frames as ffmpeg decodes them: a network stream as it comes, over TCP for RTSP;
-    a local file at its own pace, again and again, for a test."""
+    """The source's frames as ffmpeg decodes them: by NVDEC on a host with a card, on the CPU
+    without one or when NVDEC gives nothing (a codec it lacks), the CPU's error told if it gives
+    nothing either."""
+    if ffmpeg_tool.gpu_present() and time.monotonic() - _cpu_only.get(spec.source, -NVDEC_AGAIN_AFTER) >= NVDEC_AGAIN_AFTER:
+        frames = 0
+        try:
+            async for frame in _ffmpeg_frames(spec, nvdec=True):
+                frames += 1
+                yield frame
+            return
+        except ConnectionError:
+            if frames:
+                raise
+    frames = 0
+    async for frame in _ffmpeg_frames(spec, nvdec=False):
+        if not frames and ffmpeg_tool.gpu_present():
+            _cpu_only[spec.source] = time.monotonic()
+        frames += 1
+        yield frame
+
+
+async def _ffmpeg_frames(spec: WatchSpec, nvdec: bool) -> AsyncIterator[Frame]:
+    """One read of the source: a network stream as it comes, over TCP for RTSP; a local file at its
+    own pace, again and again, for a test."""
     source = spec.source
     args = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin"]
     if source.startswith(("rtsp://", "rtsps://")):
         args += ["-rtsp_transport", "tcp", "-timeout", "10000000"]
     elif "://" not in source:
         args += ["-re", "-stream_loop", "-1"]
-    args += ["-i", source, "-an", "-vf", filters(spec), "-f", "image2pipe", "-vcodec", "ppm", "pipe:1"]
+    if nvdec:
+        args += ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]
+    args += ["-i", source, "-an", "-vf", filters(spec, nvdec), "-f", "image2pipe", "-vcodec", "ppm", "pipe:1"]
     process = await asyncio.create_subprocess_exec(*args, stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     assert process.stdout is not None and process.stderr is not None
     try:

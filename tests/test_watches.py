@@ -16,7 +16,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 import face_tracks  # noqa: E402
 
 from conftest import AUTH, KEY, FakeModelWorker  # noqa: E402
+from ems import watches as watches_module  # noqa: E402
 from ems.app import create_app  # noqa: E402
+from ems.card import CardArbiter, watching  # noqa: E402
 from ems.config import Settings  # noqa: E402
 from ems.ops import watches as watches_op  # noqa: E402
 from ems.watches import Frame, Watches, WatchSpec, masked_source, ppm_size  # noqa: E402
@@ -80,15 +82,19 @@ async def ems(tmp_path, monkeypatch):
     monkeypatch.setattr("ems.watches.MIN_BACKOFF", 0.05)
     worker_stub = FakeModelWorker(str(tmp_path / "worker.sock"))
     worker_stub.on("detect_faces", detect_faces)
+    worker_stub.on("pin", lambda req: {"pinning": req["families"]})
+    worker_stub.on("unpin", lambda req: {"unpinned": req["families"]})
     await worker_stub.start()
     settings = Settings.from_env({"EMS_KEY": KEY, "EMS_SCRATCH": str(tmp_path / "scratch"), "EMS_WORKER_SOCKET": worker_stub.socket_path, "EMS_WATCHES": "1"})
     app = create_app(settings, worker=Worker("/nonexistent/model_server.py", worker_stub.socket_path, log=lambda m: None), start_worker=False)
     ctx = app.state.ctx
 
     def watches(source) -> Watches:
-        ctx.watches = Watches(settings.watches, source=source, find=watches_op.frame_finder(ctx), crop=crop, log=lambda m: None)
+        kept = watches_op.FacesKept(ctx, lambda m: None)
+        ctx.watches = Watches(settings.watches, source=source, find=watches_op.frame_finder(ctx, kept), crop=crop, log=lambda m: None, idle=kept.release)
         return ctx.watches
 
+    watches.ctx = ctx
     async with app.router.lifespan_context(app):
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://ems", headers=AUTH) as client:
             yield client, watches, worker_stub
@@ -182,6 +188,59 @@ async def test_the_event_stream_ends_when_its_watch_is_deleted(ems):
     state = json.loads(response.text.split("data: ", 1)[1].split("\n", 1)[0])
     assert state["id"] == "front-door" and state["state"] in ("connecting", "running")
     assert (await client.get("/v0/watches/front-door")).status_code == 404
+
+
+async def test_the_faces_family_is_pinned_while_a_watch_runs_and_again_after_a_worker_restart(ems):
+    client, watches, worker_stub = ems
+    watches(Script([frame(10 + 90 * (n % 2), False) for n in range(40)]))
+    pins = lambda: [(request["op"], request["families"]) for request in worker_stub.requests if request["op"] in ("pin", "unpin")]
+    await client.put("/v0/watches/front-door", json={"source": "rtsp://192.0.2.30/sub"})
+    async with asyncio.timeout(5):
+        while not pins():
+            await asyncio.sleep(0.05)
+    assert pins() == [("pin", ["faces"])]
+    ctx = watches.ctx
+    assert ctx.card.kept == frozenset({"faces"})
+    ctx.worker.restarts += 1
+    async with asyncio.timeout(5):
+        while len(pins()) < 2:
+            await asyncio.sleep(0.05)
+    # A watch made again with another body keeps the family; the last one stopped lets it go.
+    await client.put("/v0/watches/front-door", json={"source": "rtsp://192.0.2.30/sub", "motion": False})
+    assert pins() == [("pin", ["faces"])] * 2
+    await client.delete("/v0/watches/front-door")
+    assert pins() == [("pin", ["faces"])] * 2 + [("unpin", ["faces"])]
+    assert ctx.card.kept == frozenset()
+
+
+async def test_a_watchs_frame_leaves_a_quiet_card_quiet():
+    arbiter = CardArbiter(None, None, None, 60, lambda: None)
+    arbiter.enabled, arbiter.mode = True, "quiet"
+    token = watching.set(True)
+    try:
+        async with arbiter.gate("detect_faces", {}):
+            assert arbiter.inflight == 0
+    finally:
+        watching.reset(token)
+    assert arbiter.mode == "quiet"
+
+
+async def test_nvdec_decodes_and_the_cpu_takes_a_source_it_gives_nothing_of(monkeypatch):
+    reads: list[tuple[str, bool]] = []
+
+    async def decode(spec, nvdec):
+        reads.append((spec.source, nvdec))
+        if nvdec and spec.source.endswith("mjpeg"):
+            raise ConnectionError("no NVDEC for this codec")
+        yield frame(10, False)
+
+    monkeypatch.setattr(watches_module, "_ffmpeg_frames", decode)
+    monkeypatch.setattr(watches_module, "_cpu_only", {})
+    monkeypatch.setattr("ems.tools.ffmpeg.gpu_present", lambda: True)
+    for source in ("rtsp://192.0.2.30/h264", "rtsp://192.0.2.31/mjpeg", "rtsp://192.0.2.31/mjpeg"):
+        assert len([each async for each in watches_module.ffmpeg_frames(WatchSpec(source=source))]) == 1
+    assert reads == [("rtsp://192.0.2.30/h264", True), ("rtsp://192.0.2.31/mjpeg", True), ("rtsp://192.0.2.31/mjpeg", False), ("rtsp://192.0.2.31/mjpeg", False)]
+    assert watches_module.filters(WatchSpec(source="x", angle=90), nvdec=True).startswith("fps=3.0,hwdownload,format=nv12,transpose=2,")
 
 
 def test_a_source_is_shown_without_its_password_and_ffmpeg_headers_are_read():

@@ -20,6 +20,11 @@ A batch request entering busy mode waits until the card worker has stopped, so a
 loads beside it; a search never waits, because the query worker answers throughout. Text embedding of
 documents does not count as batch work: it is small, and runs where the mode says.
 
+A watch's frames (ems/watches.py) are live work, not batch work: they run inside `watching` and
+never make the card busy. The faces family they need stays pinned on the batch worker while any
+watch runs (`kept`), so neither the quiet unload nor busy mode's room-making and idle eviction take
+it between two frames; the card worker loads into what is free beside it.
+
 With no card, no query worker or `quiet_after` 0 there is nothing to arbitrate, and every call
 here is a pass-through.
 """
@@ -27,6 +32,7 @@ here is a pass-through.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import time
 from contextlib import asynccontextmanager, nullcontext
 from dataclasses import dataclass
@@ -37,7 +43,9 @@ from .worker import Worker
 
 # Worker ops that are not batch model work: they never make the card busy. The query ops are here
 # for a query worker that is down, when search falls back to the batch worker.
-_NOT_BATCH = frozenset({"health", "memstats", "transcribe_signature", "unload", "embed_texts", "embed_image_texts"})
+_NOT_BATCH = frozenset({"health", "memstats", "transcribe_signature", "unload", "pin", "unpin", "embed_texts", "embed_image_texts"})
+# Set around a watch's call to the batch worker: live work, which never makes the card busy.
+watching: contextvars.ContextVar[bool] = contextvars.ContextVar("watching", default=False)
 TICK_SECONDS = 30.0
 # How long the card worker may take to load its families before the card is left to the CPU.
 READY_TIMEOUT_SECONDS = 300.0
@@ -115,6 +123,8 @@ class CardArbiter:
         # The families queries go to the card worker for; empty while it is down or loading.
         self.on_card: frozenset[str] = frozenset()
         self.skipped: dict[str, str] = {}
+        # The batch families pinned for the watches running, which stay loaded in both modes.
+        self.kept: frozenset[str] = frozenset()
         self._card_inflight = 0
         self._ready_restarts = 0
         self._lock = asyncio.Lock()
@@ -147,8 +157,8 @@ class CardArbiter:
         return "card" if self.enabled and self.mode == "quiet" else None
 
     def gate(self, op: str, _payload: dict[str, Any]):
-        """The batch worker's hook around each call: batch model work holds the card busy."""
-        return nullcontext() if op in _NOT_BATCH else self._batch_work()
+        """The batch worker's hook around each call: batch model work holds the card busy, a watch's does not."""
+        return nullcontext() if op in _NOT_BATCH or watching.get() else self._batch_work()
 
     @asynccontextmanager
     async def _batch_work(self):
@@ -271,7 +281,8 @@ class CardArbiter:
         """Where each family runs in each mode — `card`, `cpu` or `unloaded` — as the arbiter places it.
 
         Batch families run where their device setting says while busy and are unloaded while quiet
-        (batch work switches to busy before it runs); the document embedder follows its setting
+        (batch work switches to busy before it runs), but for those kept for watches, which stay
+        where they are; the document embedder follows its setting
         while busy and goes on the card while quiet, room permitting; the query families answer on
         the CPU while busy and on the card while quiet if they fit. While busy that last is a
         prediction from the card now, less what the batch and card workers hold; while quiet it is
@@ -291,6 +302,8 @@ class CardArbiter:
             setting = "cpu" if entry.get("device") == "cpu" else "card"
             if name in query:
                 plan[name] = {"busy": "cpu", "quiet": "card" if name in on_card else "cpu", **({"why": skipped[name]} if name in skipped else {})}
+            elif name in self.kept:
+                plan[name] = {"busy": setting, "quiet": setting}
             elif name == "text-embed":
                 plan[name] = {"busy": setting, "quiet": "card"}
             else:
@@ -308,5 +321,6 @@ class CardArbiter:
             "last_batch": round(self.last_batch, 1),
             "batch_in_flight": self.inflight,
             "search_on_card": sorted(self.on_card),
+            **({"kept": sorted(self.kept)} if self.kept else {}),
             **({"skipped": self.skipped} if self.skipped else {}),
         }

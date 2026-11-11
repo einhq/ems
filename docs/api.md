@@ -125,10 +125,12 @@ it was written for.
 
 ### 2.5 Admission
 
-EMS bounds concurrent work in three lanes — `models` (requests forwarded to the model worker,
-which serialises per model family behind that), `tools` (CPU and subprocess work) and `encodes`
+EMS bounds concurrent work in four lanes — `models` (requests forwarded to the model worker,
+which serialises per model family behind that), `tools` (CPU and subprocess work), `encodes`
 (whole-file decodes: transcodes, storyboards and shot decodes, so a long one never sits ahead of the probes and
-renditions) — and reports the bounds in `capabilities.limits`. Past `queue_depth` waiters of one
+renditions) and `watches` (_0.3.6_; a watch's frames on their way to the faces model, one at a time
+a watch, so a crawl filling `models` never holds one back) — and reports the bounds in
+`capabilities.limits`. Past `queue_depth` waiters of one
 caller, across the lanes, a new request of that caller's is `503 busy` with `Retry-After`; the
 other callers are still admitted. Interactive requests may use `interactive_reserve` extra slots,
 so a crawl never starves a person waiting.
@@ -930,6 +932,9 @@ family, where it runs in each mode — `{"busy": "card" | "cpu", "quiet": "card"
 document embedder its setting while busy and the card while quiet, the query families the CPU while
 busy and the card while quiet if they fit. While busy the quiet column is a prediction from the
 card's free memory less what the batch and card workers hold; `why` names the shortfall.
+`kept` (_0.3.6_) lists the batch families pinned while a watch runs (§4.24): they stay loaded in
+both modes, where their setting puts them, and the card worker loads into what is left. A watch's
+frames never make the card busy.
 
 `degraded` lists what is wrong with the card — the things that are otherwise indistinguishable
 from "slow": a card the host should have and does not see (`EMS_EXPECT_GPU`), and `what: "gpu"`,
@@ -1044,8 +1049,12 @@ read, `looked` how many were looked at for faces, `faces` how many faces were to
 many are being followed now. The source's password is never shown.
 
 The source is read with ffmpeg, `faces.fps` frames a second in the display frame, the longer side
-at most 1024 px. A frame is looked at for faces while it differs from the one before or a face is
-being followed, by the faces model as an interactive request (_2.5_); the faces are followed from
+at most 1024 px, decoded by NVDEC on a host with a card (_0.3.6_) and on the CPU without one or for a
+source NVDEC gives nothing of, such as a codec it lacks, for an hour before NVDEC is tried again. A
+frame is looked at for faces while it differs from the one before or a face is being followed, by
+the faces model in the `watches` lane (_2.5_). While any watch runs the faces family is pinned on
+the model worker, so no batch work unloads it between two frames, and the card arbiter leaves the
+card as it is for the watch's frames (`health.card.kept`, §4.22); the faces are followed from
 frame to frame as `faces.detect_video` follows them, a face gone for two seconds having left. A
 source that ends or fails is read again after a pause that doubles from a second to a minute.
 

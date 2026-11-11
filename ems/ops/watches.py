@@ -11,28 +11,82 @@ from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 
 from .. import API_VERSION
+from ..card import watching
 from ..context import Context
-from ..schemas import Options
+from ..errors import EmsError
 from ..watches import Frame, WatchSpec
-from ._models import model_slot
 
 PRODUCER = "retinaface-r34+transface"
+# The model family a watch looks with.
+FAMILY = "faces"
 
 # A comment on an event stream this often keeps a proxy from closing it while nothing happens.
 KEEP_ALIVE_SECONDS = 15.0
 
 
-def frame_finder(ctx: Context):
-    """How a watch's frame is looked at for faces: written where the worker reads it, and given
-    to `detect_faces` as an interactive request, ahead of batch work."""
+class FacesKept:
+    """The faces family pinned on the batch worker while any watch runs, so batch work never
+    unloads it between two frames (ems/card.py, `kept`). Pinned at a watch's frame when it is not
+    yet, which is again after the worker restarted and forgot its pins; left to eviction once the
+    last watch stops. A family the configuration pins (EMS_MODEL_PINNED) is left alone."""
+
+    def __init__(self, ctx: Context, log):
+        self.ctx = ctx
+        self.log = log
+        # The worker's restart count when it was pinned; None while it is not.
+        self.pinned_at: int | None = None
+        self.lock = asyncio.Lock()
+
+    def _configured(self) -> bool:
+        return FAMILY in self.ctx.worker.env.get("CFG_MODEL_PINNED", "").split(",")
+
+    def _mark(self, kept: bool) -> None:
+        if self.ctx.card is not None:
+            self.ctx.card.kept = frozenset({FAMILY}) if kept else frozenset()
+
+    async def keep(self) -> None:
+        worker = self.ctx.worker
+        if self.pinned_at == worker.restarts or self._configured():
+            return
+        async with self.lock:
+            if self.pinned_at == worker.restarts:
+                return
+            # Marked before the answer: a worker that cannot pin is not asked again each frame.
+            self.pinned_at = worker.restarts
+            self._mark(True)
+            try:
+                await worker.call("pin", {"families": [FAMILY]})
+            except EmsError as exc:
+                self.log(f"watches: the worker did not pin {FAMILY}: {exc}")
+
+    async def release(self) -> None:
+        async with self.lock:
+            if self.pinned_at is None:
+                return
+            self.pinned_at = None
+            self._mark(False)
+            try:
+                await self.ctx.worker.call("unpin", {"families": [FAMILY]})
+            except EmsError as exc:
+                self.log(f"watches: the worker did not unpin {FAMILY}: {exc}")
+
+
+def frame_finder(ctx: Context, kept: FacesKept):
+    """How a watch's frame is looked at for faces: written where the worker reads it, and given to
+    `detect_faces` in the `watches` lane, with its family kept loaded and the card left as it is."""
 
     async def find(watch_id: str, frame: Frame) -> dict:
         os.makedirs(ctx.settings.scratch, exist_ok=True)
         path = os.path.join(ctx.settings.scratch, f"watch-{watch_id}.ppm")
         with open(path, "wb") as handle:
             handle.write(frame.ppm)
-        async with model_slot(ctx, Options(priority="interactive")):
-            return await ctx.worker.call("detect_faces", {"path": path, "angle": 0, "mirror": False}) or {}
+        token = watching.set(True)
+        try:
+            await kept.keep()
+            async with ctx.admission.slot("watches", interactive=True):
+                return await ctx.worker.call("detect_faces", {"path": path, "angle": 0, "mirror": False}) or {}
+        finally:
+            watching.reset(token)
 
     return find
 

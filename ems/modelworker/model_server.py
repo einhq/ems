@@ -27,6 +27,7 @@ response per connection.
   -> {"op":"detect_video_faces","path":"/files/S1/01K...","angle":90,"interval":1.0,"duration":63.2,"min_size":0.02,"min_confidence":0.7}
   -> {"op":"embed_face","path":"...","box":{"x":0.1,"y":0.2,"width":0.1,"height":0.1},"angle":270}
   -> {"op":"pin","families":["siglip-text","text-query"]}
+  -> {"op":"unpin","families":["faces"]}
   -> {"op":"health"}
 
 `angle`/`mirror` (optional, default 0/false) name the display frame an image op works in —
@@ -41,7 +42,8 @@ idle, so an audio-free crawl never pays for whisper and VRAM stays bounded. Infe
 Families in CFG_MODEL_PINNED (default: text-query) are exempt from eviction and are
 preloaded at startup — they sit on the interactive search path, where a reload costs
 tens of seconds and is far more noticeable than the VRAM it frees. `pin` pins more of them
-and preloads those the same way, answering at once; `health` says when they have loaded.
+and preloads those the same way, answering at once; `health` says when they have loaded. `unpin`
+leaves families to eviction again, without unloading them.
 
 The server also holds itself to an RSS ceiling (CFG_MODEL_MAX_RSS, by default a
 fraction of the cgroup limit). Crossing it logs the `memstats` line and the `op_counts`
@@ -333,6 +335,12 @@ def handle(request: dict) -> dict:
         if not isinstance(families, list) or not families:
             raise ValueError("pin: missing families")
         return {"pinning": _pin([str(family) for family in families])}
+
+    if op == "unpin":
+        families = request.get("families")
+        if not isinstance(families, list) or not families:
+            raise ValueError("unpin: missing families")
+        return {"unpinned": _unpin([str(family) for family in families])}
 
     if op == "memstats":
         # Host-RSS diagnostics, by hand over the socket. Kept out of `health` because it reads /proc/self/maps, which is O(mappings) and pointless on the
@@ -631,6 +639,9 @@ def _warm_query(family: str):
             for words in range(1, WARM_QUERY_WORDS + 1 if device == "cuda" else 2):
                 model.encode([" ".join(["warm"] * words)], prompt_name="query")
         return query
+    if family == 'faces':
+        # A watch's family: loaded, with nothing to run through it; its first frame sets up the rest.
+        return lambda: registry.faces(registry.faces_device())
     return None
 
 
@@ -673,6 +684,15 @@ def _pin(families: list[str]) -> list[str]:
         _preload_started()
         threading.Thread(target=_preload, args=(_stop, frozenset(new)), daemon=True).start()
     return new
+
+
+def _unpin(families: list[str]) -> list[str]:
+    """Leave `families` to eviction again: still loaded, unloaded when idle. Returns those that were pinned."""
+    gone = sorted(set(families) & registry.PINNED_FAMILIES)
+    if gone:
+        registry.PINNED_FAMILIES.difference_update(gone)
+        os.environ["CFG_MODEL_PINNED"] = ",".join(sorted(registry.PINNED_FAMILIES))
+    return gone
 
 
 def _preload_families(stop: threading.Event, families: set[str] | frozenset[str]) -> None:
