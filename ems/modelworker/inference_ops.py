@@ -28,6 +28,7 @@ SSCD = "sscd"
 TRANSNET = "transnet"
 LAMA = "lama"
 DEFECTS = "defects"
+DENOISE = "denoise"
 OCR = "ocr"
 HTR = "htr"
 TEXT_EMBED = "text-embed"
@@ -1184,6 +1185,54 @@ def detect_defects(path: str, out: str, dark: bool = False) -> dict:
     if not cv2.imwrite(out, np.rint(found * 65535).astype(np.uint16)):
         raise OSError(f"{out} could not be written")
     return {"model": registry.DEFECTS_MODEL}
+
+
+def denoise(path: str, out: str, noise: str = "15", strength: float = 1.0, fmt: str = "png") -> dict:
+    """The picture at `path` (8 or 16 bits; grey, RGB or RGBA) with less noise, written to `out` as
+    `fmt` (`png` or `tiff`) at its own depth and channels: SCUNet's answer for `noise`, a weight of
+    `noise` (`15`, `25` or `real`), blended with the picture by `strength` (1 is SCUNet's whole
+    answer). An alpha channel is kept as it is.
+    """
+    import cv2
+    import denoise as denoising
+    import numpy as np
+
+    # "could not load image" is how the front learns a picture is unsupported (worker.classify).
+    if not cv2.haveImageReader(path):
+        raise RuntimeError(f"could not load image: OpenCV has no reader for {os.path.basename(path)}")
+    picture = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+    if picture is None:
+        raise Undecodable(f"{os.path.basename(path)} cannot be decoded")
+    if picture.dtype not in (np.uint8, np.uint16):
+        raise RuntimeError(f"could not load image: {picture.dtype} samples; only 8 and 16 bits are denoised")
+    top = float(np.iinfo(picture.dtype).max)
+    grey = picture.ndim == 2
+    height, width = picture.shape[:2]
+    result = picture.copy()
+    boxes = list(denoising.tiles(height, width))
+    for index, ((cy0, cy1, cx0, cx1), (y0, y1, x0, x1)) in enumerate(boxes):
+        shown = picture[y0:y1, x0:x1]
+        colour = shown if grey else shown[:, :, :3]
+        rgb = cv2.cvtColor(colour, cv2.COLOR_GRAY2RGB if grey else cv2.COLOR_BGR2RGB).astype(np.float32) / top
+
+        def run():
+            return registry.denoiser(registry.denoise_device(), noise).run(rgb)
+
+        with registry.family_lock(DENOISE):
+            found = registry.run_on_model_thread(DENOISE, run)
+        blended = rgb + strength * (found - rgb)
+        core = blended[cy0 - y0 : cy1 - y0, cx0 - x0 : cx1 - x0]
+        values = np.clip(np.rint(core * top), 0, top).astype(picture.dtype)
+        if grey:
+            result[cy0:cy1, cx0:cx1] = np.clip(np.rint(core.mean(axis=2) * top), 0, top).astype(picture.dtype)
+        else:
+            result[cy0:cy1, cx0:cx1, :3] = cv2.cvtColor(values, cv2.COLOR_RGB2BGR)
+        registry.report_progress((index + 1) / len(boxes))
+    params = [cv2.IMWRITE_TIFF_COMPRESSION, cv2.IMWRITE_TIFF_COMPRESSION_ADOBE_DEFLATE, cv2.IMWRITE_TIFF_PREDICTOR, cv2.IMWRITE_TIFF_PREDICTOR_HORIZONTAL] if fmt == "tiff" else []
+    if not cv2.imwrite(out, result, params):
+        raise OSError(f"{out} could not be written")
+    return {"model": registry.denoise_model(noise), "width": width, "height": height,
+            "channels": 1 if grey else picture.shape[2], "depth": picture.dtype.itemsize * 8}
 
 
 def shot_boundaries(path: str, times: list[float], duration: float, *, threshold: float, nms: float, merge: float, min_shot: float, min_change: float, leader: bool = True, debug: bool = False) -> dict:

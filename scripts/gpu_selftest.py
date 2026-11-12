@@ -286,6 +286,30 @@ def main() -> int:
         if elsewhere > 0.01:
             raise RuntimeError(f'the picture was taken for damage ({elsewhere:.2%})')
 
+    @check('SCUNet denoiser (card against CPU)')
+    def _denoise():
+        import os
+        import sys
+
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'ems', 'modelworker'))
+        from denoise import Denoiser
+
+        root = os.environ.get('CFG_DENOISE_ROOT', '/opt/denoise')
+        # Smooth ramps with Gaussian noise of 15 in 8-bit steps on them.
+        y, x = np.mgrid[0:256, 0:320].astype(np.float32)
+        clean = np.dstack([x / 319, y / 255, (x + y) / 574]).astype(np.float32) * 0.6 + 0.2
+        noisy = np.clip(clean + np.random.default_rng(0).normal(0, 15 / 255, clean.shape).astype(np.float32), 0, 1)
+        for name in ('scunet_color_15', 'scunet_color_25', 'scunet_color_real_psnr'):
+            path = os.path.join(root, name + '.pth')
+            card, cpu = Denoiser(path, 'cuda').run(noisy), Denoiser(path, 'cpu').run(noisy)
+            apart = float(np.abs(card - cpu).max()) * 255
+            before, after = float(np.abs(noisy - clean).mean()) * 255, float(np.abs(card - clean).mean()) * 255
+            print(f'{name}: card/CPU largest difference {apart:.2f}/255 | error {before:.1f} -> {after:.1f}')
+            if apart > 1:
+                raise RuntimeError(f'{name}: card and CPU disagree ({apart:.2f}/255)')
+            if after > before / 2:
+                raise RuntimeError(f'{name}: the noise was not lessened ({before:.1f} -> {after:.1f})')
+
     @check('TransNetV2 shot scores (card against CPU)')
     def _shots():
         import os

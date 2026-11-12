@@ -69,6 +69,7 @@ OP_FAMILIES = {
     "video.shots": "transnet",
     "image.inpaint": "lama",
     "image.defects": "defects",
+    "image.denoise": "denoise",
     "ocr.read": "ocr",
 }
 

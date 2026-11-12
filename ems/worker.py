@@ -122,6 +122,7 @@ WORKER_OP_FAMILIES = {
     "shot_boundaries": "transnet",
     "inpaint": "lama",
     "detect_defects": "defects",
+    "denoise": "denoise",
     "read_text": "ocr",
 }
 

@@ -53,6 +53,9 @@ The licence's text is Apache-2.0, beside this file.
   https://huggingface.co/Kansallisarkisto/multicentury-htr-model, in /opt/htr
 - TransNetV2's weights converted to PyTorch, https://huggingface.co/Sn4kehead/TransNetV2, in
   /opt/transnet
+- SCUNet's weights scunet_color_15, scunet_color_25 and scunet_color_real_psnr, from
+  https://github.com/cszn/KAIR/releases/tag/v1.0, in /opt/denoise; its network's code, from
+  https://github.com/cszn/SCUNet, is in /opt/ems/ems/modelworker/scunet.py
 - Samsung AI Center's big-lama, https://github.com/advimman/lama, as IOPaint exports it to
   TorchScript, https://github.com/Sanster/models/releases/tag/add_big_lama, in /opt/inpaint
 

@@ -309,6 +309,15 @@ DEFECTS_WEIGHTS = 'FT_Epoch_latest.pt'
 # 38 M parameters over tiles of 768 px (defects.TILE): 1.6 GB reserved at most on fry (2026-11-12).
 DEFECTS_MIN_FREE_MB = float(os.environ.get('CFG_DEFECTS_MIN_FREE_MB', '1700'))
 
+# The denoiser (`image.denoise`, see denoise.py): SCUNet, its authors' weights baked at pinned
+# sha256s, one file a noise the caller picks. The file's name is the producer. auto = the card when
+# it has room; float32 either way.
+DENOISE_ROOT = os.environ.get('CFG_DENOISE_ROOT', '/opt/denoise')
+DENOISE_DEVICE = os.environ.get('CFG_DENOISE_DEVICE', 'auto')
+DENOISE_WEIGHTS = {"15": "scunet_color_15", "25": "scunet_color_25", "real": "scunet_color_real_psnr"}
+# 18 M parameters over tiles of 512 px (denoise.TILE): 1.3 GB reserved at most on fry (2026-11-12).
+DENOISE_MIN_FREE_MB = float(os.environ.get('CFG_DENOISE_MIN_FREE_MB', '1500'))
+
 # The text reader (`ocr.read`, see text_reader.py): PP-OCRv6 det + rec through RapidOCR, ONNX files
 # baked at pinned sha256s under OCR_ROOT. The tier is the producer, so changing it changes what
 # every stored reading is named. auto = the card when it has room; float32 either way.
@@ -992,6 +1001,11 @@ def catalog() -> dict[str, dict]:
             "purpose": "Finds the dust, scratches and cracks on a scanned photo, as a mask of what to paint over.",
             "ops": ["image.defects"],
         },
+        "denoise": {
+            "model": "scunet", "device": DENOISE_DEVICE,
+            "purpose": "Lessens the grain and noise of a scanned photo, for a quieter copy beside the original.",
+            "ops": ["image.denoise"],
+        },
         "transnet": {
             "model": "transnetv2", "device": TRANSNET_DEVICE,
             "purpose": "Shot boundaries: where a film or a tape cuts from one shot to the next, for a video's chapters.",
@@ -1180,6 +1194,7 @@ CARD_NEED_MB = {
     "transnet": TRANSNET_MIN_FREE_MB,
     "lama": LAMA_MIN_FREE_MB,
     "defects": DEFECTS_MIN_FREE_MB,
+    "denoise": DENOISE_MIN_FREE_MB,
     "ocr": OCR_MIN_FREE_MB,
     "htr": HTR_MIN_FREE_MB,
     "htr-en": HTR_EN_MIN_FREE_MB,
@@ -1467,6 +1482,29 @@ def defects(device: str):
     def load():
         from defects import Detector
         return Detector(os.path.join(DEFECTS_ROOT, DEFECTS_WEIGHTS), device)
+
+    return _get(key, load)
+
+
+def denoise_device() -> str:
+    return place("denoise", DENOISE_DEVICE)
+
+
+def denoise_model(noise: str) -> str:
+    """The weights `image.denoise` uses for `noise`, by the name its authors gave them."""
+    if noise not in DENOISE_WEIGHTS:
+        raise ValueError(f"no denoiser for noise {noise!r}; one of {', '.join(DENOISE_WEIGHTS)}")
+    return DENOISE_WEIGHTS[noise]
+
+
+def denoiser(device: str, noise: str):
+    """SCUNet with the weights for `noise` (denoise.Denoiser)."""
+    name = denoise_model(noise)
+    key = f"denoise:{device}:{name}"
+
+    def load():
+        from denoise import Denoiser
+        return Denoiser(os.path.join(DENOISE_ROOT, f"{name}.pth"), device)
 
     return _get(key, load)
 

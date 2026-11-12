@@ -417,6 +417,21 @@ RUN mkdir -p /opt/defects \
     && echo "b2d7ab04e9b3885c6b1991bb7a0b823129dd6e3ac078a9fd059ebd2a7ba59a95  /opt/defects/FT_Epoch_latest.pt" | sha256sum -c -
 ENV CFG_DEFECTS_ROOT=/opt/defects
 
+# The denoiser (image.denoise, ems/modelworker/denoise.py): SCUNet (Apache-2.0), its authors' weights
+# from KAIR's v1.0 release, one a noise the request picks, each checked against its sha256. The
+# network (scunet.py) needs einops. ~216 MB.
+ARG DENOISE_WEIGHTS="scunet_color_15:fa3a95efb4add693a78917e70757a3d535c5a8c905ace9f93ba7e5897351e1b2 \
+    scunet_color_25:6b4e572fe69b1530aade8b7856b18b9e6ddf9cf2bd87c21bf045b51662096320 \
+    scunet_color_real_psnr:fa78899ba2caec9d235a900e91d96c689da71c42029230c2028b00f09f809c2e"
+RUN pip install --no-cache-dir einops==0.8.2 \
+    && mkdir -p /opt/denoise \
+    && for entry in ${DENOISE_WEIGHTS}; do \
+        name="${entry%%:*}"; sum="${entry##*:}"; \
+        curl -fsSL -o "/opt/denoise/$name.pth" "https://github.com/cszn/KAIR/releases/download/v1.0/$name.pth" \
+        && echo "$sum  /opt/denoise/$name.pth" | sha256sum -c - || exit 1; \
+    done
+ENV CFG_DENOISE_ROOT=/opt/denoise
+
 # ffmpeg 9.0.1, from BtbN's static LGPL builds. The image installs no distro ffmpeg.
 #
 # The LGPL build, not the GPL one: EMS encodes AV1 only, so it needs none of what --enable-gpl
