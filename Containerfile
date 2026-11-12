@@ -432,6 +432,16 @@ RUN pip install --no-cache-dir einops==0.8.2 \
     done
 ENV CFG_DENOISE_ROOT=/opt/denoise
 
+# The face restorer (image.restore_faces, ems/modelworker/faces_restore.py): GFPGAN v1.4, Tencent
+# ARC's weights from GFPGAN's v1.3.0 release, checked against their sha256. GFPGAN's code is
+# Apache-2.0; its LICENSE also names third-party parts under non-commercial terms, which EiN's list
+# of models and their licences says. ~350 MB.
+ARG GFPGAN_SHA256=e2cd4703ab14f4d01fd1383a8a8b266f9a5833dacee8e6a79d3bf21a1b6be5ad
+RUN mkdir -p /opt/gfpgan \
+    && curl -fsSL -o /opt/gfpgan/GFPGANv1.4.pth "https://github.com/TencentARC/GFPGAN/releases/download/v1.3.0/GFPGANv1.4.pth" \
+    && echo "${GFPGAN_SHA256}  /opt/gfpgan/GFPGANv1.4.pth" | sha256sum -c -
+ENV CFG_GFPGAN_ROOT=/opt/gfpgan
+
 # ffmpeg 9.0.1, from BtbN's static LGPL builds. The image installs no distro ffmpeg.
 #
 # The LGPL build, not the GPL one: EMS encodes AV1 only, so it needs none of what --enable-gpl

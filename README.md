@@ -99,7 +99,7 @@ against a real exiftool when one is installed.
 Implemented: the model primitives and composites, `media.probe`,
 `fingerprint.compute`, `document.extract`, the renditions (`image.renditions`,
 `video.poster`, `video.storyboard`, `audio.waveform`), the shots (`video.shots`), the transcodes (`video.transcode`,
-`audio.transcode`), inpainting (`image.inpaint`), the defects it fills (`image.defects`) and denoising (`image.denoise`). `docs/api.md` is the contract; `image.decode` and
+`audio.transcode`), inpainting (`image.inpaint`), the defects it fills (`image.defects`), denoising (`image.denoise`) and face restoration (`image.restore_faces`). `docs/api.md` is the contract; `image.decode` and
 `audio.extract` are specified there and not yet needed by any caller.
 
 ## Known issues

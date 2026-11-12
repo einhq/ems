@@ -318,6 +318,15 @@ DENOISE_WEIGHTS = {"15": "scunet_color_15", "25": "scunet_color_25", "real": "sc
 # 18 M parameters over tiles of 512 px (denoise.TILE): 1.3 GB reserved at most on fry (2026-11-12).
 DENOISE_MIN_FREE_MB = float(os.environ.get('CFG_DENOISE_MIN_FREE_MB', '1500'))
 
+# The face restorer (`image.restore_faces`, see faces_restore.py): GFPGAN v1.4, its authors' weights
+# baked at a pinned sha256. Its name is the producer. auto = the card when it has room; float32
+# either way.
+GFPGAN_MODEL = os.environ.get('CFG_GFPGAN_MODEL', 'GFPGANv1.4')
+GFPGAN_ROOT = os.environ.get('CFG_GFPGAN_ROOT', '/opt/gfpgan')
+GFPGAN_DEVICE = os.environ.get('CFG_GFPGAN_DEVICE', 'auto')
+# 86 M parameters over one 512 px face at a time: 1.2 GB reserved at most on fry (2026-11-12).
+GFPGAN_MIN_FREE_MB = float(os.environ.get('CFG_GFPGAN_MIN_FREE_MB', '1500'))
+
 # The text reader (`ocr.read`, see text_reader.py): PP-OCRv6 det + rec through RapidOCR, ONNX files
 # baked at pinned sha256s under OCR_ROOT. The tier is the producer, so changing it changes what
 # every stored reading is named. auto = the card when it has room; float32 either way.
@@ -1006,6 +1015,12 @@ def catalog() -> dict[str, dict]:
             "purpose": "Lessens the grain and noise of a scanned photo, for a quieter copy beside the original.",
             "ops": ["image.denoise"],
         },
+        "gfpgan": {
+            "model": GFPGAN_MODEL, "device": GFPGAN_DEVICE,
+            "purpose": "Redraws the faces in a scanned photo, sharper, when someone asks for it: the detail it adds "
+                       "is invented, and the result is marked as generated.",
+            "ops": ["image.restore_faces"],
+        },
         "transnet": {
             "model": "transnetv2", "device": TRANSNET_DEVICE,
             "purpose": "Shot boundaries: where a film or a tape cuts from one shot to the next, for a video's chapters.",
@@ -1192,6 +1207,7 @@ CARD_NEED_MB = {
     "siglip-visual": SIGLIP_VISUAL_MIN_FREE_MB,
     "sscd": SSCD_MIN_FREE_MB,
     "transnet": TRANSNET_MIN_FREE_MB,
+    "gfpgan": GFPGAN_MIN_FREE_MB,
     "lama": LAMA_MIN_FREE_MB,
     "defects": DEFECTS_MIN_FREE_MB,
     "denoise": DENOISE_MIN_FREE_MB,
@@ -1505,6 +1521,21 @@ def denoiser(device: str, noise: str):
     def load():
         from denoise import Denoiser
         return Denoiser(os.path.join(DENOISE_ROOT, f"{name}.pth"), device)
+
+    return _get(key, load)
+
+
+def gfpgan_device() -> str:
+    return place("gfpgan", GFPGAN_DEVICE)
+
+
+def gfpgan(device: str):
+    """GFPGAN_MODEL's restorer (faces_restore.Restorer)."""
+    key = f"gfpgan:{device}"
+
+    def load():
+        from faces_restore import Restorer
+        return Restorer(os.path.join(GFPGAN_ROOT, f"{GFPGAN_MODEL}.pth"), device)
 
     return _get(key, load)
 

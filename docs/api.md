@@ -2,9 +2,9 @@
 
 EMS (EiN Media Service) is a stateless service that answers questions about media bytes and
 produces media bytes: probing, renditions, transcodes, fingerprints, face detection, speech,
-image-text embeddings, text embeddings, document text extraction, inpainting and the defects it fills, denoising. It owns the tools (ffmpeg,
+image-text embeddings, text embeddings, document text extraction, inpainting and the defects it fills, denoising, face restoration. It owns the tools (ffmpeg,
 ImageMagick, exiftool, chromaprint, OpenCV) and the models (SigLIP2, RetinaFace and TransFace, a text
-embedder (bge-m3), PP-OCRv6, whisper, NeMo diarization and voiceprints, LR-ASD, LaMa, the scratch detector of Bringing Old Photos Back to Life, SCUNet) so that a caller never
+embedder (bge-m3), PP-OCRv6, whisper, NeMo diarization and voiceprints, LR-ASD, LaMa, the scratch detector of Bringing Old Photos Back to Life, SCUNet, GFPGAN) so that a caller never
 depends on which tool or model answers.
 
 This document is the contract. It is written to stand on its own: a caller with a directory of
@@ -497,6 +497,41 @@ A picture with less noise: the grain and the scanner's noise of a scanned print 
 
 Result: `{ "path", "width", "height", "channels", "depth", "bytes" }`. `meta.producer` is the
 weights' name, `scunet_color_15`, `scunet_color_25` or `scunet_color_real_psnr`.
+
+### 4.3d `image.restore_faces` _(implemented, 0.3.11)_
+
+The faces in a picture redrawn sharper by GFPGAN. **Generative**: the detail it adds — eyes,
+mouths, skin — is invented from what the model learnt of faces, and a face can come out looking
+like someone else. For a caller that asks for it on one picture, never as a default.
+
+```json
+{
+  "file": { "path": "…/master.tif" },
+  "faces": [{ "x": 0.41, "y": 0.22, "width": 0.09, "height": 0.13 }],
+  "min_size": 128,
+  "strength": 0.5,
+  "output": { "path": "…/faces.tif", "format": "tiff" }
+}
+```
+
+- The faces are found as `faces.detect` finds them. Of those, a face is redrawn when its box is at
+  least `min_size` pixels (16–4096, default 128) on its shorter side, the detector is at least 0.7
+  sure of it, and, when `faces` is given, its centre lies in one of those boxes (fractions of the
+  frame, at most 256). The rest are left alone: below about 128 px GFPGAN draws a face of its own
+  rather than the one there.
+- A face is aligned on its five points to GFPGAN's 512 px template, redrawn by GFPGAN v1.4, model
+  family `gfpgan`, with the fixed noise stored with its weights, so the same face gives the same
+  answer, and put back inside the aligned square, its edge feathered. `strength` (0–1, default 0.5)
+  blends the redrawn face with the one there: 1 is GFPGAN's whole face. **Every pixel outside the
+  faces is the file's, bit for bit.**
+- The output keeps the file's bit depth and channels (an alpha is kept as it is), carries no
+  metadata and no colour profile, and is `png` (the default) or `tiff`; `quality`, `angle` and
+  `mirror` are refused, as for `image.inpaint`. A file OpenCV has no reader for is `unsupported`.
+
+Result: `{ "path", "width", "height", "channels", "depth", "bytes", "generative": true, "faces": [ { "box", "confidence" } ], "left" }`
+— `faces` those redrawn, `left` how many faces found were left alone. `meta.producer` is
+`retinaface-r34+GFPGANv1.4`. A caller keeps the output as a derivative marked as generated, never
+in the original's place.
 
 ### 4.4 `video.frames` _(implemented)_
 
@@ -1083,7 +1118,7 @@ not as an idle one.
 What this EMS can do, for a caller to check before it relies on it:
 
 ```json
-{ "api": "0.3.10", "name": "fry", "build": { "version": "0.1.0", "commit": "fb6a7d9", "date": "2026-11-07T18:02:11+01:00" },
+{ "api": "0.3.11", "name": "fry", "build": { "version": "0.1.0", "commit": "fb6a7d9", "date": "2026-11-07T18:02:11+01:00" },
   "gpu": { "present": true, "name": "NVIDIA GeForce RTX 5060 Ti", "memory_mb": 16311 },
   "ops": [ "media.probe", "faces.detect", … ],
   "tools": { "exiftool": "13.10", "ffprobe": "9.0.1", "ffmpeg": "9.0.1", "magick": "7.1.1" },
@@ -1275,7 +1310,7 @@ PDF's pages (`EMS_OCR_DPI`, `EMS_OCR_MIN_PAGE_CHARS`, `EMS_OCR_MAX_PAGES`), and 
 biased towards the languages the archive holds; `ems/modelworker/model_registry.py` has the
 reasoning), `EMS_MODEL_PINNED`, `EMS_MODEL_IDLE_EVICT`, `EMS_ROOM_IDLE` (how long a family may sit
 idle before it is unloaded to make room for another on the card; 30), `EMS_MODEL_MAX_RSS`, `EMS_TITANET_DEVICE`,
-`EMS_IMAGE_EMBED_MODEL` / `EMS_IMAGE_EMBED_DEVICE` / `EMS_IMAGE_EMBED_GPU_MEM_MB` (`vision.embed`), `EMS_IMAGE_EMBED_TEXT_DEVICE` (`vision.embed_text`; `cpu` by default, ~0.3 s a query, so the card keeps room for the batch families), `EMS_COPY_DETECT_DEVICE` (`fingerprint.compute`'s `sscd-*` kinds; `auto`), `EMS_TRANSNET_DEVICE` (`video.shots`; `auto`), `EMS_INPAINT_DEVICE` (`image.inpaint`'s `lama`; `auto`), `EMS_DEFECTS_DEVICE` (`image.defects`; `auto`), `EMS_DENOISE_DEVICE` (`image.denoise`; `auto`), `EMS_OCR_DEVICE` / `EMS_OCR_PHOTO_TIER` (`medium`; `small` is baked too) / `EMS_OCR_HAND_ROOT` (the handwriting recogniser's directory) / `EMS_HTR_ROOT` / `EMS_HTR_DEVICE` (the transcriber's; `auto`) / `EMS_HTR_EN_ROOT` / `EMS_HTR_EN_DEVICE` (the English transcriber's; `auto`) / `EMS_OCR_LANGUAGE_MIN_LETTERS` / `EMS_OCR_LANGUAGE_MIN_CONFIDENCE` / `EMS_OCR_MIN_LINE_SCORE` / `EMS_OCR_MAX_SIDE` (1600: the longest side the detector sees, whose arena grows with the area) / `EMS_OCR_GPU_MEM_MB` (2048 per session) (`ocr.read`; `auto`), `EMS_TEXT_EMBED_DEVICE` / `EMS_TEXT_EMBED_QUERY_DEVICE` / `EMS_TEXT_EMBED_MAX_TOKENS` (`text.embed`; documents on the card, queries on the CPU by default), …
+`EMS_IMAGE_EMBED_MODEL` / `EMS_IMAGE_EMBED_DEVICE` / `EMS_IMAGE_EMBED_GPU_MEM_MB` (`vision.embed`), `EMS_IMAGE_EMBED_TEXT_DEVICE` (`vision.embed_text`; `cpu` by default, ~0.3 s a query, so the card keeps room for the batch families), `EMS_COPY_DETECT_DEVICE` (`fingerprint.compute`'s `sscd-*` kinds; `auto`), `EMS_TRANSNET_DEVICE` (`video.shots`; `auto`), `EMS_INPAINT_DEVICE` (`image.inpaint`'s `lama`; `auto`), `EMS_DEFECTS_DEVICE` (`image.defects`; `auto`), `EMS_DENOISE_DEVICE` (`image.denoise`; `auto`), `EMS_GFPGAN_DEVICE` (`image.restore_faces`; `auto`), `EMS_OCR_DEVICE` / `EMS_OCR_PHOTO_TIER` (`medium`; `small` is baked too) / `EMS_OCR_HAND_ROOT` (the handwriting recogniser's directory) / `EMS_HTR_ROOT` / `EMS_HTR_DEVICE` (the transcriber's; `auto`) / `EMS_HTR_EN_ROOT` / `EMS_HTR_EN_DEVICE` (the English transcriber's; `auto`) / `EMS_OCR_LANGUAGE_MIN_LETTERS` / `EMS_OCR_LANGUAGE_MIN_CONFIDENCE` / `EMS_OCR_MIN_LINE_SCORE` / `EMS_OCR_MAX_SIDE` (1600: the longest side the detector sees, whose arena grows with the area) / `EMS_OCR_GPU_MEM_MB` (2048 per session) (`ocr.read`; `auto`), `EMS_TEXT_EMBED_DEVICE` / `EMS_TEXT_EMBED_QUERY_DEVICE` / `EMS_TEXT_EMBED_MAX_TOKENS` (`text.embed`; documents on the card, queries on the CPU by default), …
 Changing any of them is a restart.
 
 Search queries have a model worker of their own, `EMS_QUERY_WORKER` (on by default; `0` keeps

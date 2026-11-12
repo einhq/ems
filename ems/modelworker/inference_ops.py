@@ -26,6 +26,7 @@ SIGLIP_VISUAL = "siglip-visual"
 SIGLIP_TEXT = "siglip-text"
 SSCD = "sscd"
 TRANSNET = "transnet"
+GFPGAN = "gfpgan"
 LAMA = "lama"
 DEFECTS = "defects"
 DENOISE = "denoise"
@@ -1232,6 +1233,56 @@ def denoise(path: str, out: str, noise: str = "15", strength: float = 1.0, fmt: 
     if not cv2.imwrite(out, result, params):
         raise OSError(f"{out} could not be written")
     return {"model": registry.denoise_model(noise), "width": width, "height": height,
+            "channels": 1 if grey else picture.shape[2], "depth": picture.dtype.itemsize * 8}
+
+
+def restore_faces(path: str, out: str, faces: list[dict], strength: float = 1.0, fmt: str = "png") -> dict:
+    """The picture at `path` (8 or 16 bits; grey, RGB or RGBA) with each face of `faces` redrawn by
+    GFPGAN, written to `out` as `fmt` (`png` or `tiff`) at its own depth and channels. A face is
+    given by its five points (`landmarks`, `[x, y]` in pixels of the picture) and blended in by
+    `strength` (1 is GFPGAN's whole face); every pixel outside the faces' paste masks, and an alpha
+    channel, is the picture's own. No faces loads no model.
+    """
+    import cv2
+    import faces_restore
+    import numpy as np
+
+    # "could not load image" is how the front learns a picture is unsupported (worker.classify).
+    if not cv2.haveImageReader(path):
+        raise RuntimeError(f"could not load image: OpenCV has no reader for {os.path.basename(path)}")
+    picture = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+    if picture is None:
+        raise Undecodable(f"{os.path.basename(path)} cannot be decoded")
+    if picture.dtype not in (np.uint8, np.uint16):
+        raise RuntimeError(f"could not load image: {picture.dtype} samples; only 8 and 16 bits are restored")
+    top = float(np.iinfo(picture.dtype).max)
+    grey = picture.ndim == 2
+    height, width = picture.shape[:2]
+    colour = picture if grey else picture[:, :, :3]
+    rgb = cv2.cvtColor(colour, cv2.COLOR_GRAY2RGB if grey else cv2.COLOR_BGR2RGB).astype(np.float32) / top
+    result = picture.copy()
+    for index, face in enumerate(faces):
+        aligned, matrix = faces_restore.align(rgb, face["landmarks"])
+
+        def run():
+            return registry.gfpgan(registry.gfpgan_device()).restore(aligned)
+
+        with registry.family_lock(GFPGAN):
+            restored = registry.run_on_model_thread(GFPGAN, run)
+        (y0, y1, x0, x1), back, weight = faces_restore.paste(restored, matrix, height, width, strength)
+        part = rgb[y0:y1, x0:x1]
+        part += weight[..., None] * (back - part)
+        touched = weight > 0
+        values = np.clip(np.rint(part * top), 0, top).astype(picture.dtype)
+        if grey:
+            result[y0:y1, x0:x1][touched] = np.clip(np.rint(part.mean(axis=2) * top), 0, top).astype(picture.dtype)[touched]
+        else:
+            result[y0:y1, x0:x1, :3][touched] = cv2.cvtColor(values, cv2.COLOR_RGB2BGR)[touched]
+        registry.report_progress((index + 1) / len(faces))
+    params = [cv2.IMWRITE_TIFF_COMPRESSION, cv2.IMWRITE_TIFF_COMPRESSION_ADOBE_DEFLATE, cv2.IMWRITE_TIFF_PREDICTOR, cv2.IMWRITE_TIFF_PREDICTOR_HORIZONTAL] if fmt == "tiff" else []
+    if not cv2.imwrite(out, result, params):
+        raise OSError(f"{out} could not be written")
+    return {"model": registry.GFPGAN_MODEL, "width": width, "height": height,
             "channels": 1 if grey else picture.shape[2], "depth": picture.dtype.itemsize * 8}
 
 

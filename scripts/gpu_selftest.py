@@ -310,6 +310,28 @@ def main() -> int:
             if after > before / 2:
                 raise RuntimeError(f'{name}: the noise was not lessened ({before:.1f} -> {after:.1f})')
 
+    @check('GFPGAN face restorer (card against CPU)')
+    def _restore_faces():
+        import os
+        import sys
+
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'ems', 'modelworker'))
+        from faces_restore import SIZE, Restorer
+
+        path = os.path.join(os.environ.get('CFG_GFPGAN_ROOT', '/opt/gfpgan'), os.environ.get('CFG_GFPGAN_MODEL', 'GFPGANv1.4') + '.pth')
+        face = synthetic_face_image()
+        import cv2
+
+        face = cv2.cvtColor(cv2.resize(face, (SIZE, SIZE)), cv2.COLOR_BGR2RGB).astype(np.float32) / 255
+        card, cpu = Restorer(path, 'cuda'), Restorer(path, 'cpu')
+        first, again, other = card.restore(face), card.restore(face), cpu.restore(face)
+        apart = float(np.abs(first - other).mean()) * 255
+        print(f'card/CPU mean difference {apart:.2f}/255 | the same face twice: {float(np.abs(first - again).max()) * 255:.3f}/255')
+        if apart > 2:
+            raise RuntimeError(f'card and CPU disagree ({apart:.2f}/255)')
+        if not np.array_equal(first, again):
+            raise RuntimeError('the same face came back different: the noise is not the stored one')
+
     @check('TransNetV2 shot scores (card against CPU)')
     def _shots():
         import os

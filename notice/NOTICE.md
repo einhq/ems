@@ -53,6 +53,13 @@ The licence's text is Apache-2.0, beside this file.
   https://huggingface.co/Kansallisarkisto/multicentury-htr-model, in /opt/htr
 - TransNetV2's weights converted to PyTorch, https://huggingface.co/Sn4kehead/TransNetV2, in
   /opt/transnet
+- Tencent ARC's GFPGAN v1.4, https://github.com/TencentARC/GFPGAN, its weights from the v1.3.0
+  release in /opt/gfpgan, and its clean network's code in /opt/ems/ems/modelworker/gfpgan_arch.py,
+  with BasicSR's weight initialisation (https://github.com/XPixelGroup/BasicSR, Apache-2.0).
+  GFPGAN's LICENSE also lists StyleGAN2 (NVIDIA Source Code License, non-commercial) and DFDNet
+  (CC BY-NC-SA 4.0) among its third-party components, without naming files; the clean network uses
+  none of StyleGAN2's CUDA extensions. The weights were trained on FFHQ, a dataset NVIDIA releases
+  under CC BY-NC-SA 4.0
 - SCUNet's weights scunet_color_15, scunet_color_25 and scunet_color_real_psnr, from
   https://github.com/cszn/KAIR/releases/tag/v1.0, in /opt/denoise; its network's code, from
   https://github.com/cszn/SCUNet, is in /opt/ems/ems/modelworker/scunet.py
