@@ -299,6 +299,16 @@ INPAINT_DEVICE = os.environ.get('CFG_INPAINT_DEVICE', 'auto')
 # op shows it (ems.tools.inpaint.LIMIT): 2.4 GB reserved at most on fry (2026-11-12).
 LAMA_MIN_FREE_MB = float(os.environ.get('CFG_LAMA_MIN_FREE_MB', '2600'))
 
+# The defect detector (`image.defects`, see defects.py): the scratch detector of Bringing Old Photos
+# Back to Life, its authors' checkpoint baked at a pinned sha256. Its name is the producer. auto =
+# the card when it has room; float32 either way.
+DEFECTS_MODEL = os.environ.get('CFG_DEFECTS_MODEL', 'bopb-detection')
+DEFECTS_ROOT = os.environ.get('CFG_DEFECTS_ROOT', '/opt/defects')
+DEFECTS_DEVICE = os.environ.get('CFG_DEFECTS_DEVICE', 'auto')
+DEFECTS_WEIGHTS = 'FT_Epoch_latest.pt'
+# 38 M parameters over tiles of 768 px (defects.TILE): 1.6 GB reserved at most on fry (2026-11-12).
+DEFECTS_MIN_FREE_MB = float(os.environ.get('CFG_DEFECTS_MIN_FREE_MB', '1700'))
+
 # The text reader (`ocr.read`, see text_reader.py): PP-OCRv6 det + rec through RapidOCR, ONNX files
 # baked at pinned sha256s under OCR_ROOT. The tier is the producer, so changing it changes what
 # every stored reading is named. auto = the card when it has room; float32 either way.
@@ -977,6 +987,11 @@ def catalog() -> dict[str, dict]:
                        "from what surrounds them, for a restored copy beside the original.",
             "ops": ["image.inpaint"],
         },
+        "defects": {
+            "model": DEFECTS_MODEL, "device": DEFECTS_DEVICE,
+            "purpose": "Finds the dust, scratches and cracks on a scanned photo, as a mask of what to paint over.",
+            "ops": ["image.defects"],
+        },
         "transnet": {
             "model": "transnetv2", "device": TRANSNET_DEVICE,
             "purpose": "Shot boundaries: where a film or a tape cuts from one shot to the next, for a video's chapters.",
@@ -1164,6 +1179,7 @@ CARD_NEED_MB = {
     "sscd": SSCD_MIN_FREE_MB,
     "transnet": TRANSNET_MIN_FREE_MB,
     "lama": LAMA_MIN_FREE_MB,
+    "defects": DEFECTS_MIN_FREE_MB,
     "ocr": OCR_MIN_FREE_MB,
     "htr": HTR_MIN_FREE_MB,
     "htr-en": HTR_EN_MIN_FREE_MB,
@@ -1436,6 +1452,21 @@ def lama(device: str):
     def load():
         from lama import Inpainter
         return Inpainter(os.path.join(INPAINT_ROOT, f"{INPAINT_MODEL}.pt"), device)
+
+    return _get(key, load)
+
+
+def defects_device() -> str:
+    return place("defects", DEFECTS_DEVICE)
+
+
+def defects(device: str):
+    """DEFECTS_MODEL's detector (defects.Detector)."""
+    key = f"defects:{device}"
+
+    def load():
+        from defects import Detector
+        return Detector(os.path.join(DEFECTS_ROOT, DEFECTS_WEIGHTS), device)
 
     return _get(key, load)
 

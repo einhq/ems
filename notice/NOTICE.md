@@ -29,6 +29,9 @@ The models are provided as is, without warranties of any kind, as their licences
 
 The licence's text, with the copyright notice it asks to be kept, is MIT, beside this file.
 
+- The scratch detector of Microsoft's Bringing Old Photos Back to Life, its v1.0 release,
+  https://github.com/microsoft/Bringing-Old-Photos-Back-to-Life, in /opt/defects; its network's
+  code is in /opt/ems/ems/modelworker/bopb_detection.py, with Microsoft's copyright notice
 - RetinaFace ResNet-34 from yakhyo/retinaface-pytorch, its v0.0.1 release,
   https://github.com/yakhyo/retinaface-pytorch, in /opt/faces/retinaface_r34.onnx
 - Alibaba DAMO Academy's TransFace, https://www.modelscope.cn/models/iic/cv_vit_face-recognition,

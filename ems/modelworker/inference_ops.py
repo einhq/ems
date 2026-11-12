@@ -27,6 +27,7 @@ SIGLIP_TEXT = "siglip-text"
 SSCD = "sscd"
 TRANSNET = "transnet"
 LAMA = "lama"
+DEFECTS = "defects"
 OCR = "ocr"
 HTR = "htr"
 TEXT_EMBED = "text-embed"
@@ -1161,6 +1162,28 @@ def inpaint(crops: list[dict]) -> dict:
             raise OSError(f"crop {index}: {crop['out']} could not be written")
         registry.report_progress((index + 1) / len(crops))
     return {"model": registry.INPAINT_MODEL}
+
+
+def detect_defects(path: str, out: str, dark: bool = False) -> dict:
+    """Each pixel's probability of being damage, for the grey picture at `path` (8 or 16 bits),
+    written to `out` as a grey PNG of 16 bits the same size; with `dark`, darker damage too.
+    """
+    import cv2
+    import numpy as np
+
+    picture = cv2.imread(path, cv2.IMREAD_GRAYSCALE | cv2.IMREAD_ANYDEPTH)
+    if picture is None:
+        raise FileNotFoundError(f"{path} cannot be read")
+    grey = picture.astype(np.float32) / np.iinfo(picture.dtype).max
+
+    def run():
+        return registry.defects(registry.defects_device()).probabilities(grey, dark)
+
+    with registry.family_lock(DEFECTS):
+        found = registry.run_on_model_thread(DEFECTS, run)
+    if not cv2.imwrite(out, np.rint(found * 65535).astype(np.uint16)):
+        raise OSError(f"{out} could not be written")
+    return {"model": registry.DEFECTS_MODEL}
 
 
 def shot_boundaries(path: str, times: list[float], duration: float, *, threshold: float, nms: float, merge: float, min_shot: float, min_change: float, leader: bool = True, debug: bool = False) -> dict:

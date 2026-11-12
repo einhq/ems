@@ -121,6 +121,7 @@ WORKER_OP_FAMILIES = {
     "copy_descriptors": "sscd",
     "shot_boundaries": "transnet",
     "inpaint": "lama",
+    "detect_defects": "defects",
     "read_text": "ocr",
 }
 

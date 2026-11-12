@@ -402,6 +402,21 @@ RUN mkdir -p /opt/inpaint \
 ENV CFG_INPAINT_MODEL=${INPAINT_MODEL}
 ENV CFG_INPAINT_ROOT=/opt/inpaint
 
+# The defect detector (image.defects, ems/modelworker/defects.py): the scratch detector of
+# Microsoft's Bringing Old Photos Back to Life (MIT), its checkpoint as the authors publish it in
+# the v1.0 release's global_checkpoints.zip. The zip is checked against its sha256 and only the
+# detector's file kept. ~450 MB kept, a 2 GB download.
+ARG DEFECTS_ZIP_SHA256=3ff4c52a3a65d71e458ff24b1d7339b326d216ef793c2027761e11efb30f7882
+RUN mkdir -p /opt/defects \
+    && curl -fsSL -o /tmp/global_checkpoints.zip \
+        "https://github.com/microsoft/Bringing-Old-Photos-Back-to-Life/releases/download/v1.0/global_checkpoints.zip" \
+    && echo "${DEFECTS_ZIP_SHA256}  /tmp/global_checkpoints.zip" | sha256sum -c - \
+    && python3 -c "import zipfile; \
+        open('/opt/defects/FT_Epoch_latest.pt', 'wb').write(zipfile.ZipFile('/tmp/global_checkpoints.zip').read('checkpoints/detection/FT_Epoch_latest.pt'))" \
+    && rm /tmp/global_checkpoints.zip \
+    && echo "b2d7ab04e9b3885c6b1991bb7a0b823129dd6e3ac078a9fd059ebd2a7ba59a95  /opt/defects/FT_Epoch_latest.pt" | sha256sum -c -
+ENV CFG_DEFECTS_ROOT=/opt/defects
+
 # ffmpeg 9.0.1, from BtbN's static LGPL builds. The image installs no distro ffmpeg.
 #
 # The LGPL build, not the GPL one: EMS encodes AV1 only, so it needs none of what --enable-gpl

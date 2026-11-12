@@ -40,9 +40,9 @@ MARGIN = 128
 LIMIT = 1024
 
 
-async def step(name: str, args: list[str], params: dict, *, timeout: float) -> dict:
-    """Run one step of the tool; what it answered."""
-    done = await run([sys.executable, "-m", "ems.tools.inpaint", name, *args], stdin=json.dumps(params).encode(), cwd=PACKAGE_ROOT, timeout=timeout)
+async def step(name: str, args: list[str], params: dict, *, timeout: float, module: str = "ems.tools.inpaint") -> dict:
+    """Run one step of the tool, or of another `module` that answers as it does; what it answered."""
+    done = await run([sys.executable, "-m", module, name, *args], stdin=json.dumps(params).encode(), cwd=PACKAGE_ROOT, timeout=timeout)
     lines = done.stdout.decode(errors="replace").strip().splitlines()
     try:
         answer = json.loads(lines[-1]) if lines else None

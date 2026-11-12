@@ -18,7 +18,7 @@ from .card import CardArbiter, CardBudget
 from .config import Settings
 from .context import Context
 from .errors import INTERNAL, INVALID_REQUEST, OP_NOT_SERVED, EmsError
-from .ops import audio, document, faces, fingerprint, image, inpaint, media, ocr, shots, speech, storyboard, system, text, transcode, video, vision, watches
+from .ops import audio, defects, document, faces, fingerprint, image, inpaint, media, ocr, shots, speech, storyboard, system, text, transcode, video, vision, watches
 from .remote import Mounts
 from .tools.audio import AudioCache
 from .tools.exiftool import ExifTool
@@ -27,7 +27,7 @@ from .clips import ffmpeg_join, ffmpeg_segments
 from .watches import Watches, ffmpeg_crop, ffmpeg_frames
 from .worker import QUERY_FAMILIES, Worker
 
-OP_MODULES = (media, image, inpaint, video, storyboard, shots, audio, transcode, fingerprint, document, ocr, faces, speech, vision, text, watches)
+OP_MODULES = (media, image, inpaint, defects, video, storyboard, shots, audio, transcode, fingerprint, document, ocr, faces, speech, vision, text, watches)
 
 
 def log(message: str) -> None:

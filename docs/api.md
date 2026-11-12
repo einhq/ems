@@ -2,9 +2,9 @@
 
 EMS (EiN Media Service) is a stateless service that answers questions about media bytes and
 produces media bytes: probing, renditions, transcodes, fingerprints, face detection, speech,
-image-text embeddings, text embeddings, document text extraction, inpainting. It owns the tools (ffmpeg,
+image-text embeddings, text embeddings, document text extraction, inpainting and the defects it fills. It owns the tools (ffmpeg,
 ImageMagick, exiftool, chromaprint, OpenCV) and the models (SigLIP2, RetinaFace and TransFace, a text
-embedder (bge-m3), PP-OCRv6, whisper, NeMo diarization and voiceprints, LR-ASD, LaMa) so that a caller never
+embedder (bge-m3), PP-OCRv6, whisper, NeMo diarization and voiceprints, LR-ASD, LaMa, the scratch detector of Bringing Old Photos Back to Life) so that a caller never
 depends on which tool or model answers.
 
 This document is the contract. It is written to stand on its own: a caller with a directory of
@@ -428,6 +428,43 @@ Result: `{ "path", "width", "height", "channels", "depth", "bytes", "filled" }` 
 of a channel, `filled` how many pixels the mask marked. `meta.producer` is `opencv/<version>`,
 and `big-lama+opencv/<version>` for `lama`, whose crops OpenCV cuts and puts back. _long_ for
 `lama` on a large scan with much damage, which streams `fraction` by the crops painted.
+
+### 4.3b `image.defects` _(implemented, 0.3.9)_
+
+Where a scanned print or negative is damaged — dust, scratches, cracks, lifting emulsion — as a
+mask `image.inpaint` takes.
+
+```json
+{
+  "file": { "path": "…/master.tif" },
+  "scale": 640,
+  "threshold": 0.4,
+  "dark": false,
+  "output": { "path": "…/defects.png" }
+}
+```
+
+- The detector is the scratch detector of Microsoft's "Bringing Old Photos Back to Life", model
+  family `defects`. It looks at the picture in grey, shrunk or enlarged so that its shorter side is
+  `scale` pixels (256–1536, default 640), and gives each pixel a probability of being damage; a
+  pixel at `threshold` (0–1, default 0.4, its authors' own) or above is marked.
+- `scale` decides what it sees: on scanned prints and plates 640 finds specks, cracks and short
+  scratches; 256 finds long faint scratches across the picture, and marks a print's or plate's own
+  edge with them; from about 1024 it takes the picture's grain and texture for damage. Dust one
+  or two pixels across at that scale is not found. A caller that wants both kinds asks twice and
+  joins the masks.
+- It was trained on damage lighter than the picture around it. `dark` looks for darker damage too,
+  in the inverted picture: emulsion lost to black, dark cracks, dust on a print. That finds more
+  damage and more of the picture's own dark lines with it.
+- The file is taken as stored: `angle` and `mirror` are refused rather than applied, so the mask
+  lies on the same pixels `image.inpaint` fills (_3.3_). Any picture OpenCV reads, 8 or 16 bits.
+- The output is a PNG of one 8-bit channel the size of the file, 255 where marked and 0
+  elsewhere. Only `png` is written.
+
+Result: `{ "path", "width", "height", "marked", "fraction" }` — `marked` the pixels the mask
+marks, `fraction` the share of the picture they are. `meta.producer` is
+`bopb-detection+opencv/<version>`. The mask is a guess, and wrong where the picture itself has thin
+light or dark lines: a caller that fills from it shows the result to someone before it is kept.
 
 ### 4.4 `video.frames` _(implemented)_
 
@@ -1014,7 +1051,7 @@ not as an idle one.
 What this EMS can do, for a caller to check before it relies on it:
 
 ```json
-{ "api": "0.3.8", "name": "fry", "build": { "version": "0.1.0", "commit": "fb6a7d9", "date": "2026-11-07T18:02:11+01:00" },
+{ "api": "0.3.9", "name": "fry", "build": { "version": "0.1.0", "commit": "fb6a7d9", "date": "2026-11-07T18:02:11+01:00" },
   "gpu": { "present": true, "name": "NVIDIA GeForce RTX 5060 Ti", "memory_mb": 16311 },
   "ops": [ "media.probe", "faces.detect", … ],
   "tools": { "exiftool": "13.10", "ffprobe": "9.0.1", "ffmpeg": "9.0.1", "magick": "7.1.1" },
@@ -1206,7 +1243,7 @@ PDF's pages (`EMS_OCR_DPI`, `EMS_OCR_MIN_PAGE_CHARS`, `EMS_OCR_MAX_PAGES`), and 
 biased towards the languages the archive holds; `ems/modelworker/model_registry.py` has the
 reasoning), `EMS_MODEL_PINNED`, `EMS_MODEL_IDLE_EVICT`, `EMS_ROOM_IDLE` (how long a family may sit
 idle before it is unloaded to make room for another on the card; 30), `EMS_MODEL_MAX_RSS`, `EMS_TITANET_DEVICE`,
-`EMS_IMAGE_EMBED_MODEL` / `EMS_IMAGE_EMBED_DEVICE` / `EMS_IMAGE_EMBED_GPU_MEM_MB` (`vision.embed`), `EMS_IMAGE_EMBED_TEXT_DEVICE` (`vision.embed_text`; `cpu` by default, ~0.3 s a query, so the card keeps room for the batch families), `EMS_COPY_DETECT_DEVICE` (`fingerprint.compute`'s `sscd-*` kinds; `auto`), `EMS_TRANSNET_DEVICE` (`video.shots`; `auto`), `EMS_INPAINT_DEVICE` (`image.inpaint`'s `lama`; `auto`), `EMS_OCR_DEVICE` / `EMS_OCR_PHOTO_TIER` (`medium`; `small` is baked too) / `EMS_OCR_HAND_ROOT` (the handwriting recogniser's directory) / `EMS_HTR_ROOT` / `EMS_HTR_DEVICE` (the transcriber's; `auto`) / `EMS_HTR_EN_ROOT` / `EMS_HTR_EN_DEVICE` (the English transcriber's; `auto`) / `EMS_OCR_LANGUAGE_MIN_LETTERS` / `EMS_OCR_LANGUAGE_MIN_CONFIDENCE` / `EMS_OCR_MIN_LINE_SCORE` / `EMS_OCR_MAX_SIDE` (1600: the longest side the detector sees, whose arena grows with the area) / `EMS_OCR_GPU_MEM_MB` (2048 per session) (`ocr.read`; `auto`), `EMS_TEXT_EMBED_DEVICE` / `EMS_TEXT_EMBED_QUERY_DEVICE` / `EMS_TEXT_EMBED_MAX_TOKENS` (`text.embed`; documents on the card, queries on the CPU by default), …
+`EMS_IMAGE_EMBED_MODEL` / `EMS_IMAGE_EMBED_DEVICE` / `EMS_IMAGE_EMBED_GPU_MEM_MB` (`vision.embed`), `EMS_IMAGE_EMBED_TEXT_DEVICE` (`vision.embed_text`; `cpu` by default, ~0.3 s a query, so the card keeps room for the batch families), `EMS_COPY_DETECT_DEVICE` (`fingerprint.compute`'s `sscd-*` kinds; `auto`), `EMS_TRANSNET_DEVICE` (`video.shots`; `auto`), `EMS_INPAINT_DEVICE` (`image.inpaint`'s `lama`; `auto`), `EMS_DEFECTS_DEVICE` (`image.defects`; `auto`), `EMS_OCR_DEVICE` / `EMS_OCR_PHOTO_TIER` (`medium`; `small` is baked too) / `EMS_OCR_HAND_ROOT` (the handwriting recogniser's directory) / `EMS_HTR_ROOT` / `EMS_HTR_DEVICE` (the transcriber's; `auto`) / `EMS_HTR_EN_ROOT` / `EMS_HTR_EN_DEVICE` (the English transcriber's; `auto`) / `EMS_OCR_LANGUAGE_MIN_LETTERS` / `EMS_OCR_LANGUAGE_MIN_CONFIDENCE` / `EMS_OCR_MIN_LINE_SCORE` / `EMS_OCR_MAX_SIDE` (1600: the longest side the detector sees, whose arena grows with the area) / `EMS_OCR_GPU_MEM_MB` (2048 per session) (`ocr.read`; `auto`), `EMS_TEXT_EMBED_DEVICE` / `EMS_TEXT_EMBED_QUERY_DEVICE` / `EMS_TEXT_EMBED_MAX_TOKENS` (`text.embed`; documents on the card, queries on the CPU by default), …
 Changing any of them is a restart.
 
 Search queries have a model worker of their own, `EMS_QUERY_WORKER` (on by default; `0` keeps

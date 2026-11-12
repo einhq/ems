@@ -256,6 +256,36 @@ def main() -> int:
         if kept > 1e-5:
             raise RuntimeError(f'the picture changed outside the mask ({kept:.6f})')
 
+    @check('defect detector (card against CPU)')
+    def _defects():
+        import os
+        import sys
+
+        import cv2
+
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'ems', 'modelworker'))
+        from defects import Detector
+
+        path = os.path.join(os.environ.get('CFG_DEFECTS_ROOT', '/opt/defects'), 'FT_Epoch_latest.pt')
+        # A soft grey picture larger than a tile, with light scratches drawn across it.
+        y, x = np.mgrid[0:900, 0:1100].astype(np.float32)
+        grey = (0.35 + 0.15 * np.sin(x / 90) * np.cos(y / 70)).astype(np.float32)
+        scratches = np.zeros((900, 1100), np.uint8)
+        cv2.line(scratches, (100, 60), (1000, 820), 1, 2)
+        cv2.line(scratches, (850, 40), (700, 880), 1, 2)
+        grey[scratches > 0] = 0.95
+        card, cpu = Detector(path, 'cuda').probabilities(grey, dark=True), Detector(path, 'cpu').probabilities(grey, dark=True)
+        apart = float(np.abs(card - cpu).max())
+        found = float((card[scratches > 0] >= 0.4).mean())
+        elsewhere = float((card[cv2.dilate(scratches, np.ones((9, 9), np.uint8)) == 0] >= 0.4).mean())
+        print(f'card/CPU largest difference {apart:.5f} | scratches marked {found:.2%} | the rest marked {elsewhere:.2%}')
+        if apart > 0.01:
+            raise RuntimeError(f'card and CPU disagree ({apart:.5f})')
+        if found < 0.5:
+            raise RuntimeError(f'the scratches were not found ({found:.2%})')
+        if elsewhere > 0.01:
+            raise RuntimeError(f'the picture was taken for damage ({elsewhere:.2%})')
+
     @check('TransNetV2 shot scores (card against CPU)')
     def _shots():
         import os

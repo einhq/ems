@@ -22,6 +22,7 @@ response per connection.
   -> {"op":"copy_descriptors","paths":["/files/S1/01K..."],"angle":270,"mirror":false}
   -> {"op":"read_text","paths":["/files/S1/01K..."],"angle":270,"mirror":false,"language":"en"}
   -> {"op":"inpaint","crops":[{"image":"/scratch/…/image-0000.png","mask":"/scratch/…/mask-0000.png","out":"/scratch/…/out-0000.png"}]}
+  -> {"op":"detect_defects","path":"/scratch/…/shown.png","out":"/scratch/…/found.png","dark":false}
   -> {"op":"shot_boundaries","path":"/scratch/…/frames.rgb","times":[0.0,0.04,…],"duration":180.5,"threshold":0.6,…}
   -> {"op":"embed_image_texts","texts":["segelbåt"]}
   -> {"op":"detect_faces","path":"/files/S1/01K...","angle":270,"mirror":false}
@@ -280,6 +281,9 @@ def _log_model_cache() -> None:
     if not os.path.isfile(os.path.join(registry.INPAINT_ROOT, f"{registry.INPAINT_MODEL}.pt")):
         log(f"WARNING inpainter {registry.INPAINT_MODEL}.pt is missing from {registry.INPAINT_ROOT} — image.inpaint's lama will fail. "
             f"Rebuild the image or set CFG_INPAINT_ROOT.")
+    if not os.path.isfile(os.path.join(registry.DEFECTS_ROOT, registry.DEFECTS_WEIGHTS)):
+        log(f"WARNING defect detector {registry.DEFECTS_WEIGHTS} is missing from {registry.DEFECTS_ROOT} — image.defects will fail. "
+            f"Rebuild the image or set CFG_DEFECTS_ROOT.")
     if not os.path.isfile(os.path.join(registry.TRANSNET_ROOT, registry.TRANSNET_WEIGHTS)):
         log(f"WARNING shot detector {registry.TRANSNET_WEIGHTS} is missing from {registry.TRANSNET_ROOT} — video.shots will fail. "
             f"Rebuild the image or set CFG_TRANSNET_ROOT.")
@@ -428,6 +432,12 @@ def handle(request: dict) -> dict:
         if crops is None:
             raise ValueError("inpaint: missing crops")
         return ops.inpaint(crops)
+
+    if op == "detect_defects":
+        path, out = request.get("path"), request.get("out")
+        if not path or not out:
+            raise ValueError("detect_defects: missing path or out")
+        return ops.detect_defects(path, out, bool(request.get("dark")))
 
     if op == "shot_boundaries":
         path, times = request.get("path"), request.get("times")
