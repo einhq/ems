@@ -98,8 +98,8 @@ against a real exiftool when one is installed.
 
 Implemented: the model primitives and composites, `media.probe`,
 `fingerprint.compute`, `document.extract`, the renditions (`image.renditions`,
-`video.poster`, `video.storyboard`, `audio.waveform`), the shots (`video.shots`) and the transcodes (`video.transcode`,
-`audio.transcode`). `docs/api.md` is the contract; `image.decode` and
+`video.poster`, `video.storyboard`, `audio.waveform`), the shots (`video.shots`), the transcodes (`video.transcode`,
+`audio.transcode`) and inpainting (`image.inpaint`). `docs/api.md` is the contract; `image.decode` and
 `audio.extract` are specified there and not yet needed by any caller.
 
 ## Known issues

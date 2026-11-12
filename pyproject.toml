@@ -13,6 +13,7 @@ dependencies = [
 # is installed by the Containerfile, not here: those pins are architecture-specific and the
 # reasons for each are written beside the RUN lines.
 tools = [
+  "opencv-python-headless",
   "Pillow",
   "pi-heif",
   "rawpy",

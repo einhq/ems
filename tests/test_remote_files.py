@@ -134,6 +134,7 @@ def test_the_header_names_an_endpoint_and_how_it_is_reached():
         with pytest.raises(EmsError):
             parse_header(wrong)
     assert request_paths({"file": {"path": "/a"}, "targets": [{"output": {"path": "/b"}}], "output": {"dir": "/c"}}) == (["/a"], ["/b"], ["/c"])
+    assert request_paths({"file": {"path": "/a"}, "mask": {"path": "/m"}, "output": {"path": "/b"}}) == (["/a", "/m"], ["/b"], [])
 
 
 @needs_mount

@@ -2,8 +2,8 @@
 
 EMS (EiN Media Service) is a stateless service that answers questions about media bytes and
 produces media bytes: probing, renditions, transcodes, fingerprints, face detection, speech,
-image-text embeddings, text embeddings, document text extraction. It owns the tools (ffmpeg,
-ImageMagick, exiftool, chromaprint) and the models (SigLIP2, RetinaFace and TransFace, a text
+image-text embeddings, text embeddings, document text extraction, inpainting. It owns the tools (ffmpeg,
+ImageMagick, exiftool, chromaprint, OpenCV) and the models (SigLIP2, RetinaFace and TransFace, a text
 embedder (bge-m3), PP-OCRv6, whisper, NeMo diarization and voiceprints, LR-ASD) so that a caller never
 depends on which tool or model answers.
 
@@ -201,7 +201,7 @@ A request that names files without the header is `invalid_request`. EMS mounts t
 per endpoint, made on the first request and kept, over up to four connections (each open file uses
 one), and the op runs on local paths for the request's:
 
-- **Inputs** (`file.path`) are read through the mount where they lie. A tool reads only what it
+- **Inputs** (`file.path`, and `mask.path` where an op takes a mask) are read through the mount where they lie. A tool reads only what it
   seeks to, while it runs, and what it read stays in the page cache for the next op on the file
   until its size or modification time changes. A path's last component should end in the file's
   own extension, since tools pick a format by the name as well as by the bytes.
@@ -374,6 +374,43 @@ The display frame as a plain image, for formats other tools cannot open (RAW, HE
 
 `{ "file": {…}, "output": { "path": "…/decoded.png", "format": "png" | "jpeg", "max": 4096 } }`
 → `{ "frame": {…}, "path" }`. `max` bounds the longer side.
+
+### 4.3a `image.inpaint` _(implemented, 0.3.8)_
+
+A picture with the pixels a mask marks filled in from what surrounds them: the dust, scratches and
+small tears of a scanned print or negative, given a mask of where they are.
+
+```json
+{
+  "file": { "path": "…/master.tif" },
+  "mask": { "path": "…/defects.png" },
+  "method": "telea",
+  "radius": 3,
+  "output": { "path": "…/inpainted.tif", "format": "tiff" }
+}
+```
+
+- `mask` is a picture of one channel (1, 8 or 16 bits) the size of the file: a pixel that is not 0
+  is filled, and every other one is kept. A mask with colour channels, or of another size, is
+  `invalid_request`. EMS fills exactly what is marked; a caller that wants a defect's edge filled
+  too grows the mask over it.
+- Both are taken as stored: `angle` and `mirror` are refused rather than applied, and the file's
+  own orientation tag is not applied either (_3.3_).
+- `method` `telea` (the default) is Telea's fast-marching method and `ns` the one based on
+  Navier–Stokes, both OpenCV's, run on the CPU in the `tools` lane. `radius` (1–64, default 3) is
+  how far around a filled pixel, in pixels, its fill is drawn from. Both fill a pixel from its
+  neighbours, which suits thin and small defects; a larger hole comes out smeared.
+- The output keeps the file's bit depth (8 or 16 bits) and its channels (grey, RGB or RGBA, whose
+  alpha is kept as it is), and **every pixel the mask does not mark is the file's, bit for bit**.
+  It carries no metadata and no colour profile: its pixels are in the file's colour space, and a
+  caller that wants the profile writes it on again.
+- Output formats: `png` (the default) and `tiff` (Deflate, with a horizontal predictor), both
+  lossless, so `quality` is refused. A file OpenCV has no reader for (HEIF, a camera RAW) is
+  `unsupported`, and so is one of floats or 32-bit integers; one it cannot decode is `undecodable`.
+- An empty mask is an answer like any other: the file written again, with `filled: 0`.
+
+Result: `{ "path", "width", "height", "channels", "depth", "bytes", "filled" }` — `depth` the bits
+of a channel, `filled` how many pixels the mask marked. `meta.producer` is `opencv/<version>`.
 
 ### 4.4 `video.frames` _(implemented)_
 
@@ -960,7 +997,7 @@ not as an idle one.
 What this EMS can do, for a caller to check before it relies on it:
 
 ```json
-{ "api": "0.3.7", "name": "fry", "build": { "version": "0.1.0", "commit": "fb6a7d9", "date": "2026-11-07T18:02:11+01:00" },
+{ "api": "0.3.8", "name": "fry", "build": { "version": "0.1.0", "commit": "fb6a7d9", "date": "2026-11-07T18:02:11+01:00" },
   "gpu": { "present": true, "name": "NVIDIA GeForce RTX 5060 Ti", "memory_mb": 16311 },
   "ops": [ "media.probe", "faces.detect", … ],
   "tools": { "exiftool": "13.10", "ffprobe": "9.0.1", "ffmpeg": "9.0.1", "magick": "7.1.1" },
