@@ -86,7 +86,7 @@ def parse_header(value: str) -> Endpoint:
 
 
 def request_paths(body: Any) -> tuple[list[str], list[str], list[str]]:
-    """Every path in a request body, at any depth: inputs (`file.path`, `mask.path`), outputs
+    """Every path in a request body, at any depth: inputs (`file.path`, `mask.path`, `source.path`), outputs
     (`output.path`) and output directories (`output.dir`)."""
     inputs: list[str] = []
     outputs: list[str] = []
@@ -101,7 +101,7 @@ def request_paths(body: Any) -> tuple[list[str], list[str], list[str]]:
             return
         for key, child in value.items():
             if isinstance(child, dict):
-                if key in ("file", "mask") and isinstance(child.get("path"), str):
+                if key in ("file", "mask", "source") and isinstance(child.get("path"), str):
                     inputs.append(child["path"])
                 if key == "output" and isinstance(child.get("path"), str):
                     outputs.append(child["path"])

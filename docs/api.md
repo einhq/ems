@@ -2,7 +2,7 @@
 
 EMS (EiN Media Service) is a stateless service that answers questions about media bytes and
 produces media bytes: probing, renditions, transcodes, fingerprints, face detection, speech,
-image-text embeddings, text embeddings, document text extraction, faded colours restored, inpainting and the defects it fills, denoising, face restoration. It owns the tools (ffmpeg,
+image-text embeddings, text embeddings, document text extraction, faded colours restored, inpainting and the defects it fills, denoising, face restoration, and one picture's metadata copied onto another. It owns the tools (ffmpeg,
 ImageMagick, exiftool, chromaprint, OpenCV) and the models (SigLIP2, RetinaFace and TransFace, a text
 embedder (bge-m3), PP-OCRv6, whisper, NeMo diarization and voiceprints, LR-ASD, LaMa, the scratch detector of Bringing Old Photos Back to Life, SCUNet, GFPGAN) so that a caller never
 depends on which tool or model answers.
@@ -201,7 +201,7 @@ A request that names files without the header is `invalid_request`. EMS mounts t
 per endpoint, made on the first request and kept, over up to four connections (each open file uses
 one), and the op runs on local paths for the request's:
 
-- **Inputs** (`file.path`, and `mask.path` where an op takes a mask) are read through the mount where they lie. A tool reads only what it
+- **Inputs** (`file.path`, and `mask.path` and `source.path` where an op takes one) are read through the mount where they lie. A tool reads only what it
   seeks to, while it runs, and what it read stays in the page cache for the next op on the file
   until its size or modification time changes. A path's last component should end in the file's
   own extension, since tools pick a format by the name as well as by the bytes.
@@ -418,7 +418,7 @@ small tears of a scanned print or negative, given a mask of where they are.
 - The output keeps the file's bit depth (8 or 16 bits) and its channels (grey, RGB or RGBA, whose
   alpha is kept as it is), and **every pixel the mask does not mark is the file's, bit for bit**.
   It carries no metadata and no colour profile: its pixels are in the file's colour space, and a
-  caller that wants the profile writes it on again.
+  caller that wants the profile and the file's other tags copies them on with `image.copy_tags`.
 - Output formats: `png` (the default) and `tiff` (Deflate, with a horizontal predictor), both
   lossless, so `quality` is refused. A file OpenCV has no reader for (HEIF, a camera RAW) is
   `unsupported`, and so is one of floats or 32-bit integers; one it cannot decode is `undecodable`.
@@ -570,6 +570,42 @@ Result: `{ "path", "width", "height", "channels", "depth", "bytes", "levels", "g
 `levels` each channel's black and white point and `gammas` its balance, red first, as fractions of
 the channel's range. `meta.producer` is `unfade/1+opencv/<version>`; the number is raised whenever
 the same request would give another picture.
+
+### 4.3f `image.copy_tags` _(implemented, 0.3.13)_
+
+A picture with the metadata of another file: for a picture made from it, such as a restored copy,
+whose pixels are new but whose date, camera, place and description are the other's. Its pixels are
+not touched.
+
+```json
+{
+  "file": { "path": "…/restored.png", "angle": 90 },
+  "source": { "path": "…/print.jpg" },
+  "history": [{ "action": "edited", "when": "2026-11-12T10:00:00Z", "software_agent": "unfade/1+opencv/4.10", "parameters": "image.unfade" }],
+  "digital_source_type": "algorithmicallyEnhanced",
+  "output": { "path": "…/tagged.png" }
+}
+```
+
+- The output is the file in its own format, its own tags replaced by the source's: EXIF, GPS, XMP,
+  IPTC, a maker note and the colour profile, each in its own group where the format holds it
+  (exiftool's `-tagsFromFile -all:all`). Left out are the tags that describe the source's own
+  layout (sizes, offsets, compression), its embedded thumbnail and preview, which show it as it
+  was, its XMP `InstanceID`, since the output is another instance, and its orientation.
+- The orientation is the file's: its `angle` and `mirror` are written as the EXIF `Orientation`
+  that shows it upright (90 is 8, 180 is 3, 270 is 6; with `mirror` 7, 4 and 5, and 2 for 0), and
+  an upright file gets none. `source` is taken as it is: its `angle` and `mirror` are refused.
+- `history` (at most 64) is appended to the source's XMP `xmpMM:History`, each an `stEvt` event:
+  `action` (required, such as `edited`), and `when` (ISO 8601), `software_agent`, `parameters` and
+  `changed` where given.
+- `digital_source_type` names a term of IPTC's digital source type vocabulary (`algorithmicallyEnhanced`,
+  `compositeWithTrainedAlgorithmicMedia`, …), written as its URI in `Iptc4xmpExt:DigitalSourceType`
+  over the source's.
+- The output's name ends in the file's extension (`.jpg` and `.jpeg` alike), since it is written in
+  the file's format; `format` and `quality` are refused. A format exiftool cannot write is
+  `tool_failed`, permanent. On the CPU in the `tools` lane.
+
+Result: `{ "path", "bytes" }`. `meta.producer` is `exiftool/<version>`.
 
 ### 4.4 `video.frames` _(implemented)_
 
