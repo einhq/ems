@@ -2,7 +2,7 @@
 
 EMS (EiN Media Service) is a stateless service that answers questions about media bytes and
 produces media bytes: probing, renditions, transcodes, fingerprints, face detection, speech,
-image-text embeddings, text embeddings, document text extraction, inpainting and the defects it fills, denoising, face restoration. It owns the tools (ffmpeg,
+image-text embeddings, text embeddings, document text extraction, faded colours restored, inpainting and the defects it fills, denoising, face restoration. It owns the tools (ffmpeg,
 ImageMagick, exiftool, chromaprint, OpenCV) and the models (SigLIP2, RetinaFace and TransFace, a text
 embedder (bge-m3), PP-OCRv6, whisper, NeMo diarization and voiceprints, LR-ASD, LaMa, the scratch detector of Bringing Old Photos Back to Life, SCUNet, GFPGAN) so that a caller never
 depends on which tool or model answers.
@@ -532,6 +532,44 @@ Result: `{ "path", "width", "height", "channels", "depth", "bytes", "generative"
 — `faces` those redrawn, `left` how many faces found were left alone. `meta.producer` is
 `retinaface-r34+GFPGANv1.4`. A caller keeps the output as a derivative marked as generated, never
 in the original's place.
+
+### 4.3e `image.unfade` _(implemented, 0.3.12)_
+
+A faded colour print or slide with its colours stretched back out: its dyes faded unevenly, so it
+has turned red, magenta or yellow, its blacks grey and its whites cream.
+
+```json
+{
+  "file": { "path": "…/print.tif" },
+  "clip": 0.5,
+  "balance": true,
+  "strength": 1,
+  "output": { "path": "…/unfaded.tif", "format": "tiff" }
+}
+```
+
+- Each colour channel is stretched between its own black and white point: the `clip` percent
+  (0–5, default 0.5) of its darkest and of its lightest pixels go to black and to white. The
+  channel that faded most is stretched most, which restores the contrast and takes out most of the
+  cast.
+- `balance` (default `true`) then makes the picture's most neutral mid-tones grey: of the pixels
+  between dark and light after the stretch, the third with the least colour are taken to be grey,
+  and each channel gets the gamma (0.5–2) that makes their mean so. A picture mostly of one colour
+  keeps it, since only its few grey pixels are balanced. A toned print (sepia) comes out grey.
+- `strength` (0–1, default 1) blends the result with the picture: 0 is the picture as it was.
+- Deterministic and without a model, on the CPU in the `tools` lane: both steps are a curve per
+  channel, measured on the picture shrunk to 1024 px and applied to it whole. A grey picture is
+  only stretched.
+- The output keeps the file's bit depth (8 or 16 bits) and its channels (grey, RGB or RGBA, whose
+  alpha is kept as it is); every pixel may change. It carries no metadata and no colour profile,
+  as `image.inpaint`'s. Output formats `png` (the default) and `tiff`, lossless, so `quality` is
+  refused. The file is taken as stored: `angle` and `mirror` are refused. A file OpenCV has no
+  reader for, or of floats, is `unsupported`; one it cannot decode `undecodable`.
+
+Result: `{ "path", "width", "height", "channels", "depth", "bytes", "levels", "gammas" }` —
+`levels` each channel's black and white point and `gammas` its balance, red first, as fractions of
+the channel's range. `meta.producer` is `unfade/1+opencv/<version>`; the number is raised whenever
+the same request would give another picture.
 
 ### 4.4 `video.frames` _(implemented)_
 
@@ -1118,7 +1156,7 @@ not as an idle one.
 What this EMS can do, for a caller to check before it relies on it:
 
 ```json
-{ "api": "0.3.11", "name": "fry", "build": { "version": "0.1.0", "commit": "fb6a7d9", "date": "2026-11-07T18:02:11+01:00" },
+{ "api": "0.3.12", "name": "fry", "build": { "version": "0.1.0", "commit": "fb6a7d9", "date": "2026-11-07T18:02:11+01:00" },
   "gpu": { "present": true, "name": "NVIDIA GeForce RTX 5060 Ti", "memory_mb": 16311 },
   "ops": [ "media.probe", "faces.detect", … ],
   "tools": { "exiftool": "13.10", "ffprobe": "9.0.1", "ffmpeg": "9.0.1", "magick": "7.1.1" },

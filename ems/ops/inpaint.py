@@ -44,7 +44,7 @@ def output_format(spec: OutputSpec) -> str:
     fmt = (spec.format or "png").lower()
     fmt = EXTENSIONS.get(fmt, fmt)
     if fmt not in inpaint_tool.FORMATS:
-        raise invalid(f"{spec.path}: an inpainted picture is written as {' or '.join(inpaint_tool.FORMATS)}, not {spec.format!r}")
+        raise invalid(f"{spec.path}: a restored picture is written as {' or '.join(inpaint_tool.FORMATS)}, not {spec.format!r}")
     if spec.quality is not None:
         raise invalid(f"{spec.path}: {fmt} is lossless and takes no quality")
     named = EXTENSIONS.get(os.path.splitext(spec.path)[1].lower().lstrip("."))
