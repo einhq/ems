@@ -4,7 +4,7 @@ EMS (EiN Media Service) is a stateless service that answers questions about medi
 produces media bytes: probing, renditions, transcodes, fingerprints, face detection, speech,
 image-text embeddings, text embeddings, document text extraction, inpainting. It owns the tools (ffmpeg,
 ImageMagick, exiftool, chromaprint, OpenCV) and the models (SigLIP2, RetinaFace and TransFace, a text
-embedder (bge-m3), PP-OCRv6, whisper, NeMo diarization and voiceprints, LR-ASD) so that a caller never
+embedder (bge-m3), PP-OCRv6, whisper, NeMo diarization and voiceprints, LR-ASD, LaMa) so that a caller never
 depends on which tool or model answers.
 
 This document is the contract. It is written to stand on its own: a caller with a directory of
@@ -400,6 +400,21 @@ small tears of a scanned print or negative, given a mask of where they are.
   Navier–Stokes, both OpenCV's, run on the CPU in the `tools` lane. `radius` (1–64, default 3) is
   how far around a filled pixel, in pixels, its fill is drawn from. Both fill a pixel from its
   neighbours, which suits thin and small defects; a larger hole comes out smeared.
+- `method` `lama` paints the marked pixels with LaMa (big-lama, model family `lama`), which draws
+  on the picture's structure and texture around a hole, for creases, tears and missing corners. It
+  takes no `radius`. LaMa is shown crops of the picture around the damage, never more than
+  1024 px a side, as RGB in float32 whatever the file's depth, and its paint is put back at the
+  file's depth:
+  - defects closer than 256 px to one another are one group, shown with 128 px of the picture
+    around it;
+  - a group larger than 1024 px is cut into tiles that share it out, each shown with 128 px
+    around it, so a long scratch is painted at full resolution;
+  - unless a hole in it is wider than 128 px: then the whole group is shown shrunk to 1024 px,
+    and its paint is enlarged again, since a tile inside such a hole would show nothing around it;
+  - every crop's mask marks every defect it shows, so none is taken for picture.
+
+  On dust and thin scratches LaMa does no better than `ns`, at about fifteen times its time; on
+  creases, tears and torn corners it is clearly better, where OpenCV leaves streaks and bands.
 - The output keeps the file's bit depth (8 or 16 bits) and its channels (grey, RGB or RGBA, whose
   alpha is kept as it is), and **every pixel the mask does not mark is the file's, bit for bit**.
   It carries no metadata and no colour profile: its pixels are in the file's colour space, and a
@@ -410,7 +425,9 @@ small tears of a scanned print or negative, given a mask of where they are.
 - An empty mask is an answer like any other: the file written again, with `filled: 0`.
 
 Result: `{ "path", "width", "height", "channels", "depth", "bytes", "filled" }` — `depth` the bits
-of a channel, `filled` how many pixels the mask marked. `meta.producer` is `opencv/<version>`.
+of a channel, `filled` how many pixels the mask marked. `meta.producer` is `opencv/<version>`,
+and `big-lama+opencv/<version>` for `lama`, whose crops OpenCV cuts and puts back. _long_ for
+`lama` on a large scan with much damage, which streams `fraction` by the crops painted.
 
 ### 4.4 `video.frames` _(implemented)_
 
@@ -1189,7 +1206,7 @@ PDF's pages (`EMS_OCR_DPI`, `EMS_OCR_MIN_PAGE_CHARS`, `EMS_OCR_MAX_PAGES`), and 
 biased towards the languages the archive holds; `ems/modelworker/model_registry.py` has the
 reasoning), `EMS_MODEL_PINNED`, `EMS_MODEL_IDLE_EVICT`, `EMS_ROOM_IDLE` (how long a family may sit
 idle before it is unloaded to make room for another on the card; 30), `EMS_MODEL_MAX_RSS`, `EMS_TITANET_DEVICE`,
-`EMS_IMAGE_EMBED_MODEL` / `EMS_IMAGE_EMBED_DEVICE` / `EMS_IMAGE_EMBED_GPU_MEM_MB` (`vision.embed`), `EMS_IMAGE_EMBED_TEXT_DEVICE` (`vision.embed_text`; `cpu` by default, ~0.3 s a query, so the card keeps room for the batch families), `EMS_COPY_DETECT_DEVICE` (`fingerprint.compute`'s `sscd-*` kinds; `auto`), `EMS_TRANSNET_DEVICE` (`video.shots`; `auto`), `EMS_OCR_DEVICE` / `EMS_OCR_PHOTO_TIER` (`medium`; `small` is baked too) / `EMS_OCR_HAND_ROOT` (the handwriting recogniser's directory) / `EMS_HTR_ROOT` / `EMS_HTR_DEVICE` (the transcriber's; `auto`) / `EMS_HTR_EN_ROOT` / `EMS_HTR_EN_DEVICE` (the English transcriber's; `auto`) / `EMS_OCR_LANGUAGE_MIN_LETTERS` / `EMS_OCR_LANGUAGE_MIN_CONFIDENCE` / `EMS_OCR_MIN_LINE_SCORE` / `EMS_OCR_MAX_SIDE` (1600: the longest side the detector sees, whose arena grows with the area) / `EMS_OCR_GPU_MEM_MB` (2048 per session) (`ocr.read`; `auto`), `EMS_TEXT_EMBED_DEVICE` / `EMS_TEXT_EMBED_QUERY_DEVICE` / `EMS_TEXT_EMBED_MAX_TOKENS` (`text.embed`; documents on the card, queries on the CPU by default), …
+`EMS_IMAGE_EMBED_MODEL` / `EMS_IMAGE_EMBED_DEVICE` / `EMS_IMAGE_EMBED_GPU_MEM_MB` (`vision.embed`), `EMS_IMAGE_EMBED_TEXT_DEVICE` (`vision.embed_text`; `cpu` by default, ~0.3 s a query, so the card keeps room for the batch families), `EMS_COPY_DETECT_DEVICE` (`fingerprint.compute`'s `sscd-*` kinds; `auto`), `EMS_TRANSNET_DEVICE` (`video.shots`; `auto`), `EMS_INPAINT_DEVICE` (`image.inpaint`'s `lama`; `auto`), `EMS_OCR_DEVICE` / `EMS_OCR_PHOTO_TIER` (`medium`; `small` is baked too) / `EMS_OCR_HAND_ROOT` (the handwriting recogniser's directory) / `EMS_HTR_ROOT` / `EMS_HTR_DEVICE` (the transcriber's; `auto`) / `EMS_HTR_EN_ROOT` / `EMS_HTR_EN_DEVICE` (the English transcriber's; `auto`) / `EMS_OCR_LANGUAGE_MIN_LETTERS` / `EMS_OCR_LANGUAGE_MIN_CONFIDENCE` / `EMS_OCR_MIN_LINE_SCORE` / `EMS_OCR_MAX_SIDE` (1600: the longest side the detector sees, whose arena grows with the area) / `EMS_OCR_GPU_MEM_MB` (2048 per session) (`ocr.read`; `auto`), `EMS_TEXT_EMBED_DEVICE` / `EMS_TEXT_EMBED_QUERY_DEVICE` / `EMS_TEXT_EMBED_MAX_TOKENS` (`text.embed`; documents on the card, queries on the CPU by default), …
 Changing any of them is a restart.
 
 Search queries have a model worker of their own, `EMS_QUERY_WORKER` (on by default; `0` keeps

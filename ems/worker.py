@@ -120,6 +120,7 @@ WORKER_OP_FAMILIES = {
     "embed_image_texts": "siglip-text",
     "copy_descriptors": "sscd",
     "shot_boundaries": "transnet",
+    "inpaint": "lama",
     "read_text": "ocr",
 }
 

@@ -67,6 +67,7 @@ OP_FAMILIES = {
     "text.embed": "text-embed",
     "fingerprint.compute": "sscd",
     "video.shots": "transnet",
+    "image.inpaint": "lama",
     "ocr.read": "ocr",
 }
 

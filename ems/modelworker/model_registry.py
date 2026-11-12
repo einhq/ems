@@ -290,6 +290,15 @@ TRANSNET_WEIGHTS = 'transnetv2-pytorch-weights.pth'
 # on fry (2026-10-24).
 TRANSNET_MIN_FREE_MB = float(os.environ.get('CFG_TRANSNET_MIN_FREE_MB', '600'))
 
+# The inpainter (`image.inpaint`'s `lama`, see lama.py): big-lama as one TorchScript file, baked at a
+# pinned sha256. Its name is the producer. auto = the card when it has room; float32 either way.
+INPAINT_MODEL = os.environ.get('CFG_INPAINT_MODEL', 'big-lama')
+INPAINT_ROOT = os.environ.get('CFG_INPAINT_ROOT', '/opt/inpaint')
+INPAINT_DEVICE = os.environ.get('CFG_INPAINT_DEVICE', 'auto')
+# 51 M parameters (200 MB of float32 weights) over crops of up to 1024 px a side, the largest the
+# op shows it (ems.tools.inpaint.LIMIT): 2.4 GB reserved at most on fry (2026-11-12).
+LAMA_MIN_FREE_MB = float(os.environ.get('CFG_LAMA_MIN_FREE_MB', '2600'))
+
 # The text reader (`ocr.read`, see text_reader.py): PP-OCRv6 det + rec through RapidOCR, ONNX files
 # baked at pinned sha256s under OCR_ROOT. The tier is the producer, so changing it changes what
 # every stored reading is named. auto = the card when it has room; float32 either way.
@@ -962,6 +971,12 @@ def catalog() -> dict[str, dict]:
                        "edited or rescanned copy and apart for another photo of the same scene — duplicates and photo stacks.",
             "ops": ["fingerprint.compute"],
         },
+        "lama": {
+            "model": INPAINT_MODEL, "device": INPAINT_DEVICE,
+            "purpose": "Inpainting: paints over the dust, scratches and tears a mask marks on a scanned photo, "
+                       "from what surrounds them, for a restored copy beside the original.",
+            "ops": ["image.inpaint"],
+        },
         "transnet": {
             "model": "transnetv2", "device": TRANSNET_DEVICE,
             "purpose": "Shot boundaries: where a film or a tape cuts from one shot to the next, for a video's chapters.",
@@ -1148,6 +1163,7 @@ CARD_NEED_MB = {
     "siglip-visual": SIGLIP_VISUAL_MIN_FREE_MB,
     "sscd": SSCD_MIN_FREE_MB,
     "transnet": TRANSNET_MIN_FREE_MB,
+    "lama": LAMA_MIN_FREE_MB,
     "ocr": OCR_MIN_FREE_MB,
     "htr": HTR_MIN_FREE_MB,
     "htr-en": HTR_EN_MIN_FREE_MB,
@@ -1405,6 +1421,21 @@ def sscd(device: str):
     def load():
         from copy_detect import Descriptor
         return Descriptor(os.path.join(COPY_DETECT_ROOT, f"{COPY_DETECT_MODEL}.torchscript.pt"), device)
+
+    return _get(key, load)
+
+
+def inpaint_device() -> str:
+    return place("lama", INPAINT_DEVICE)
+
+
+def lama(device: str):
+    """INPAINT_MODEL's inpainter (lama.Inpainter)."""
+    key = f"lama:{device}"
+
+    def load():
+        from lama import Inpainter
+        return Inpainter(os.path.join(INPAINT_ROOT, f"{INPAINT_MODEL}.pt"), device)
 
     return _get(key, load)
 

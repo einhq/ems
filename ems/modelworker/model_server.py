@@ -21,6 +21,7 @@ response per connection.
   -> {"op":"embed_images","paths":["/files/S1/01K..."],"angle":270,"mirror":false}
   -> {"op":"copy_descriptors","paths":["/files/S1/01K..."],"angle":270,"mirror":false}
   -> {"op":"read_text","paths":["/files/S1/01K..."],"angle":270,"mirror":false,"language":"en"}
+  -> {"op":"inpaint","crops":[{"image":"/scratch/…/image-0000.png","mask":"/scratch/…/mask-0000.png","out":"/scratch/…/out-0000.png"}]}
   -> {"op":"shot_boundaries","path":"/scratch/…/frames.rgb","times":[0.0,0.04,…],"duration":180.5,"threshold":0.6,…}
   -> {"op":"embed_image_texts","texts":["segelbåt"]}
   -> {"op":"detect_faces","path":"/files/S1/01K...","angle":270,"mirror":false}
@@ -276,6 +277,9 @@ def _log_model_cache() -> None:
     if not os.path.isfile(copy_detect):
         log(f"WARNING copy detector {copy_detect} is missing — fingerprint.compute will fail for pictures and video. "
             f"Rebuild the image or set CFG_COPY_DETECT_ROOT.")
+    if not os.path.isfile(os.path.join(registry.INPAINT_ROOT, f"{registry.INPAINT_MODEL}.pt")):
+        log(f"WARNING inpainter {registry.INPAINT_MODEL}.pt is missing from {registry.INPAINT_ROOT} — image.inpaint's lama will fail. "
+            f"Rebuild the image or set CFG_INPAINT_ROOT.")
     if not os.path.isfile(os.path.join(registry.TRANSNET_ROOT, registry.TRANSNET_WEIGHTS)):
         log(f"WARNING shot detector {registry.TRANSNET_WEIGHTS} is missing from {registry.TRANSNET_ROOT} — video.shots will fail. "
             f"Rebuild the image or set CFG_TRANSNET_ROOT.")
@@ -418,6 +422,12 @@ def handle(request: dict) -> dict:
         if not paths:
             raise ValueError("copy_descriptors: missing paths")
         return ops.copy_descriptors(paths, angle, mirror)
+
+    if op == "inpaint":
+        crops = request.get("crops")
+        if crops is None:
+            raise ValueError("inpaint: missing crops")
+        return ops.inpaint(crops)
 
     if op == "shot_boundaries":
         path, times = request.get("path"), request.get("times")

@@ -26,6 +26,7 @@ SIGLIP_VISUAL = "siglip-visual"
 SIGLIP_TEXT = "siglip-text"
 SSCD = "sscd"
 TRANSNET = "transnet"
+LAMA = "lama"
 OCR = "ocr"
 HTR = "htr"
 TEXT_EMBED = "text-embed"
@@ -1131,6 +1132,35 @@ def copy_descriptors(paths: list[str], angle=0, mirror=False) -> dict:
     with registry.family_lock(SSCD):
         vectors = registry.run_on_model_thread(SSCD, run)
     return {"descriptors": vectors, "model": registry.COPY_DETECT_MODEL}
+
+
+def inpaint(crops: list[dict]) -> dict:
+    """LaMa's fill of each crop, in order: an RGB picture of 8 or 16 bits at `image` and a mask of one
+    channel at `mask`, non-zero where to paint, give the painted picture at `out`, an RGB PNG of 16
+    bits. No crops loads no model: the answer names it all the same.
+    """
+    import cv2
+    import numpy as np
+
+    for index, crop in enumerate(crops):
+        picture = cv2.imread(crop["image"], cv2.IMREAD_COLOR | cv2.IMREAD_ANYDEPTH)
+        mask = cv2.imread(crop["mask"], cv2.IMREAD_GRAYSCALE)
+        if picture is None or mask is None:
+            raise FileNotFoundError(f"crop {index}: {crop['image']} or its mask cannot be read")
+        if mask.shape != picture.shape[:2]:
+            raise ValueError(f"crop {index}: the mask is not the picture's size")
+        rgb = cv2.cvtColor(picture, cv2.COLOR_BGR2RGB).astype(np.float32) / np.iinfo(picture.dtype).max
+
+        def run():
+            return registry.lama(registry.inpaint_device()).fill(rgb, mask != 0)
+
+        with registry.family_lock(LAMA):
+            painted = registry.run_on_model_thread(LAMA, run)
+        out = np.rint(painted * 65535).astype(np.uint16)
+        if not cv2.imwrite(crop["out"], cv2.cvtColor(out, cv2.COLOR_RGB2BGR)):
+            raise OSError(f"crop {index}: {crop['out']} could not be written")
+        registry.report_progress((index + 1) / len(crops))
+    return {"model": registry.INPAINT_MODEL}
 
 
 def shot_boundaries(path: str, times: list[float], duration: float, *, threshold: float, nms: float, merge: float, min_shot: float, min_change: float, leader: bool = True, debug: bool = False) -> dict:

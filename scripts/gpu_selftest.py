@@ -227,6 +227,35 @@ def main() -> int:
         if alike < 0.75:
             raise RuntimeError(f'a mirror image or a crop is no copy to it (cosine {alike:.3f})')
 
+    @check('LaMa inpainting (card against CPU)')
+    def _inpaint():
+        import os
+        import sys
+
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'ems', 'modelworker'))
+        from lama import Inpainter
+
+        path = os.path.join(os.environ.get('CFG_INPAINT_ROOT', '/opt/inpaint'), os.environ.get('CFG_INPAINT_MODEL', 'big-lama') + '.pt')
+        # Smooth ramps with a scratch across them and a square hole, at a size that is no multiple of 8.
+        y, x = np.mgrid[0:300, 0:420].astype(np.float32)
+        truth = np.dstack([x / 419, y / 299, (x + y) / 718]).astype(np.float32)
+        mask = np.zeros((300, 420), bool)
+        mask[140:146, 20:400] = True
+        mask[40:100, 300:360] = True
+        damaged = truth.copy()
+        damaged[mask] = 0
+        card, cpu = Inpainter(path, 'cuda').fill(damaged, mask), Inpainter(path, 'cpu').fill(damaged, mask)
+        apart = float(np.abs(card - cpu)[mask].mean())
+        error = float(np.abs(card - truth)[mask].mean())
+        kept = float(np.abs(card - damaged)[~mask].max())
+        print(f'card/CPU mean difference {apart:.5f} | painted against the ramps {error:.4f} | outside the mask {kept:.6f}')
+        if apart > 0.01:
+            raise RuntimeError(f'card and CPU paint differently ({apart:.5f})')
+        if error > 0.05:
+            raise RuntimeError(f'the holes were not painted from the ramps around them ({error:.4f})')
+        if kept > 1e-5:
+            raise RuntimeError(f'the picture changed outside the mask ({kept:.6f})')
+
     @check('TransNetV2 shot scores (card against CPU)')
     def _shots():
         import os

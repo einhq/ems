@@ -390,6 +390,18 @@ ENV CFG_HTR_EN_ROOT=/opt/htr/trocr-large-handwritten
 # The language of read text (text_language.py): lingua, every language's models in its wheel. ~290 MB.
 RUN pip install --no-cache-dir lingua-language-detector==2.2.0
 
+# The inpainter (image.inpaint's lama, ems/modelworker/lama.py): big-lama (Suvorov et al.,
+# Apache-2.0) as IOPaint exports it, one TorchScript file. Checked against its sha256, as the copy
+# detector is, so a rebuild cannot change what it paints. ~206 MB.
+ARG INPAINT_MODEL=big-lama
+ARG INPAINT_SHA256=344c77bbcb158f17dd143070d1e789f38a66c04202311ae3a258ef66667a9ea9
+RUN mkdir -p /opt/inpaint \
+    && curl -fsSL -o /opt/inpaint/${INPAINT_MODEL}.pt \
+        "https://github.com/Sanster/models/releases/download/add_big_lama/big-lama.pt" \
+    && echo "${INPAINT_SHA256}  /opt/inpaint/${INPAINT_MODEL}.pt" | sha256sum -c -
+ENV CFG_INPAINT_MODEL=${INPAINT_MODEL}
+ENV CFG_INPAINT_ROOT=/opt/inpaint
+
 # ffmpeg 9.0.1, from BtbN's static LGPL builds. The image installs no distro ffmpeg.
 #
 # The LGPL build, not the GPL one: EMS encodes AV1 only, so it needs none of what --enable-gpl

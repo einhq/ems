@@ -8,7 +8,8 @@ https://einhq.eu/docs/ems/#models-tools-and-their-licences
 which EiN also shows offline, among its docs.
 
 The image carries each model's weights as their maker publishes them, unmodified. Where the page
-names an export or a conversion (SigLIP 2 as Immich exports it, TransNetV2 converted to PyTorch),
+names an export or a conversion (SigLIP 2 as Immich exports it, TransNetV2 converted to PyTorch,
+big-lama as IOPaint exports it),
 it carries that export or conversion as its maker publishes it. The image adds two files derived
 from published ones: /opt/ocr/multicentury-ppocrv6-medium/keys.txt, the character list of that
 model's inference.yml written out on its own, and tokenizer.json beside TrOCR large handwritten,
@@ -49,6 +50,8 @@ The licence's text is Apache-2.0, beside this file.
   https://huggingface.co/Kansallisarkisto/multicentury-htr-model, in /opt/htr
 - TransNetV2's weights converted to PyTorch, https://huggingface.co/Sn4kehead/TransNetV2, in
   /opt/transnet
+- Samsung AI Center's big-lama, https://github.com/advimman/lama, as IOPaint exports it to
+  TorchScript, https://github.com/Sanster/models/releases/tag/add_big_lama, in /opt/inpaint
 
 The Python packages in /opt/venv carry their own licences in their dist-info folders.
 
