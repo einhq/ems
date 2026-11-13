@@ -1041,6 +1041,38 @@ pages; a picture, a camera RAW through its preview included, is read whole in th
 cannot be opened is `unsupported` (permanent); a reader that is busy or down fails the request
 rather than answering empty text.
 
+### 4.21b `document.renditions` _(implemented, 0.3.14)_
+
+A document's first page as picture renditions, and the document as PDF for a viewer.
+
+```json
+{
+  "file": { "path": "…/Brev.docx", "mimetype": "application/vnd.openxmlformats-officedocument.wordprocessingml.document" },
+  "targets": [
+    { "output": { "path": "…/320x320.avif", "quality": 55 }, "box": { "width": 320, "height": 320 }, "fit": "cover" },
+    { "output": { "path": "…/512x512.avif", "quality": 58 }, "box": { "width": 512, "height": 512 } }
+  ],
+  "pdf": { "output": { "path": "…/view.pdf" } }
+}
+```
+
+- A PDF's first page is rendered by PDFium. A Word (`.docx`, `.doc`), RTF, OpenDocument text or
+  plain-text file is converted to PDF by LibreOffice first, a process of its own per call; of a
+  text file only the first 64 KiB, read as UTF-8 or else as Windows-1252. Any other type is
+  `unsupported`.
+- The page is rendered once, on white, at the scale the largest target needs (a `contain` box
+  filled by the page's longer fit, a `cover` box by its shorter one), at most 4096 px a side, and
+  the targets are cut from it as §4.2 cuts them: `file.angle` and `file.mirror` do not apply.
+- `pdf` asks for the converted document as well, written beside the pictures and published with
+  them; a PDF has no conversion to give, so `pdf` with one is `invalid_request`.
+- A document PDFium or LibreOffice cannot open, or with no pages, is `undecodable`. Runs in the
+  `tools` lane.
+
+Result: as §4.2, plus `pages` (the document's page count), `page` (the first page's size in
+points, `{ "width", "height" }`) and, with `pdf`, `pdf: { "path", "bytes" }`. `meta.producer` is
+`pypdfium2/<version>+magick/<version>`, with `soffice/<version>` between them for a converted
+document.
+
 ### 4.21a `ocr.read` _(implemented, 5.1)_
 
 The lines of text in a picture, for search by the words in it: `{ "file": {…}, "engine": "photo",

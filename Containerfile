@@ -58,6 +58,10 @@ ARG WHISPER_MODEL=large-v3
 # curl + xz-utils are for the ffmpeg fetch below, ca-certificates for every download; tzdata is
 # what TZ names; tini is PID 1 (ENTRYPOINT below). The slim base has none of them.
 #
+# libreoffice-writer-nogui converts Word, RTF, OpenDocument and text files to PDF for
+# `document.renditions`, run as its own process; fonts-liberation gives it fonts metric-compatible
+# with Times, Arial and Courier, so a page breaks where the author's did.
+#
 # No package here brings Debian's FFmpeg libraries: the image's one FFmpeg is the LGPL build
 # below, which also fingerprints audio, with its chromaprint muxer.
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -79,6 +83,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     tzdata \
     tini \
+    libreoffice-writer-nogui \
+    fonts-liberation \
     && rm -rf /var/lib/apt/lists/*
 
 RUN python3 -m venv /opt/venv
