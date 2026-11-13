@@ -169,8 +169,13 @@ class Worker:
     # ---- lifecycle ----
 
     async def start(self) -> None:
+        """Have the worker run, under a supervisor that starts it again when it exits. A start while
+        the supervisor runs does nothing: the process it is about to spawn takes `env` as it is
+        then, and a second supervisor would spawn a second worker on the same socket."""
         if not os.path.isfile(self.script):
             self.log(f"worker: no script at {self.script}; model ops will answer model_unavailable")
+            return
+        if self._supervisor is not None and not self._supervisor.done():
             return
         self._stopping = False
         self._supervisor = asyncio.create_task(self._supervise())
