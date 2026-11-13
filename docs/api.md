@@ -613,6 +613,44 @@ not touched.
 
 Result: `{ "path", "bytes" }`. `meta.producer` is `exiftool/<version>`.
 
+### 4.3g `image.damage` _(implemented, 0.3.15)_
+
+How damaged a picture is — how faded, how dusty, how scratched — to tell which pictures of many are
+worth restoring, and with what. Nothing is written.
+
+```json
+{ "file": { "path": "…/print.jpg" } }
+```
+
+- **faded** is the mean change `image.unfade` (_4.3e_) would make to the picture shrunk to 1024 px,
+  in 8-bit steps, with its defaults: a faded print's channels are squeezed and cast, so stretching
+  and balancing them moves every pixel. Ordinary photographs move 2–9 steps, faded prints and
+  slides 15–60. It scores 0 at 6 steps and 1 at 22. A picture whose colours are meant to be strong
+  or dark (a sunset, a candle-lit still life) moves too.
+- **dusty** and **scratched** come from the marks of `image.defects`'s detector (_4.3b_, model
+  family `defects`), shown the picture at 640 px on its shorter side, light damage only, marked from
+  0.4. A mark's connected part at least 4 % of the shorter side long and at most 4 pixels wide on
+  average is a scratch; any other is a speck. Only a part on smooth picture counts: the detector
+  also marks a picture's own thin light details (branches against the sky, a window's frame,
+  highlights on a rim), which lie among others, where damage shows least. A part that touches the
+  picture's edge (a print's or plate's own) or has fewer than 3 pixels is left out. Dust scores 0
+  at 40 specks a million pixels shown and 1 at 200; scratches 0 at 0.4 shorter sides of length
+  together and 1 at 1.6.
+- A score is 0 for none and 1 for as much as a picture worth restoring for it has, linear between
+  and clamped. Over 40 public-domain scans of damaged and faded prints and 16 ordinary photographs,
+  13 of the scans and none of the photographs reached 0.5 for dust or scratches; a sea's horizon
+  came closest (0.50 scratched).
+- Blur is not measured: on a picture this small shallow focus and soft subjects look like it.
+- The file is taken as stored: `angle` and `mirror` are refused. Any picture OpenCV reads, 8 or 16
+  bits; a file it has no reader for is `unsupported`, one it cannot decode `undecodable`. On fry's
+  card 0.2–0.6 s for a picture of a few megapixels, longer for a large scan, which is read whole.
+
+Result: `{ "width", "height", "faded", "dusty", "scratched", "measures": { "change", "specks", "scratches", "length", "marked" } }`
+— `measures` what the scores come from: the change in 8-bit steps, the specks and scratches
+counted, the scratches' length in shorter sides, and the share of the picture shown the detector
+marked at all. `meta.producer` is `damage/<n>+bopb-detection`, the number raised whenever the same
+picture would score otherwise; `models.damage` in capabilities (_4.23_) names it.
+
 ### 4.4 `video.frames` _(implemented)_
 
 Frames as images. _long_.
@@ -1260,12 +1298,13 @@ setting names the card (`EMS_<FAMILY>_DEVICE=cuda`) stays on it whatever the sha
 What this EMS can do, for a caller to check before it relies on it:
 
 ```json
-{ "api": "0.3.12", "name": "fry", "build": { "version": "0.1.0", "commit": "fb6a7d9", "date": "2026-11-07T18:02:11+01:00" },
+{ "api": "0.3.15", "name": "fry", "build": { "version": "0.1.0", "commit": "fb6a7d9", "date": "2026-11-07T18:02:11+01:00" },
   "gpu": { "present": true, "name": "NVIDIA GeForce RTX 5060 Ti", "memory_mb": 16311 },
   "ops": [ "media.probe", "faces.detect", … ],
   "tools": { "exiftool": "13.10", "ffprobe": "9.0.1", "ffmpeg": "9.0.1", "magick": "7.1.1" },
   "models": { "text_embed": "bge-m3", "whisper": "large-v3", "faces": "retinaface-r34+transface",
-              "image_embed": "ViT-SO400M-16-SigLIP2-384__webli", "ocr": "PP-OCRv6_medium+multicentury-ppocrv6-medium+multicentury-htr-model+trocr-large-handwritten" },
+              "image_embed": "ViT-SO400M-16-SigLIP2-384__webli", "ocr": "PP-OCRv6_medium+multicentury-ppocrv6-medium+multicentury-htr-model+trocr-large-handwritten",
+              "damage": "damage/1+bopb-detection" },
   "limits": { "models": 8, "tools": 6, "encodes": 2, "queue_depth": 64, "interactive_reserve": 1, "watches": 4 },
   "encode": { "video_encoder": "av1_nvenc", "cpu_budget": "4000/170/64" },
   "signatures": { "transcribe": "whisper-large-v3:…,on=cuda:float16,…",

@@ -19,6 +19,7 @@ from ..tools.run import run, which
 from ..tools.versions import tool_version
 from ..worker import Worker
 from . import transcode
+from .damage import producer as damage_producer
 from .faces import PRODUCER as FACES_PRODUCER
 
 TOOLS = ("exiftool", "ffprobe", "ffmpeg", "magick")
@@ -439,6 +440,8 @@ def register(router: APIRouter, ctx: Context) -> None:
                 "image_embed": env.get("EMS_IMAGE_EMBED_MODEL") or env.get("CFG_IMAGE_EMBED_MODEL") or "ViT-SO400M-16-SigLIP2-384__webli",
                 # What ocr.read writes as its producer; a change is a re-read for the caller.
                 "ocr": ocr_model(env),
+                # What image.damage writes as its producer; a change is a re-reading for the caller.
+                "damage": damage_producer(),
             },
             "limits": {
                 "models": ctx.settings.limit_models,

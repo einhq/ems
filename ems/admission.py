@@ -70,6 +70,7 @@ OP_FAMILIES = {
     "image.restore_faces": "faces",
     "image.inpaint": "lama",
     "image.defects": "defects",
+    "image.damage": "defects",
     "image.denoise": "denoise",
     "ocr.read": "ocr",
 }
