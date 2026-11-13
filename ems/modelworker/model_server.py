@@ -57,6 +57,9 @@ for the OOM killer to find.
 
 A second covers a GPU context that is gone: after a sticky CUDA error every later call fails the
 same way, and the server answers health while failing all of them. See _on_sticky_cuda_error.
+
+A third gives the card back: at a share of 0 a process that has used the card still holds its
+CUDA context there, which only the process's end returns. See _recycle_for_share.
 """
 
 import json
@@ -137,7 +140,10 @@ STICKY_CUDA_ERRORS = (
 # next recycle waits for the rest of this, and health reports the failure meanwhile.
 GPU_RECYCLE_GRACE_SECONDS = float(os.environ.get('CFG_MODEL_GPU_RECYCLE_GRACE', '600'))
 
-# Why this process was started by a recycle ("rss" or "gpu"), carried across the re-exec.
+# How often a share of 0 looks for a quiet moment to recycle in (_recycle_for_share).
+SHARE_RECYCLE_POLL_SECONDS = 1.0
+
+# Why this process was started by a recycle ("rss", "gpu" or "share"), carried across the re-exec.
 RECYCLED_FOR = os.environ.get('CFG_MODEL_RECYCLE_REASON', '')
 
 _started_at = time.time()
@@ -182,6 +188,10 @@ _server: "Server | None" = None
 
 # Why the next re-exec happens, for RECYCLED_FOR in the process it starts.
 _recycle_reason = "rss"
+
+# Set while a share of 0 waits to recycle the process (_recycle_for_share), so a second waits with it.
+_share_recycle_waiting = False
+_share_recycle_lock = threading.Lock()
 
 # The first sticky CUDA error this process met ({since, op, error}), reported by health until the
 # process is replaced. None while the context is fine.
@@ -361,7 +371,10 @@ def handle(request: dict) -> dict:
         if mb is not None and (isinstance(mb, bool) or not isinstance(mb, (int, float)) or mb < 0):
             raise ValueError(f"card_share: mb must be a number of MB, 0 or more, or null, not {mb!r}")
         registry.set_card_share(mb)
-        return {"unloaded": registry.fit_card_share()}
+        unloaded = registry.fit_card_share()
+        if mb == 0:
+            _recycle_for_share()
+        return {"unloaded": unloaded}
 
     if op == "unpin":
         families = request.get("families")
@@ -994,6 +1007,53 @@ def _on_sticky_cuda_error(op: str, exc: BaseException) -> None:
         timer.start()
         return
     recycle()
+
+
+def _recycle_for_share() -> None:
+    """At a share of 0, replace the process if it holds a CUDA context, in the background.
+
+    Unloading every family leaves the context its CUDA calls opened, a few hundred MB of a card EMS
+    is to leave alone, and only the process's end gives it back; the fresh one, at a share of 0,
+    never touches the card. It goes through the same drain and re-exec as the RSS ceiling, once the
+    server is quiet or RSS_QUIESCE_TIMEOUT_SECONDS have passed, so the request that set the share
+    has its answer and the work in flight finishes. A share above 0 before then calls it off.
+    """
+    global _share_recycle_waiting
+    if _stop is None or _server is None:
+        return
+    with _share_recycle_lock:
+        if _share_recycle_waiting:
+            return
+        _share_recycle_waiting = True
+    threading.Thread(target=_await_share_recycle, args=(_stop, _server), name="share-recycle", daemon=True).start()
+
+
+def _await_share_recycle(stop: threading.Event, server: "Server") -> None:
+    global _share_recycle_waiting, _recycling, _recycle_reason
+    try:
+        if not registry.holds_card_context():
+            return
+        deadline = time.time() + RSS_QUIESCE_TIMEOUT_SECONDS
+        while not stop.wait(SHARE_RECYCLE_POLL_SECONDS):
+            if registry.CARD_SHARE_MB != 0:
+                log("card share above 0 again: keeping the CUDA context, not recycling")
+                return
+            with _inflight_cv:
+                busy = _inflight
+            if (busy or _preloading) and time.time() < deadline:
+                continue
+            if _recycling:
+                return
+            log(f"CARD SHARE 0: this process still holds a CUDA context — draining and re-execing "
+                f"to give it back (recycle #{RECYCLE_COUNT + 1})")
+            _recycling = True
+            _recycle_reason = "share"
+            stop.set()
+            threading.Thread(target=server.shutdown, daemon=True).start()
+            return
+    finally:
+        with _share_recycle_lock:
+            _share_recycle_waiting = False
 
 
 def _drain() -> None:

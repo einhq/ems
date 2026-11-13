@@ -1,6 +1,8 @@
 """The card's share changes while EMS runs: what no longer fits it leaves the card (ein/core#573)."""
 
 import os
+import sys
+import threading
 import time
 
 import pytest
@@ -74,3 +76,80 @@ def test_whisper_is_on_the_card_while_the_share_holds_it_beside_a_context(monkey
     monkeypatch.setattr(registry, "CARD_SHARE_MB", None)
     monkeypatch.setattr(registry, "CARD_BUDGET_MB", need - 1)
     assert not registry.whisper_on_card()
+
+
+@pytest.fixture
+def server(monkeypatch):
+    """The model server with a stop event and a server to shut down, a share of 0 and nothing in
+    flight; `holds` says whether this process holds a CUDA context."""
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "ems", "modelworker"))
+    import model_server as ms
+
+    class Server:
+        def __init__(self):
+            self.shut = threading.Event()
+            self.holds = True
+
+        def shutdown(self):
+            self.shut.set()
+
+    fake = Server()
+    monkeypatch.setattr(ms, "_stop", threading.Event())
+    monkeypatch.setattr(ms, "_server", fake)
+    monkeypatch.setattr(ms, "_recycling", False)
+    monkeypatch.setattr(ms, "_recycle_reason", "rss")
+    monkeypatch.setattr(ms, "_inflight", 0)
+    monkeypatch.setattr(ms, "_preloading", False)
+    monkeypatch.setattr(ms, "SHARE_RECYCLE_POLL_SECONDS", 0.01)
+    monkeypatch.setattr(ms, "log", lambda message: None)
+    monkeypatch.setattr(ms.registry, "CARD_SHARE_MB", 0.0)
+    monkeypatch.setattr(ms.registry, "holds_card_context", lambda: fake.holds)
+    fake.ms = ms
+    return fake
+
+
+def test_a_share_of_nothing_recycles_a_worker_that_holds_a_cuda_context(server):
+    ms = server.ms
+    ms._recycle_for_share()
+    assert server.shut.wait(1)
+    assert ms._recycling and ms._stop.is_set() and ms._recycle_reason == "share"
+
+
+def test_a_worker_that_never_used_the_card_is_not_recycled(server):
+    server.holds = False
+    server.ms._recycle_for_share()
+    assert not server.shut.wait(0.2)
+    assert not server.ms._recycling
+
+
+def test_the_recycle_waits_for_the_work_in_flight(server, monkeypatch):
+    ms = server.ms
+    monkeypatch.setattr(ms, "_inflight", 1)
+    ms._recycle_for_share()
+    assert not server.shut.wait(0.2)
+    with ms._inflight_cv:
+        ms._inflight = 0
+    assert server.shut.wait(1)
+
+
+def test_a_share_above_nothing_before_the_quiet_calls_the_recycle_off(server, monkeypatch):
+    ms = server.ms
+    monkeypatch.setattr(ms, "_inflight", 1)
+    ms._recycle_for_share()
+    ms.registry.CARD_SHARE_MB = 6000.0
+    with ms._inflight_cv:
+        ms._inflight = 0
+    assert not server.shut.wait(0.2)
+    assert not ms._recycling and not ms._share_recycle_waiting
+
+
+def test_a_process_holds_a_cuda_context_when_nvidia_smi_lists_its_pid(monkeypatch):
+    listed = {"pids": ""}
+    monkeypatch.setattr(registry.shutil, "which", lambda name: "/usr/bin/nvidia-smi")
+    monkeypatch.setattr(registry.subprocess, "run",
+                        lambda *args, **kwargs: type("Done", (), {"returncode": 0, "stdout": listed["pids"]})())
+    assert not registry.holds_card_context()
+    listed["pids"] = f"12\n{os.getpid()}\n"
+    assert registry.holds_card_context()
+    monkeypatch.setattr(registry.shutil, "which", lambda name: None)
+    assert not registry.holds_card_context()

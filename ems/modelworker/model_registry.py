@@ -1173,6 +1173,20 @@ def _own_card_mb() -> float | None:
     return mb
 
 
+def holds_card_context() -> bool:
+    """Whether this process holds a CUDA context: `nvidia-smi` lists its pid among the card's
+    compute processes. False when there is no `nvidia-smi` or it cannot say."""
+    smi = shutil.which("nvidia-smi")
+    if not smi:
+        return False
+    try:
+        done = subprocess.run([smi, "--query-compute-apps=pid", "--format=csv,noheader"],
+                              capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return done.returncode == 0 and str(os.getpid()) in done.stdout.split()
+
+
 def _card_mem_mb() -> tuple[float, float] | None:
     """(free, total) on the device in MB, as CARD_BUDGET_MB and CARD_SHARE_MB let this worker see it.
 

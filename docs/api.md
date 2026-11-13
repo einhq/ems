@@ -1291,7 +1291,11 @@ place, so the transcript signature, follows (_4.23_). While the card is quiet (_
 families are placed again once EMS has answered, since a load takes up to a minute: those that no
 longer fit come off the card, and the card worker loads those that now do; health's `card.mode` is
 `switching` meanwhile. A worker that has used the card keeps its CUDA context, a few hundred MB, until
-it restarts; at a share of 0 a worker that has not never touches the card. A family whose device
+it restarts. At a share of 0 the batch worker, if it holds one, replaces itself to give it back
+once it has no work in flight, or after ten minutes, finishing what it has first; the card worker is
+replaced by one that holds nothing, so none of EMS's processes stays in `nvidia-smi`. A worker that
+has not used the card never touches it. A share above 0 before the batch worker is replaced keeps it
+as it is. A family whose device
 setting names the card (`EMS_<FAMILY>_DEVICE=cuda`) stays on it whatever the share.
 
 ### 4.23 `system.capabilities` — `GET /v0/capabilities` _(implemented)_
