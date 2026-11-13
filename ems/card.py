@@ -135,6 +135,8 @@ class CardArbiter:
         self._ready_restarts = 0
         self._lock = asyncio.Lock()
         self._task: asyncio.Task | None = None
+        # The search families being placed again after a share changed (`set_share`), while it runs.
+        self.placing: asyncio.Task | None = None
 
     async def start(self) -> None:
         self.enabled = self.query is not None and self.card is not None and self.quiet_after > 0 and await self.card_stats() is not None
@@ -145,9 +147,10 @@ class CardArbiter:
             self._task = asyncio.create_task(self._tick_loop())
 
     async def stop(self) -> None:
-        if self._task is not None:
-            self._task.cancel()
-            await asyncio.gather(self._task, return_exceptions=True)
+        for task in (self._task, self.placing):
+            if task is not None:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
         if self.card is not None and self.card.running:
             await self.card.stop()
 
@@ -293,7 +296,8 @@ class CardArbiter:
         """Take `share_mb` as the most of the card EMS's processes hold from now on: None is all
         of it, 0 none. Each worker keeps it across its next start; the batch worker unloads what no
         longer fits, at once or when its work is done; while quiet, the search families are placed
-        again (`_place_search`). Returns the share and what the batch worker unloaded at once."""
+        again (`_place_search`) after the answer, since loading one takes up to a minute. Returns
+        the share and what the batch worker unloaded at once."""
         self.share_mb = share_mb
         for worker in (self.batch, self.card):
             if worker is not None:
@@ -306,10 +310,16 @@ class CardArbiter:
         self.log(f"card: share {'the whole card' if share_mb is None else f'{share_mb:g} MB'}"
                  + (f"; unloaded {', '.join(unloaded)}" if unloaded else ""))
         if self.enabled:
+            self.placing = asyncio.create_task(self._place_search_when_quiet())
+        return {"share_mb": share_mb, "unloaded": unloaded}
+
+    async def _place_search_when_quiet(self) -> None:
+        try:
             async with self._lock:
                 if self.mode == "quiet":
                     await self._place_search()
-        return {"share_mb": share_mb, "unloaded": unloaded}
+        except Exception as exc:  # noqa: BLE001 - a task nobody awaits says what went wrong itself
+            self.log(f"card: placing search for the share failed: {exc}")
 
     async def _place_search(self) -> None:
         """While quiet, after the share changed: the search families that fit it now go on the card

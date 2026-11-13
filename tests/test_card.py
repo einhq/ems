@@ -285,18 +285,43 @@ async def test_a_share_set_while_quiet_places_search_on_the_card_again(client, s
     # 6 GB leaves room for text-query alone: a card worker that loads only that replaces the one.
     order.clear()
     await client.put("/v0/card", json={"share_mb": 6000})
+    await arbiter.placing
     assert order == ["stop card"] and card.holds == ["text-query"] and arbiter.mode == "quiet"
     assert await search(client) == ([9.0], [1.0]) and "siglip-text" in arbiter.skipped
     # The whole card again: siglip-text joins it on the same card worker.
     await client.put("/v0/card", json={"share_mb": None})
+    await arbiter.placing
     assert order == ["stop card"] and card.loads[-1] == "text-query,siglip-text"
     assert await search(client) == ([9.0], [9.0]) and arbiter.skipped == {}
     # None of it: search and documents leave the card.
     await client.put("/v0/card", json={"share_mb": 0})
+    await arbiter.placing
     assert order == ["stop card", "stop card"] and card.holds == [] and arbiter.on_card == frozenset()
     assert await search(client) == ([1.0], [1.0])
     await client.post("/v0/text/embed", json={"texts": ["en segelbåt"]})
     assert "device" not in [request for request in fake_worker.requests if request["op"] == "embed_texts"][-1]
+
+
+async def test_the_share_is_answered_before_search_is_placed_again(client, setup, fake_worker):
+    arm, _, card = setup
+    fake_worker.on("card_share", lambda req: {"unloaded": []})
+    arbiter = await arm(10000)
+    await arbiter.tick()
+    loaded = asyncio.Event()
+    card_health = card.health
+
+    async def slow_health(wait=None):
+        await loaded.wait()
+        return await card_health(wait)
+
+    card.health = slow_health
+    card.holds = []
+    arbiter.on_card = frozenset()
+    response = await asyncio.wait_for(client.put("/v0/card", json={"share_mb": 12000}), 5)
+    assert response.status_code == 200 and not arbiter.placing.done()
+    loaded.set()
+    await arbiter.placing
+    assert arbiter.on_card == {"text-query", "siglip-text"} and arbiter.mode == "quiet"
 
 
 async def test_the_plan_keeps_a_family_the_share_cannot_hold_on_the_cpu(client, setup, fake_worker):

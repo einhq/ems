@@ -1288,8 +1288,9 @@ What the families on the card claim is brought within the new share at once: tho
 are unloaded, the least recently used first, and listed in `unloaded`; one in use leaves the card
 when its request is done. Each loads again where the share then puts it (_2.6_), and whisper's
 place, so the transcript signature, follows (_4.23_). While the card is quiet (_4.22_) the search
-families are placed again: those that no longer fit come off the card, and the card worker loads
-those that now do. A worker that has used the card keeps its CUDA context, a few hundred MB, until
+families are placed again once EMS has answered, since a load takes up to a minute: those that no
+longer fit come off the card, and the card worker loads those that now do; health's `card.mode` is
+`switching` meanwhile. A worker that has used the card keeps its CUDA context, a few hundred MB, until
 it restarts; at a share of 0 a worker that has not never touches the card. A family whose device
 setting names the card (`EMS_<FAMILY>_DEVICE=cuda`) stays on it whatever the share.
 
