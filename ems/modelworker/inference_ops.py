@@ -39,7 +39,8 @@ def _whisper_model_name() -> str:
     return f"whisper-{registry.WHISPER_MODEL}"
 
 
-def transcribe_signature(language: str | None = None, min_silence_ms: int | None = None, word_timestamps: bool | None = None) -> str:
+def transcribe_signature(language: str | None = None, min_silence_ms: int | None = None, word_timestamps: bool | None = None,
+                         device: str | None = None) -> str:
     """Everything that decides what `transcribe` writes, as one string.
 
     A caller stamps a transcript with this and compares the stamp against what this returns
@@ -51,7 +52,8 @@ def transcribe_signature(language: str | None = None, min_silence_ms: int | None
     model, where and in what precision it runs on this host, the VAD, the no-speech ceiling, the
     language — pinned, or how it is detected — and whether words are timed. Beam size, the conditioning flag, the
     credit-line filter (whisper_credits) and the ceiling for a lone foreign line are constants; if one becomes
-    configurable it goes in too.
+    configurable it goes in too. `device` names another place than the one the card's share puts
+    it in now (`transcribe_places`).
     """
     # Per-request overrides (the HTTP API's `language`, `vad.min_silence_ms`, `word_timestamps`)
     # take part exactly like the configured values do, so a transcript made with them is
@@ -65,15 +67,24 @@ def transcribe_signature(language: str | None = None, min_silence_ms: int | None
         f"{_whisper_model_name()}"
         f":vad={vad['threshold']}/{vad['speech_pad_ms']}/{vad['min_silence_duration_ms']}"
         f",nospeech={registry.WHISPER_NO_SPEECH_PROB_MAX}"
-        f",on={_whisper_placement()}"
+        f",on={_whisper_placement(device)}"
         f",lang={lang or _detection_signature()}"
         f",words={1 if words else 0}"
     )
 
 
-def _whisper_placement() -> str:
-    """`cuda:float16` or `cpu:int8`: where this host decodes, and how (`registry.whisper_device`)."""
-    device = "cuda" if registry.select_device() == "cuda" else "cpu"
+def transcribe_places() -> list[str]:
+    """The signature of a transcript decoded with the settings in force in each place this host
+    can decode in: on the card, if it has one, and on the CPU. Where it decodes follows the card's
+    share, which its user may change at any time, so a caller counts a transcript stamped with any
+    of these as current rather than make the archive's transcripts again when the share moves."""
+    return [transcribe_signature(device=device) for device in (("cuda", "cpu") if registry.card_present() else ("cpu",))]
+
+
+def _whisper_placement(device: str | None = None) -> str:
+    """`cuda:float16` or `cpu:int8`: where this host decodes now, and how (`registry.whisper_device`),
+    or how it decodes on `device`."""
+    device = device or ("cuda" if registry.whisper_on_card() else "cpu")
     return f"{device}:{registry.WHISPER_COMPUTE[device]}"
 
 
@@ -306,9 +317,9 @@ def transcribe(file_path: str, language: str | None = None, min_silence_ms: int 
     want_words = registry.WHISPER_WORD_TIMESTAMPS if word_timestamps is None else bool(word_timestamps)
 
     def run():
-        # Where this host transcribes, always (`whisper_device`): a card short of room makes the
+        # Where the card's share puts whisper (`whisper_device`): a card short of room makes the
         # caller wait, and a load that fails there anyway is an error it retries, never a quiet
-        # move to the CPU.
+        # move to the CPU. The stamp names this place, whatever the share says by the end.
         device = registry.whisper_device()
         model = registry.whisper(device, registry.WHISPER_COMPUTE[device])
 
@@ -393,6 +404,7 @@ def transcribe(file_path: str, language: str | None = None, min_silence_ms: int 
         # language was detected here, the reported probability is the averaged one the
         # choice was made on, not the 1.0 the decoder reports for a language it was told.
         return out, {
+            "device": device,
             "language": detected["language"] if detected else info.language,
             "language_probability": float(detected["probability"] if detected else info.language_probability or 0.0),
             "duration": float(info.duration or 0.0),
@@ -401,12 +413,13 @@ def transcribe(file_path: str, language: str | None = None, min_silence_ms: int 
     with registry.family_lock(WHISPER):
         segments, info = registry.run_on_model_thread(WHISPER, run)
 
+    device = info.pop("device")
     text = " ".join(segment["text"] for segment in segments)
     return {
         "text": text,
         "speech": bool(text),
         "model": _whisper_model_name(),
-        "signature": transcribe_signature(lang_hint, min_silence_ms, want_words),
+        "signature": transcribe_signature(lang_hint, min_silence_ms, want_words, device),
         "segments": segments,
         **info,
     }
@@ -1446,7 +1459,7 @@ def _document_device(requested: str | None) -> str:
     A copy on the CPU goes when the card takes the documents, so the family is never held twice.
     Runs on the family's model thread, inside its lock, so no request is using that copy.
     """
-    if requested == "card":
+    if requested == "card" and registry.select_device() == "cuda":
         if f"{TEXT_EMBED}:cuda" in registry.loaded():
             return "cuda"
         free = registry.free_vram_mb()

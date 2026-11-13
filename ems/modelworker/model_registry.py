@@ -682,10 +682,16 @@ def decode_all(fn, items: list) -> list:
     return list(executor.map(fn, items))
 
 
-def select_device() -> str:
-    """'cuda' when torch sees a usable GPU, else 'cpu'."""
+def card_present() -> bool:
+    """Whether torch sees a usable GPU, whatever of it EMS may hold."""
     import torch
-    return "cuda" if torch.cuda.is_available() else "cpu"
+    return torch.cuda.is_available()
+
+
+def select_device() -> str:
+    """'cuda' when torch sees a usable GPU and EMS may hold some of it (CARD_SHARE_MB), else 'cpu'.
+    At a share of 0 nothing asks the card anything, so a worker that has not touched it never will."""
+    return "cuda" if CARD_SHARE_MB != 0 and card_present() else "cpu"
 
 
 def _malloc_trim() -> None:
@@ -1095,7 +1101,12 @@ def family_states() -> dict[str, dict]:
         locks = dict(_family_locks)
         sizes = {key: dict(size) for key, size in _sizes.items()}
 
-    families = {name: {**info, "pinned": name in PINNED_FAMILIES, "copies": []} for name, info in catalog().items()}
+    # `card_need_mb`: what a family claims on the card (CARD_NEED_MB), so a caller can tell which
+    # families a share keeps off it.
+    families = {
+        name: {**info, **({"card_need_mb": CARD_NEED_MB[name]} if name in CARD_NEED_MB else {}), "pinned": name in PINNED_FAMILIES, "copies": []}
+        for name, info in catalog().items()
+    }
     for key in sorted(copies):
         family = _family_of(key)
         entry = families.setdefault(family, {"model": None, "device": None, "pinned": family in PINNED_FAMILIES, "copies": []})
@@ -1123,10 +1134,11 @@ def family_states() -> dict[str, dict]:
 # 16 GB one — and leaves the rest to whatever else shares the card.
 CARD_BUDGET_MB = float(os.environ.get('CFG_CARD_BUDGET_MB', '0'))
 
-# The most of the card EMS's own processes hold, in MB; 0 means all of it (EMS_CARD_SHARE_MB). A
+# The most of the card EMS's own processes hold, in MB: None is all of it, 0 none, when every family
+# runs on the CPU. EMS_CARD_SHARE_MB at the start, then what the front sets (`set_card_share`). A
 # host whose card another service shares sets it to what that service leaves EMS, so a family
 # never loads into the other's part while it happens to be free — the llm restarting, say.
-CARD_SHARE_MB = float(os.environ.get('CFG_CARD_SHARE_MB', '0'))
+CARD_SHARE_MB: float | None = float(os.environ['CFG_CARD_SHARE_MB']) if os.environ.get('CFG_CARD_SHARE_MB', '').strip() else None
 _OWN_CACHE_SECONDS = 5.0
 _own_cache: dict = {"at": float("-inf"), "mb": None}
 
@@ -1165,11 +1177,12 @@ def _card_mem_mb() -> tuple[float, float] | None:
     """(free, total) on the device in MB, as CARD_BUDGET_MB and CARD_SHARE_MB let this worker see it.
 
     Device-level rather than torch-level: the whole point is to see memory held by onnxruntime
-    and CTranslate2, which torch's own accounting cannot see. None if torch is not loaded or
-    there is no GPU.
+    and CTranslate2, which torch's own accounting cannot see. None if torch is not loaded, there
+    is no GPU, or the share is 0: asking would open a CUDA context, a few hundred MB of a card EMS
+    is to leave alone.
     """
     torch = sys.modules.get("torch")
-    if torch is None:
+    if torch is None or CARD_SHARE_MB == 0:
         return None
     try:
         if not torch.cuda.is_available():
@@ -1180,7 +1193,7 @@ def _card_mem_mb() -> tuple[float, float] | None:
     if 0 < CARD_BUDGET_MB < total:
         used = total - free
         free, total = max(0.0, CARD_BUDGET_MB - used), CARD_BUDGET_MB
-    if 0 < CARD_SHARE_MB < total:
+    if CARD_SHARE_MB is not None and CARD_SHARE_MB < total:
         own = _own_card_mb()
         if own is not None:
             free, total = max(0.0, min(free, CARD_SHARE_MB - own)), CARD_SHARE_MB
@@ -1188,14 +1201,14 @@ def _card_mem_mb() -> tuple[float, float] | None:
 
 
 def free_vram_mb() -> float | None:
-    """Free VRAM on the device (within CARD_BUDGET_MB), or None if torch is not loaded or there
-    is no GPU."""
+    """Free VRAM on the device (within CARD_BUDGET_MB and CARD_SHARE_MB), or None if torch is not
+    loaded or there is no GPU."""
     mem = _card_mem_mb()
     return None if mem is None else mem[0]
 
 
 def card_total_mb() -> float | None:
-    """The card's size (within CARD_BUDGET_MB), or None without one."""
+    """The card's size (within CARD_BUDGET_MB and CARD_SHARE_MB), or None without one."""
     mem = _card_mem_mb()
     return None if mem is None else mem[1]
 
@@ -1242,13 +1255,60 @@ def _committed_mb() -> float:
 
 def _room_mb() -> float | None:
     """What is left of EMS's part of the card once every claim is counted, in MB — what it holds
-    and what is free to it (within EMS_CARD_SHARE_MB), less the context and the claims — or None
+    and what is free to it (within CARD_SHARE_MB), less the context and the claims — or None
     when `nvidia-smi` cannot say what EMS holds."""
     free = free_vram_mb()
     own = _own_card_mb()
     if free is None or own is None:
         return None
     return own + free - CUDA_CONTEXT_MB - _committed_mb()
+
+
+def set_card_share(mb: float | None) -> None:
+    """Take `mb` as CARD_SHARE_MB from now on, and keep it across a recycle, which re-execs with
+    this environment. What no longer fits is `fit_card_share`'s."""
+    global CARD_SHARE_MB
+    CARD_SHARE_MB = None if mb is None else float(mb)
+    os.environ["CFG_CARD_SHARE_MB"] = "" if mb is None else f"{mb:g}"
+    _forget_own_card_reading()
+
+
+def _within_share() -> bool:
+    """Whether what the families on the card claim, with this worker's CUDA context, fits
+    CARD_SHARE_MB — or nothing is on the card. Claims, not a reading: what the other workers hold
+    is the front's to place (ems/card.py), and a reading moves with every request."""
+    with _lock:
+        on_card = any(_device_of(key) == "cuda" for key in _cache)
+    return not on_card or CARD_SHARE_MB is None or _committed_mb() + CUDA_CONTEXT_MB <= CARD_SHARE_MB
+
+
+def fit_card_share() -> list[str]:
+    """Unload copies on the card, least recently used first, until what they claim fits
+    CARD_SHARE_MB. Those not in use go now and are returned; a family in use, or pinned, goes once
+    its work is done, in the background. Each loads again where `place` then puts it, which for
+    one that no longer fits is the CPU."""
+    unloaded = evict_idle(0, device="cuda", enough=_within_share)
+    if not _within_share():
+        threading.Thread(target=_fit_card_share_in_use, name="card-share", daemon=True).start()
+    if unloaded:
+        print(f"[model-server] card share {_share_text()}: unloaded {', '.join(unloaded)}", file=sys.stderr, flush=True)
+    return unloaded
+
+
+def _fit_card_share_in_use() -> None:
+    with _lock:
+        keys = sorted((key for key in _cache if _device_of(key) == "cuda"), key=lambda key: _last_used.get(key, 0.0))
+    for key in keys:
+        if _within_share():
+            return
+        gone = unload([_family_of(key)], device="cuda", wait=True)
+        if gone:
+            print(f"[model-server] card share {_share_text()}: unloaded {', '.join(gone)} once its work was done",
+                  file=sys.stderr, flush=True)
+
+
+def _share_text() -> str:
+    return "the whole card" if CARD_SHARE_MB is None else f"{CARD_SHARE_MB:.0f}MB"
 
 
 def place(family: str, setting: str = "auto", make_room: bool = True) -> str:
@@ -1330,15 +1390,27 @@ def _short_of_room(family: str, max_idle: float = ROOM_IDLE_SECONDS, keep: tuple
     return short()
 
 
-def whisper_device() -> str:
-    """Where the next transcription runs: the card on a host that has one, the CPU on one that has
-    not (WHISPER_COMPUTE). A card without room now raises `CardBusy`: the caller waits rather than
-    have this transcript decoded somewhere else than every other on this host. Runs on whisper's
-    own model thread, like `place`."""
+def whisper_on_card() -> bool:
+    """Whether this host decodes speech on the card: it has one, and EMS's part of it
+    (CARD_SHARE_MB, CARD_BUDGET_MB) holds whisper's need beside a CUDA context. Asks the card
+    nothing, so a signature can be made from it without a model thread."""
     if select_device() != "cuda":
-        return "cpu"
-    _wait_for_card("whisper")
-    return "cuda"
+        return False
+    part = min([mb for mb in (CARD_SHARE_MB, CARD_BUDGET_MB or None) if mb is not None], default=None)
+    return part is None or part - CUDA_CONTEXT_MB >= CARD_NEED_MB["whisper"]
+
+
+def whisper_device() -> str:
+    """Where the next transcription runs (WHISPER_COMPUTE): the card when `whisper_on_card`, the
+    CPU when not. A card without room now raises `CardBusy`: the caller waits rather than have this
+    transcript decoded somewhere else than the share puts it. The copy in the other place, left
+    from before the share changed, is unloaded. Runs on whisper's own model thread, inside its
+    lock, like `place`."""
+    device = "cuda" if whisper_on_card() else "cpu"
+    if device == "cuda":
+        _wait_for_card("whisper")
+    forget_copies("whisper", "cpu" if device == "cuda" else "cuda")
+    return device
 
 
 def _wait_for_card(family: str, keep: tuple[str, ...] = ()) -> None:

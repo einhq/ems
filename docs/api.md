@@ -156,9 +156,12 @@ fast it answers, never what (`model_registry.place`):
   between requests overcommitted the card: two families each placed within it ran out together.
   Before a family goes to the CPU, families idle past `EMS_ROOM_IDLE` (30 s) are unloaded to make
   room.
-- **whisper in one place per host.** On the card in float16 on a host with one
-  (`EMS_WHISPER_CARD_COMPUTE`), waiting for room there as `model_unavailable`; on the CPU in int8
-  on a host without one (`EMS_WHISPER_CPU_COMPUTE`). The place is in the transcript signature.
+- **whisper where the share puts it.** On the card in float16 (`EMS_WHISPER_CARD_COMPUTE`) while
+  EMS's share of it holds whisper's 4.0 GB beside a CUDA context, waiting for room there as
+  `model_unavailable`; on the CPU in int8 (`EMS_WHISPER_CPU_COMPUTE`) on a host without a card or
+  with a share below that. The place is in the transcript signature, and `capabilities` lists the
+  signature for each place, so that a caller need not make a transcript again because the share
+  moved (_4.23_).
 - **The handwriting transcribers on the card.** With `EMS_HTR_DEVICE` / `EMS_HTR_EN_DEVICE` at
   `auto`, `htr` and `htr-en` run on the card of a host that has one, waiting for room there as
   `model_unavailable` (`ocr.read` is asked again later), since on the CPU they are ten to seventy
@@ -167,10 +170,13 @@ fast it answers, never what (`model_registry.place`):
   and `htr-en` unloads `htr` only when nothing else gives it room. `htr` counts as idle only once
   the photo engine is too, so another family coming onto the card beside an OCR crawl does not
   unload it for the next handwritten page to load again.
-- **A shared card.** `EMS_CARD_SHARE_MB` caps what EMS's own processes hold (counted with
-  `nvidia-smi`, which in the container lists only them), for a card another service shares; the
-  other side is set to leave EMS the same number (ein/llm's `LLM_CARD_RESERVE_MB`).
-  `EMS_CARD_BUDGET_MB` makes the card look smaller, to rehearse one.
+- **A shared card.** The share caps what EMS's own processes hold (counted with `nvidia-smi`, which
+  in the container lists only them), for a card another service shares, such as a language model:
+  a family that would take EMS past it runs on the CPU, even while the rest of the card is free.
+  EMS starts with `EMS_CARD_SHARE_MB`; its user changes it while EMS runs with `system.card`
+  (_4.22a_), from 0, nothing on the card, to all of it. The other side is set to leave EMS what it
+  needs (ein/llm's `LLM_CARD_RESERVE_MB`). `EMS_CARD_BUDGET_MB` makes the card look smaller, to
+  rehearse one.
 
 `system.health` lists each resident copy with its device and measured size, and `degraded` names
 a card the host should have and does not see, or one whose context is lost. EiN's `docs/architecture/media-hardware.md` has the
@@ -1187,7 +1193,8 @@ what each of this container's processes holds of the card, a worker's named by `
 `nvidia-smi` in a container sees only that container's processes, so `mem_used_mb` less their sum
 is held by other containers on the same card.
 
-`card` (_3.4_) says who has the card (`ems/card.py`): `mode` is `busy` while batch model work
+`card` (_3.4_) says who has the card (`ems/card.py`): `share_mb` (_0.3.15_) is the most of it
+EMS's processes hold, null for all of it (_4.22a_); `mode` is `busy` while batch model work
 arrives, `quiet` after `quiet_after` seconds without any, `switching` between them, and `off` with
 no card or no query worker; `since` and `last_batch` are wall-clock; `search_on_card` lists the
 query families answered by the card worker, and `skipped` why one is not (the free memory it would
@@ -1195,8 +1202,11 @@ need). The card worker's copies appear in `families` with `worker: "card"`. `pla
 family, where it runs in each mode — `{"busy": "card" | "cpu", "quiet": "card" | "cpu" | "unloaded",
 "why"?}`: batch families where their device setting says while busy and unloaded while quiet, the
 document embedder its setting while busy and the card while quiet, the query families the CPU while
-busy and the card while quiet if they fit. While busy the quiet column is a prediction from the
-card's free memory less what the batch and card workers hold; `why` names the shortfall.
+busy and the card while quiet if they fit. A family set to `auto` whose need, beside a CUDA
+context, is more than the share runs on the CPU in both modes: each family's `card_need_mb`
+(_0.3.15_) is what it claims on the card, its weights and what it works with. While busy the quiet
+column is a prediction from the card's free memory less what the batch and card workers hold;
+`why` names the shortfall.
 `kept` (_0.3.6_) lists the batch families pinned while a watch runs (§4.24): they stay loaded in
 both modes, where their setting puts them, and the card worker loads into what is left. A watch's
 frames never make the card busy.
@@ -1220,6 +1230,31 @@ same seconds; these units are not part of `util_pct`. A caller charting the card
 (EiN's metrics sampler) reads the second set and treats its absence as "no card to chart",
 not as an idle one.
 
+### 4.22a `system.card` — `PUT /v0/card` _(implemented, 0.3.15)_
+
+Sets the card's share, the most of it EMS's processes hold, while EMS runs:
+
+```json
+{ "share_mb": 6000 }
+```
+
+`share_mb` is a number of MB, `0` for none of the card, every model on the CPU, or `null` for all of
+it; a share at least the card's size is all of it too. EMS starts with `EMS_CARD_SHARE_MB` (_6_) and
+keeps a share set this way until it restarts, its workers' own restarts included:
+
+```json
+{ "ok": true, "result": { "share_mb": 6000, "unloaded": ["whisper:cuda:float16"] }, "meta": { "api": "0.3.15" } }
+```
+
+What the families on the card claim is brought within the new share at once: those not in use
+are unloaded, the least recently used first, and listed in `unloaded`; one in use leaves the card
+when its request is done. Each loads again where the share then puts it (_2.6_), and whisper's
+place, so the transcript signature, follows (_4.23_). While the card is quiet (_4.22_) the search
+families are placed again: those that no longer fit come off the card, and the card worker loads
+those that now do. A worker that has used the card keeps its CUDA context, a few hundred MB, until
+it restarts; at a share of 0 a worker that has not never touches the card. A family whose device
+setting names the card (`EMS_<FAMILY>_DEVICE=cuda`) stays on it whatever the share.
+
 ### 4.23 `system.capabilities` — `GET /v0/capabilities` _(implemented)_
 
 What this EMS can do, for a caller to check before it relies on it:
@@ -1233,7 +1268,8 @@ What this EMS can do, for a caller to check before it relies on it:
               "image_embed": "ViT-SO400M-16-SigLIP2-384__webli", "ocr": "PP-OCRv6_medium+multicentury-ppocrv6-medium+multicentury-htr-model+trocr-large-handwritten" },
   "limits": { "models": 8, "tools": 6, "encodes": 2, "queue_depth": 64, "interactive_reserve": 1, "watches": 4 },
   "encode": { "video_encoder": "av1_nvenc", "cpu_budget": "4000/170/64" },
-  "signatures": { "transcribe": "large-v3/…" } }
+  "signatures": { "transcribe": "whisper-large-v3:…,on=cuda:float16,…",
+                  "transcribe_places": [ "whisper-large-v3:…,on=cuda:float16,…", "whisper-large-v3:…,on=cpu:int8,…" ] } }
 ```
 
 `name` is what this instance calls itself (`EMS_NAME`, the hostname by default), `build` the
@@ -1247,13 +1283,15 @@ signature of the CPU-decode budget a refusal is measured against — a caller th
 refusals compares it to know when a raised budget has made them stale. `signatures.transcribe` is what a transcript
 decoded right now would be stamped with — every setting that decides `speech.transcribe`'s
 output, as one string, among them where this host decodes and in what precision (`on=cuda:float16`
-on a host with a card, `on=cpu:int8` on one without; `EMS_WHISPER_CARD_COMPUTE`,
-`EMS_WHISPER_CPU_COMPUTE`). A host decodes in that one place only — a card short of room makes the
-request wait (`model_unavailable`) rather than move it to the CPU — so a transcript never depends
-on what else was on the card. A caller holding old transcripts can tell which were made with other
-settings. The worker is given as long as health gives it, 2 s; one that is down or still loading
-its models is represented by the last signature it gave, so the field is absent only until the
-worker has answered once.
+on the card, `on=cpu:int8` on the CPU; `EMS_WHISPER_CARD_COMPUTE`, `EMS_WHISPER_CPU_COMPUTE`).
+The card's share decides which (_2.6_), and a host decodes in that one place only — a card short
+of room makes the request wait (`model_unavailable`) rather than move it to the CPU — so a
+transcript never depends on what else was on the card. `transcribe_places` (_0.3.15_) is the
+signature with the same settings in each place this host can decode in, the card's first: the
+share is its user's to move at any time, so a caller counts a transcript stamped with any of them
+as current, and one stamped otherwise as made with other settings. The worker is given as long as
+health gives it, 2 s; one that is down or still loading its models is represented by the last
+signatures it gave, so the fields are absent only until the worker has answered once.
 
 ### 4.24 `watches` — a live stream read for faces _(implemented, 0.3.5; clips 0.3.7)_
 
@@ -1404,9 +1442,9 @@ the admission limits (`EMS_LIMIT_MODELS`, `EMS_LIMIT_TOOLS`, `EMS_LIMIT_ENCODES`
 `EMS_QUEUE_DEPTH`, `EMS_INTERACTIVE_RESERVE`, `EMS_AFFINITY_WAIT`), `EMS_WATCHES` (the most watches at once, 4), `EMS_EXIFTOOL_WORKERS`, `EMS_EXPECT_GPU` (`1`: a card
 is expected, and health lists `what: "gpu"` under `degraded` when none is visible), `EMS_CARD_BUDGET_MB` (the most of the card the models
 treat as there — how a smaller card is rehearsed; 0 is the whole card), `EMS_CARD_SHARE_MB` (the most
-of the card EMS's own processes hold, for a card shared with another service such as the llm: a
-model that would take EMS past it runs on the CPU, even while the rest of the card is free; 0 is
-all of it), `EMS_TOOL_STALL` (how long a
+of the card EMS's own processes hold when it starts, for a card shared with another service such as
+the llm: a model that would take EMS past it runs on the CPU, even while the rest of the card is
+free; empty is all of it and 0 none; `system.card` changes it while EMS runs, _4.22a_), `EMS_TOOL_STALL` (how long a
 tool may go without using CPU or moving a byte before it is stopped as wedged; not a limit on how
 long it may take), the transcode budget (`EMS_CPU_ENCODE_MAX_MB`,
 `EMS_CPU_ENCODE_MB_PER_1K_FRAMES`, `EMS_CPU_ENCODE_MAX_SEGMENTS`), the encoder
@@ -1448,7 +1486,7 @@ four. Its socket is `EMS_CARD_WORKER_SOCKET` and its ceiling `EMS_CARD_WORKER_MA
 Measured on fry: a query 107 ms (text) and 7 ms (pictures) on the card against ~0.3 s each on an
 idle CPU and several seconds on a busy one. `health` lists both workers' models and reports the query worker under
 `worker.query` (_3.1_). `capabilities` and `health` are how a caller learns what a
-given EMS is running; there is no configuration API.
+given EMS is running; the card's share (_4.22a_) is the one setting a caller changes.
 
 Sizing the tool lane: every tool runs single-threaded (`MAGICK_THREAD_LIMIT=1` in the image), so
 `EMS_LIMIT_TOOLS` is a number of cores. Requests queue

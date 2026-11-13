@@ -181,6 +181,33 @@ def test_a_host_transcribes_in_one_place_and_says_where(stubbed, monkeypatch):
         ops.transcribe(path)
 
 
+def test_where_whisper_decodes_follows_the_card_share_and_each_place_has_its_signature(stubbed, monkeypatch):
+    path, _ = stubbed
+    loads = []
+    monkeypatch.setattr(registry, "whisper", lambda device, compute_type: (loads.append((device, compute_type)), FakeModel([]))[1])
+    monkeypatch.setattr(registry, "card_present", lambda: True)
+    monkeypatch.setattr(registry, "CARD_BUDGET_MB", 0.0)
+    monkeypatch.setattr(registry, "_short_of_room", lambda family, max_idle=None, keep=(): None)
+    monkeypatch.setattr(registry, "cleanup_torch", lambda: None)
+    places = ops.transcribe_places()
+    assert [",on=cuda:float16," in places[0], ",on=cpu:int8," in places[1]] == [True, True]
+    # A share that holds whisper beside a CUDA context: the card, in float16.
+    monkeypatch.setattr(registry, "CARD_SHARE_MB", registry.CARD_NEED_MB["whisper"] + registry.CUDA_CONTEXT_MB)
+    assert ops.transcribe(path)["signature"] == places[0] == ops.transcribe_signature()
+    assert loads[-1] == ("cuda", "float16")
+    # One that does not: the CPU, in int8, and the card's copy unloaded. Either signature stays current.
+    monkeypatch.setattr(registry, "_cache", {"whisper:cuda:float16": object()})
+    monkeypatch.setattr(registry, "CARD_SHARE_MB", 2000.0)
+    assert ops.transcribe(path)["signature"] == places[1] == ops.transcribe_signature()
+    assert loads[-1] == ("cpu", "int8")
+    assert "whisper:cuda:float16" not in registry._cache
+    assert ops.transcribe_places() == places
+
+
+def test_a_host_without_a_card_has_one_place(stubbed):
+    assert len(ops.transcribe_places()) == 1 and ",on=cpu:int8," in ops.transcribe_places()[0]
+
+
 def test_credit_lines_are_dropped(stubbed, monkeypatch):
     """A line the decoder was sure of but whisper_credits names never reaches the transcript."""
     path, _ = stubbed

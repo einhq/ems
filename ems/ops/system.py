@@ -1,4 +1,4 @@
-"""`GET /v0/health` and `GET /v0/capabilities`."""
+"""`GET /v0/health`, `GET /v0/capabilities` and `PUT /v0/card`."""
 
 from __future__ import annotations
 
@@ -9,9 +9,11 @@ import tomllib
 from pathlib import Path
 
 from fastapi import APIRouter
+from pydantic import Field
 
 from .. import API_VERSION
 from ..context import Context
+from ..schemas import Strict
 from ..tools import encode, nvml
 from ..tools.run import run, which
 from ..tools.versions import tool_version
@@ -316,7 +318,17 @@ def _gpu_summary(gpu: dict) -> dict:
     return summary
 
 
+class CardShare(Strict):
+    # The most of the card EMS's processes hold, in MB: null is all of it, 0 none.
+    share_mb: int | None = Field(ge=0)
+
+
 def register(router: APIRouter, ctx: Context) -> None:
+    @router.put("/card")
+    async def card_share(body: CardShare):
+        """The card's share, set by its user while EMS runs; health's `card.share_mb` reports it."""
+        return {"ok": True, "result": await ctx.card.set_share(body.share_mb), "meta": {"api": API_VERSION}}
+
     @router.get("/health")
     async def health():
         # The workers and the card are asked at once, each with its own bound, so one that is busy
@@ -401,9 +413,13 @@ def register(router: APIRouter, ctx: Context) -> None:
         # that is down or loading is represented by the last signature it gave, absent until it
         # has given one.
         signatures: dict = {}
-        signature = await ctx.worker.transcribe_signature(HEALTH_WAIT_SECONDS)
-        if signature:
-            signatures["transcribe"] = signature
+        transcribe = await ctx.worker.transcribe_signatures(HEALTH_WAIT_SECONDS)
+        if transcribe:
+            signatures["transcribe"] = transcribe["signature"]
+            if transcribe["places"]:
+                # The signature in each place this host may decode in, the card's share deciding
+                # which: a transcript stamped with any of them is as current as one stamped now.
+                signatures["transcribe_places"] = transcribe["places"]
         return {
             "signatures": signatures,
             "api": API_VERSION,

@@ -25,8 +25,13 @@ never make the card busy. The faces family they need stays pinned on the batch w
 watch runs (`kept`), so neither the quiet unload nor busy mode's room-making and idle eviction take
 it between two frames; the card worker loads into what is free beside it.
 
+The share (`share_mb`) is the most of the card EMS's processes hold, the rest being another
+service's, such as the assistant's language model. Its user may change it at any time
+(`set_share`): the workers are told, the batch worker unloads what no longer fits, and while quiet
+the search families are placed on the card again.
+
 With no card, no query worker or `quiet_after` 0 there is nothing to arbitrate, and every call
-here is a pass-through.
+here is a pass-through but `set_share`.
 """
 
 from __future__ import annotations
@@ -43,7 +48,7 @@ from .worker import Worker
 
 # Worker ops that are not batch model work: they never make the card busy. The query ops are here
 # for a query worker that is down, when search falls back to the batch worker.
-_NOT_BATCH = frozenset({"health", "memstats", "transcribe_signature", "unload", "pin", "unpin", "embed_texts", "embed_image_texts"})
+_NOT_BATCH = frozenset({"health", "memstats", "transcribe_signature", "unload", "pin", "unpin", "card_share", "embed_texts", "embed_image_texts"})
 # Set around a watch's call to the batch worker: live work, which never makes the card busy.
 watching: contextvars.ContextVar[bool] = contextvars.ContextVar("watching", default=False)
 TICK_SECONDS = 30.0
@@ -77,17 +82,18 @@ class CardBudget:
         return chosen, skipped
 
 
-def room_mb(stats: dict | None, share_mb: float = 0.0, held_mb: float = 0.0) -> float:
+def room_mb(stats: dict | None, share_mb: float | None = None, held_mb: float = 0.0) -> float:
     """What EMS may still load onto the card, in MB, from an `nvidia-smi` reading.
 
     The card's free memory plus `held_mb` (what is about to be given back), and with a share no
     more than the share less what EMS's own processes hold — `processes` lists only this
-    container's, so what the card's other tenants hold never counts against it.
+    container's, so what the card's other tenants hold never counts against it. A share of 0 leaves
+    no room at all.
     """
-    if not stats or "mem_total_mb" not in stats or "mem_used_mb" not in stats:
+    if share_mb == 0 or not stats or "mem_total_mb" not in stats or "mem_used_mb" not in stats:
         return 0.0
     free = stats["mem_total_mb"] - stats["mem_used_mb"] + held_mb
-    if share_mb > 0 and "processes" in stats:
+    if share_mb is not None and "processes" in stats:
         own = sum(p.get("used_mb", 0) for p in stats["processes"])
         free = min(free, share_mb - own + held_mb)
     return max(0.0, free)
@@ -102,7 +108,7 @@ class CardArbiter:
         quiet_after: float,
         card_stats: Callable[[], Awaitable[dict | None]],
         budget: CardBudget = CardBudget(),
-        share_mb: float = 0.0,
+        share_mb: float | None = None,
         log: Callable[[str], None] = print,
     ):
         self.batch = batch
@@ -153,8 +159,9 @@ class CardArbiter:
         return None
 
     def document_device(self) -> str | None:
-        """What documents ask the batch worker for: the card while quiet, else its setting."""
-        return "card" if self.enabled and self.mode == "quiet" else None
+        """What documents ask the batch worker for: the card while quiet and the share leaves EMS
+        some of it, else its setting."""
+        return "card" if self.enabled and self.mode == "quiet" and self.share_mb != 0 else None
 
     def gate(self, op: str, _payload: dict[str, Any]):
         """The batch worker's hook around each call: batch model work holds the card busy, a watch's does not."""
@@ -261,8 +268,9 @@ class CardArbiter:
                  f"search on the card: {', '.join(sorted(self.on_card)) or 'nothing'}"
                  + (f" ({'; '.join(f'{k}: {v}' for k, v in self.skipped.items())})" if self.skipped else ""))
 
-    async def _to_busy(self) -> None:
-        self.mode = "switching"
+    async def _off_the_card(self) -> None:
+        """Send queries back to the query worker, wait out the searches on the card worker, and
+        replace it with one that holds nothing: only a process's end gives back all it held."""
         self.on_card = frozenset()
         deadline = time.monotonic() + DRAIN_TIMEOUT_SECONDS
         while self._card_inflight and time.monotonic() < deadline:
@@ -270,6 +278,10 @@ class CardArbiter:
         if self.card.running:
             await self.card.stop()
         await self._standby()
+
+    async def _to_busy(self) -> None:
+        self.mode = "switching"
+        await self._off_the_card()
         try:
             await self.batch.call("unload", {"families": ["text-embed"], "device": "cuda", "wait": True})
         except EmsError as exc:
@@ -277,16 +289,65 @@ class CardArbiter:
         self.mode, self.since = "busy", time.time()
         self.log("card: busy, batch work arrived; search back on the CPU")
 
+    async def set_share(self, share_mb: float | None) -> dict:
+        """Take `share_mb` as the most of the card EMS's processes hold from now on: None is all
+        of it, 0 none. Each worker keeps it across its next start; the batch worker unloads what no
+        longer fits, at once or when its work is done; while quiet, the search families are placed
+        again (`_place_search`). Returns the share and what the batch worker unloaded at once."""
+        self.share_mb = share_mb
+        for worker in (self.batch, self.card):
+            if worker is not None:
+                worker.env["CFG_CARD_SHARE_MB"] = "" if share_mb is None else f"{share_mb:g}"
+        unloaded: list[str] = []
+        try:
+            unloaded = (await self.batch.call("card_share", {"mb": share_mb})).get("unloaded") or []
+        except EmsError as exc:
+            self.log(f"card: the batch worker did not take the share ({exc}); it has it from its next start")
+        self.log(f"card: share {'the whole card' if share_mb is None else f'{share_mb:g} MB'}"
+                 + (f"; unloaded {', '.join(unloaded)}" if unloaded else ""))
+        if self.enabled:
+            async with self._lock:
+                if self.mode == "quiet":
+                    await self._place_search()
+        return {"share_mb": share_mb, "unloaded": unloaded}
+
+    async def _place_search(self) -> None:
+        """While quiet, after the share changed: the search families that fit it now go on the card
+        worker. More of them are pinned beside those it holds; fewer replace it with one that loads
+        only those. A card that cannot be read leaves things as they are."""
+        stats = await self.card_stats()
+        if stats is None:
+            return
+        held = sum(p.get("used_mb", 0) for p in stats.get("processes") or [] if self.card.pid is not None and p.get("pid") == self.card.pid)
+        families, skipped = self.budget.fitting(room_mb(stats, self.share_mb, held))
+        self.skipped = skipped
+        if set(families) == set(self.on_card):
+            return
+        self.mode = "switching"
+        if not set(families) >= self.on_card:
+            await self._off_the_card()
+        if families:
+            await self._load(families)
+            await self._await_ready(families)
+        self.mode = "quiet"
+        self.log(f"card: search on the card for the share: {', '.join(sorted(self.on_card)) or 'nothing'}"
+                 + (f" ({'; '.join(f'{k}: {v}' for k, v in skipped.items())})" if skipped else ""))
+
+    def _share_holds(self, entry: dict) -> bool:
+        """Whether the share holds `entry`'s family beside a CUDA context (its `card_need_mb`)."""
+        return self.share_mb is None or self.share_mb >= (entry.get("card_need_mb") or 0.0) + self.budget.context_mb
+
     def plan(self, families: dict[str, dict], gpu: dict) -> dict[str, dict]:
         """Where each family runs in each mode — `card`, `cpu` or `unloaded` — as the arbiter places it.
 
-        Batch families run where their device setting says while busy and are unloaded while quiet
-        (batch work switches to busy before it runs), but for those kept for watches, which stay
-        where they are; the document embedder follows its setting
-        while busy and goes on the card while quiet, room permitting; the query families answer on
-        the CPU while busy and on the card while quiet if they fit. While busy that last is a
-        prediction from the card now, less what the batch and card workers hold; while quiet it is
-        what happened, with `why` for a family that did not fit.
+        Batch families run where their device setting says while busy — but on the CPU when the
+        share cannot hold one set to `auto` — and are unloaded while quiet (batch work switches to
+        busy before it runs), but for those kept for watches, which stay where they are; the
+        document embedder follows its setting while busy and goes on the card while quiet, room and
+        share permitting; the query families answer on the CPU while busy and on the card while
+        quiet if they fit. While busy that last is a prediction from the card now, less what the
+        batch and card workers hold; while quiet it is what happened, with `why` for a family that
+        did not fit.
         """
         if not self.enabled:
             return {}
@@ -299,13 +360,13 @@ class CardArbiter:
         query = {family for family, _ in self.budget.family_mb}
         plan: dict[str, dict] = {}
         for name, entry in families.items():
-            setting = "cpu" if entry.get("device") == "cpu" else "card"
+            setting = "cpu" if entry.get("device") == "cpu" or (entry.get("device") != "cuda" and not self._share_holds(entry)) else "card"
             if name in query:
                 plan[name] = {"busy": "cpu", "quiet": "card" if name in on_card else "cpu", **({"why": skipped[name]} if name in skipped else {})}
             elif name in self.kept:
                 plan[name] = {"busy": setting, "quiet": setting}
             elif name == "text-embed":
-                plan[name] = {"busy": setting, "quiet": "card"}
+                plan[name] = {"busy": setting, "quiet": "card" if self._share_holds(entry) else "cpu"}
             else:
                 plan[name] = {"busy": setting, "quiet": "unloaded"}
         return plan
@@ -313,9 +374,10 @@ class CardArbiter:
     def snapshot(self) -> dict:
         """For `health`."""
         if not self.enabled:
-            return {"mode": "off"}
+            return {"mode": "off", "share_mb": self.share_mb}
         return {
             "mode": self.mode,
+            "share_mb": self.share_mb,
             "since": round(self.since, 1),
             "quiet_after": self.quiet_after,
             "last_batch": round(self.last_batch, 1),

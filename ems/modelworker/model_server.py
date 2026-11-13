@@ -32,6 +32,7 @@ response per connection.
   -> {"op":"embed_face","path":"...","box":{"x":0.1,"y":0.2,"width":0.1,"height":0.1},"angle":270}
   -> {"op":"pin","families":["siglip-text","text-query"]}
   -> {"op":"unpin","families":["faces"]}
+  -> {"op":"card_share","mb":6000}
   -> {"op":"health"}
 
 `angle`/`mirror` (optional, default 0/false) name the display frame an image op works in —
@@ -353,6 +354,15 @@ def handle(request: dict) -> dict:
             raise ValueError("pin: missing families")
         return {"pinning": _pin([str(family) for family in families])}
 
+    if op == "card_share":
+        # The most of the card this worker's families may claim from now on (None: all of it);
+        # those over it are unloaded, the ones in use once their work is done.
+        mb = request.get("mb")
+        if mb is not None and (isinstance(mb, bool) or not isinstance(mb, (int, float)) or mb < 0):
+            raise ValueError(f"card_share: mb must be a number of MB, 0 or more, or null, not {mb!r}")
+        registry.set_card_share(mb)
+        return {"unloaded": registry.fit_card_share()}
+
     if op == "unpin":
         families = request.get("families")
         if not isinstance(families, list) or not families:
@@ -382,8 +392,9 @@ def handle(request: dict) -> dict:
         )
 
     if op == "transcribe_signature":
-        # What a transcript decoded right now would be stamped with; no model is loaded.
-        return {"signature": ops.transcribe_signature()}
+        # What a transcript decoded right now would be stamped with, and in each place it may be
+        # decoded in; no model is loaded.
+        return {"signature": ops.transcribe_signature(), "places": ops.transcribe_places()}
 
     if op == "embed_texts":
         texts = request.get("texts")

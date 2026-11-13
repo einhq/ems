@@ -89,8 +89,18 @@ def test_documents_are_placed_on_the_model_thread_not_before_it(embedder, monkey
 
 def test_documents_the_card_takes_leave_no_copy_on_the_cpu(embedder, monkeypatch):
     monkeypatch.setattr(registry, "_cache", {"text-embed:cpu": object()})
+    monkeypatch.setattr(registry, "select_device", lambda: "cuda")
     monkeypatch.setattr(registry, "free_vram_mb", lambda: 9000.0)
     monkeypatch.setattr(registry, "cleanup_torch", lambda: None)
     ops.embed_texts(["a"], "document", device="card")
     assert embedder.loaded == [("text-embed", "cuda")]
     assert "text-embed:cpu" not in registry._cache
+
+
+def test_documents_stay_off_a_card_the_share_leaves_ems_none_of(embedder, monkeypatch):
+    monkeypatch.setattr(registry, "CARD_SHARE_MB", 0.0)
+    monkeypatch.setattr(registry, "card_present", lambda: True)
+    monkeypatch.setattr(registry, "free_vram_mb", lambda: pytest.fail("a share of 0 asks the card nothing"))
+    monkeypatch.setattr(registry, "text_embed_device", lambda: registry.place("text-embed", "auto", make_room=False))
+    ops.embed_texts(["a"], "document", device="card")
+    assert embedder.loaded == [("text-embed", "cpu")]

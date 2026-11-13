@@ -28,6 +28,10 @@ class Switchable(Worker):
     def running(self) -> bool:
         return self.up
 
+    @property
+    def pid(self) -> int | None:
+        return 4242 if self.up else None
+
     async def start(self) -> None:
         self.up = True
         pinned = self.env.get("CFG_MODEL_PINNED", "")
@@ -136,7 +140,7 @@ async def test_without_a_card_nothing_is_arbitrated(client, setup, fake_worker):
     assert arbiter.enabled is False and order == [] and card.starts == []
     await client.post("/v0/text/embed", json={"texts": ["en segelbåt"]})
     assert "device" not in fake_worker.requests[-1]
-    assert (await client.get("/v0/health")).json()["card"] == {"mode": "off"}
+    assert (await client.get("/v0/health")).json()["card"] == {"mode": "off", "share_mb": None}
 
 
 async def test_documents_go_to_the_card_while_quiet(client, setup, fake_worker):
@@ -247,6 +251,76 @@ async def test_health_says_where_each_family_runs_in_each_mode(client, setup, fa
     assert plan["text-query"]["quiet"] == "card" and plan["siglip-text"]["quiet"] == "cpu"
 
 
+async def test_a_share_set_while_busy_reaches_the_workers_and_health(client, setup, fake_worker):
+    arm, _, card = setup
+    shares = []
+    fake_worker.on("card_share", lambda req: (shares.append(req["mb"]), {"unloaded": ["whisper:cuda:float16"]})[1])
+    arbiter = await arm(10000)
+    response = await client.put("/v0/card", json={"share_mb": 6000})
+    assert response.status_code == 200, response.text
+    assert response.json()["result"] == {"share_mb": 6000, "unloaded": ["whisper:cuda:float16"]}
+    # The batch worker unloads what no longer fits; each worker starts with the share from now on.
+    assert shares == [6000]
+    assert arbiter.batch.env["CFG_CARD_SHARE_MB"] == "6000" and card.env["CFG_CARD_SHARE_MB"] == "6000"
+    assert (await client.get("/v0/health")).json()["card"]["share_mb"] == 6000
+    await client.put("/v0/card", json={"share_mb": None})
+    assert shares == [6000, None] and arbiter.batch.env["CFG_CARD_SHARE_MB"] == ""
+    assert arbiter.mode == "busy" and card.loads == []
+    for body in ({"share_mb": -1}, {}, {"share_mb": "all"}):
+        assert (await client.put("/v0/card", json=body)).status_code == 400, body
+
+
+async def test_a_share_set_while_quiet_places_search_on_the_card_again(client, setup, fake_worker):
+    arm, order, card = setup
+    fake_worker.on("card_share", lambda req: {"unloaded": []})
+    arbiter = await arm(10000)
+    await arbiter.tick()
+    assert card.holds == ["text-query", "siglip-text"]
+
+    async def stats():
+        # The card worker holds 5.3 GB of the card, the batch worker 0.2 GB, another service 5 GB.
+        return {"mem_total_mb": 16311.0, "mem_used_mb": 10500.0, "processes": [{"pid": 7, "used_mb": 200}, {"pid": card.pid, "used_mb": 5300}]}
+
+    arbiter.card_stats = stats
+    # 6 GB leaves room for text-query alone: a card worker that loads only that replaces the one.
+    order.clear()
+    await client.put("/v0/card", json={"share_mb": 6000})
+    assert order == ["stop card"] and card.holds == ["text-query"] and arbiter.mode == "quiet"
+    assert await search(client) == ([9.0], [1.0]) and "siglip-text" in arbiter.skipped
+    # The whole card again: siglip-text joins it on the same card worker.
+    await client.put("/v0/card", json={"share_mb": None})
+    assert order == ["stop card"] and card.loads[-1] == "text-query,siglip-text"
+    assert await search(client) == ([9.0], [9.0]) and arbiter.skipped == {}
+    # None of it: search and documents leave the card.
+    await client.put("/v0/card", json={"share_mb": 0})
+    assert order == ["stop card", "stop card"] and card.holds == [] and arbiter.on_card == frozenset()
+    assert await search(client) == ([1.0], [1.0])
+    await client.post("/v0/text/embed", json={"texts": ["en segelbåt"]})
+    assert "device" not in [request for request in fake_worker.requests if request["op"] == "embed_texts"][-1]
+
+
+async def test_the_plan_keeps_a_family_the_share_cannot_hold_on_the_cpu(client, setup, fake_worker):
+    arm, _, _ = setup
+    fake_worker.on("card_share", lambda req: {"unloaded": []})
+    fake_worker.on("health", lambda req: {"loaded": [], "families": {
+        "whisper": {"device": "auto", "card_need_mb": 4000, "pinned": False, "copies": []},
+        "faces": {"device": "auto", "card_need_mb": 2500, "pinned": False, "copies": []},
+        "text-embed": {"device": "cpu", "card_need_mb": 1500, "pinned": False, "copies": []},
+        "text-query": {"device": "cpu", "pinned": True, "copies": []},
+        "siglip-text": {"device": "cpu", "pinned": True, "copies": []},
+    }})
+    await arm(10000)
+
+    async def plan(share_mb):
+        await client.put("/v0/card", json={"share_mb": share_mb})
+        return (await client.get("/v0/health")).json()["card"]["plan"]
+
+    assert (await plan(4000))["whisper"]["busy"] == "cpu" and (await plan(4000))["faces"]["busy"] == "card"
+    assert (await plan(4400))["whisper"]["busy"] == "card"
+    nothing = await plan(0)
+    assert nothing["whisper"]["busy"] == nothing["faces"]["busy"] == "cpu" and nothing["text-embed"] == {"busy": "cpu", "quiet": "cpu"}
+
+
 def test_room_keeps_to_the_share_whatever_the_card_has_free():
     # 16 GB, 6 GB in use, all of it EMS's own: the card has 10 GB free, the share 10.2 GB.
     stats = {"mem_total_mb": 16000.0, "mem_used_mb": 6000.0, "processes": [{"pid": 57, "used_mb": 6000}]}
@@ -257,4 +331,5 @@ def test_room_keeps_to_the_share_whatever_the_card_has_free():
     # The other tenant back: the card's free memory is the tighter bound.
     stats = {**stats, "mem_used_mb": 12600.0}
     assert room_mb(stats, share_mb=10200) == 3400
+    assert room_mb(stats, share_mb=0, held_mb=6000) == 0
     assert room_mb(None) == 0

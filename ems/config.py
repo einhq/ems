@@ -1,7 +1,8 @@
 """Configuration, from the environment only.
 
-There is deliberately no configuration API: `GET /v0/capabilities` and `GET /v0/health` are how
-a caller learns what a given EMS runs, and changing any of this is a restart. Every knob is an
+`GET /v0/capabilities` and `GET /v0/health` are how a caller learns what a given EMS runs, and
+changing any of this is a restart. The one exception is the card's share (`PUT /v0/card`): this
+is only the share EMS starts with, and its user may change it while EMS runs. Every knob is an
 `EMS_*` variable; the model worker's own `CFG_*` variables are derived from them when it is
 spawned (see worker.py), so an operator sets one namespace.
 """
@@ -96,10 +97,11 @@ class Settings:
     card_siglip_text_mb: int = 3100
     card_context_mb: int = 400
     card_margin_mb: int = 1024
-    # The most of the card EMS's own processes hold, in MB; 0 means all of it. For a host whose
-    # card another service shares (the assistant's llm), set to the share that service leaves EMS:
-    # neither then loads into the other's part, whichever started first (ein/core#515).
-    card_share_mb: int = 0
+    # The most of the card EMS's own processes hold, in MB, until a caller sets another (`PUT
+    # /v0/card`, CardArbiter.set_share); None means all of it, 0 none. For a host whose card
+    # another service shares (the assistant's llm), the share that service leaves EMS: neither then
+    # loads into the other's part, whichever started first (ein/core#515).
+    card_share_mb: int | None = None
     # What this instance calls itself in `capabilities`, for a caller that uses several.
     name: str = ""
     # The ops this instance serves, as globs over their names (`media.*`); any other answers
@@ -123,6 +125,15 @@ class Settings:
                 return int(raw)
             except ValueError as exc:
                 raise ValueError(f"{name} must be an integer, got {raw!r}") from exc
+
+        def share(name: str) -> int | None:
+            raw = e.get(name, "").strip()
+            if not raw:
+                return None
+            value = integer(name, 0)
+            if value < 0:
+                raise ValueError(f"{name} must be 0 or more, got {raw!r}")
+            return value
 
         keys_file = e.get("EMS_KEYS_FILE", "/etc/ems.keys")
         here = os.path.dirname(os.path.abspath(__file__))
@@ -165,7 +176,7 @@ class Settings:
             card_siglip_text_mb=integer("EMS_CARD_SIGLIP_TEXT_MB", 3100),
             card_context_mb=integer("EMS_CARD_CONTEXT_MB", 400),
             card_margin_mb=integer("EMS_CARD_MARGIN_MB", 1024),
-            card_share_mb=integer("EMS_CARD_SHARE_MB", 0),
+            card_share_mb=share("EMS_CARD_SHARE_MB"),
             name=e.get("EMS_NAME", "").strip() or socket.gethostname(),
             ops=tuple(glob.strip() for glob in e.get("EMS_OPS", "*").split(",") if glob.strip()) or ("*",),
         )

@@ -152,7 +152,7 @@ class Worker:
         self.restarts = 0
         self.last_health: dict | None = None
         self.answered_at: float | None = None
-        self.last_signature: str | None = None
+        self.last_signatures: dict | None = None
         # Wraps every call: `gate(op, payload)` returns the context it runs in (the CardArbiter's).
         self.gate: Callable[[str, dict[str, Any]], Any] | None = None
 
@@ -298,14 +298,14 @@ class Worker:
         self.last_health, self.answered_at = reply, time.time()
         return reply
 
-    async def transcribe_signature(self, wait: float | None = None) -> str | None:
-        """What a transcript decoded now would be stamped with, or, when the worker does not answer
-        within `wait` seconds (down, or loading a model), the last signature it gave; None until it
-        has given one."""
+    async def transcribe_signatures(self, wait: float | None = None) -> dict | None:
+        """What a transcript decoded now would be stamped with (`signature`), and in each place
+        this host may decode in (`places`); or, when the worker does not answer within `wait`
+        seconds (down, or loading a model), the last it gave; None until it has given them."""
         try:
             reply = await asyncio.wait_for(self.call("transcribe_signature", {}), wait)
         except (EmsError, asyncio.TimeoutError):
-            return self.last_signature
+            return self.last_signatures
         if isinstance(reply, dict) and reply.get("signature"):
-            self.last_signature = reply["signature"]
-        return self.last_signature
+            self.last_signatures = {"signature": reply["signature"], "places": [str(place) for place in reply.get("places") or []]}
+        return self.last_signatures
