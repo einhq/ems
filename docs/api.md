@@ -1064,11 +1064,12 @@ A document's first page as picture renditions, and the document as PDF for a vie
   filled by the page's longer fit, a `cover` box by its shorter one), at most 4096 px a side, and
   the targets are cut from it as §4.2 cuts them: `file.angle` and `file.mirror` do not apply.
 - `pdf` asks for the converted document as well, written beside the pictures and published with
-  them; a PDF has no conversion to give, so `pdf` with one is `invalid_request`.
+  them; a PDF has no conversion to give, so `pdf` with one is `invalid_request`. `targets` may be
+  empty when `pdf` is asked for, and the page is then not rendered.
 - A document PDFium or LibreOffice cannot open, or with no pages, is `undecodable`. Runs in the
   `tools` lane.
 
-Result: as §4.2, plus `pages` (the document's page count), `page` (the first page's size in
+Result: as §4.2 (no `frame` without targets), plus `pages` (the document's page count), `page` (the first page's size in
 points, `{ "width", "height" }`) and, with `pdf`, `pdf: { "path", "bytes" }`. `meta.producer` is
 `pypdfium2/<version>+magick/<version>`, with `soffice/<version>` between them for a converted
 document.

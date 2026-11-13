@@ -124,6 +124,17 @@ async def test_a_text_file_is_converted_and_its_pdf_published(client, dirs, fake
     assert sorted(os.listdir(rw)) == ["512x512.avif", "view.pdf"]
     assert "soffice/" in result["meta"]["producer"]
 
+    # The PDF alone, the page not rendered.
+    os.remove(rw / "view.pdf")
+    fake_magick.clear()
+    r = await client.post("/v0/document/renditions", json={"file": {"path": str(ro / "note.txt"), "mimetype": "text/plain"}, "pdf": {"output": {"path": str(rw / "view.pdf")}}})
+    result = r.json()
+    assert r.status_code == 200, result
+    assert result["result"]["targets"] == [] and result["result"]["pages"] == 1 and "frame" not in result["result"]
+    assert (rw / "view.pdf").read_bytes().startswith(b"%PDF") and fake_magick == {}
+    r = await client.post("/v0/document/renditions", json={"file": {"path": str(ro / "note.txt"), "mimetype": "text/plain"}})
+    assert r.status_code == 400
+
 
 @pytest.mark.skipif(not shutil.which("soffice"), reason="LibreOffice is not installed")
 async def test_a_document_libreoffice_cannot_read_is_undecodable(client, dirs, fake_magick):

@@ -57,7 +57,8 @@ class PdfOutput(Strict):
 
 class DocumentRenditionsRequest(WithOptions):
     file: FileRef
-    targets: list[RenditionTarget] = Field(min_length=1, max_length=MAX_TARGETS)
+    # Empty when only the PDF is asked for.
+    targets: list[RenditionTarget] = Field(default_factory=list, max_length=MAX_TARGETS)
     pdf: PdfOutput | None = None
 
 
@@ -119,8 +120,8 @@ async def convert(ctx: Context, path: str, extension: str, scratch: str) -> str:
 
 
 def render_first_page(pdf: str, targets: list[RenditionTarget], out: str) -> tuple[int, float, float]:
-    """The first page of `pdf` as a PNG at the scale the targets need, on white: the page count and
-    the page's size in points."""
+    """The first page of `pdf` as a PNG at the scale the targets need, on white, unless there are
+    none: the page count and the page's size in points."""
     import pypdfium2
 
     try:
@@ -136,7 +137,8 @@ def render_first_page(pdf: str, targets: list[RenditionTarget], out: str) -> tup
             width, height = page.get_size()
             if width <= 0 or height <= 0:
                 raise EmsError(UNDECODABLE, "the first page has no size")
-            page.render(scale=render_scale(width, height, targets), fill_color=(255, 255, 255, 255)).to_pil().save(out, "PNG")
+            if targets:
+                page.render(scale=render_scale(width, height, targets), fill_color=(255, 255, 255, 255)).to_pil().save(out, "PNG")
         finally:
             page.close()
     finally:
@@ -151,6 +153,8 @@ async def document_renditions(ctx: Context, req: DocumentRenditionsRequest, prog
         raise EmsError(UNSUPPORTED, f"no page renderer for {mimetype or 'an unknown type'}")
     if req.pdf is not None and mimetype == PDF:
         raise invalid("the file is a PDF already: there is no PDF to make of it")
+    if not req.targets and req.pdf is None:
+        raise invalid("asks for neither a picture nor a PDF")
     if req.pdf is not None and os.path.splitext(req.pdf.output.path)[1].lower() != ".pdf":
         raise invalid(f"{req.pdf.output.path}: a PDF is named .pdf")
     pdf_final = remote.output(req.pdf.output.path) if req.pdf is not None else None
@@ -167,7 +171,7 @@ async def document_renditions(ctx: Context, req: DocumentRenditionsRequest, prog
             pages, width, height = await asyncio.to_thread(render_first_page, source, req.targets, page_png)
             if pdf_temp:
                 await asyncio.to_thread(shutil.copyfile, source, pdf_temp)
-            result = await render_targets(ctx, page_png, 0, False, req.targets)
+            result = await render_targets(ctx, page_png, 0, False, req.targets) if req.targets else {"targets": []}
             result["pages"] = pages
             result["page"] = {"width": round(width, 2), "height": round(height, 2)}
             if pdf_temp and pdf_final:
