@@ -1,5 +1,6 @@
 """`image.damage`: fading measured from the change `image.unfade` would make, the detector's marks
-sorted into specks and scratches, the scores, and the op with a scripted model worker."""
+sorted into specks and scratches, blur from the width of the sharpest edges, the scores, and the op
+with a scripted model worker."""
 
 import os
 
@@ -112,6 +113,73 @@ def test_the_scores_grow_with_the_damage_and_stop_at_one():
     assert damage.score(-1, damage.DUSTY) == 0
 
 
+def shapes(size=900):
+    """A sharp picture in grey: discs and bars of many grey levels on a mid-grey ground, with a
+    little grain, so that its edges run every way."""
+    rng = np.random.default_rng(3)
+    picture = np.full((size, size), 0.5, np.float32)
+    for _ in range(60):
+        x, y, r = rng.integers(40, size - 40, 2).tolist() + [int(rng.integers(8, 40))]
+        cv2.circle(picture, (x, y), r, float(rng.uniform(0, 1)), -1)
+    for _ in range(20):
+        x, y = rng.integers(40, size - 40, 2).tolist()
+        cv2.rectangle(picture, (x, y), (x + int(rng.integers(10, 80)), y + int(rng.integers(10, 80))), float(rng.uniform(0, 1)), -1)
+    picture += rng.normal(0, 0.01, picture.shape).astype(np.float32)
+    return np.clip(np.rint(picture * 255), 0, 255).astype(np.uint8)
+
+
+def shaken(picture, length=17):
+    kernel = np.zeros((length, length), np.float32)
+    kernel[length // 2, :] = 1 / length
+    return cv2.filter2D(picture, -1, kernel)
+
+
+def test_a_sharp_picture_is_neither_blurred_nor_shaken():
+    from ems.tools import damage
+
+    edge, shake = damage.sharpness(shapes())
+    assert edge < damage.BLURRED[0] and shake < damage.SHAKEN[0]
+
+
+@pytest.mark.parametrize("sigma", [3, 8])
+def test_a_blurred_picture_has_wide_edges_every_way(sigma):
+    from ems.tools import damage
+
+    edge, shake = damage.sharpness(cv2.GaussianBlur(shapes(), (0, 0), sigma))
+    assert edge > damage.BLURRED[1] and shake < damage.SHAKEN[0]
+
+
+def test_a_shaken_picture_has_its_edges_wider_across_the_movement():
+    from ems.tools import damage
+
+    _, shake = damage.sharpness(shaken(shapes()))
+    assert shake > damage.SHAKEN[1]
+
+
+def test_a_sharp_part_keeps_a_picture_with_shallow_focus_sharp():
+    from ems.tools import damage
+
+    picture = cv2.GaussianBlur(shapes(), (0, 0), 4)
+    picture[300:600, 300:600] = shapes()[300:600, 300:600]
+    edge, _ = damage.sharpness(picture)
+    assert edge < damage.BLURRED[0]
+
+
+def test_a_picture_without_edges_is_not_judged():
+    from ems.tools import damage
+
+    assert damage.sharpness(np.full((400, 600, 3), 128, np.uint8)) == (None, None)
+
+
+def test_a_border_round_the_picture_is_not_taken_for_its_edges():
+    from ems.tools import damage
+
+    picture = cv2.GaussianBlur(shapes(), (0, 0), 3)
+    picture[:30], picture[-30:], picture[:, :30], picture[:, -30:] = 0, 0, 0, 0
+    edge, _ = damage.sharpness(picture)
+    assert edge > damage.BLURRED[1]
+
+
 def mark_a_scratch(request):
     """A scripted model worker's `detect_defects`: one long scratch down what it is shown."""
     shown = cv2.imread(request["path"], cv2.IMREAD_UNCHANGED)
@@ -134,7 +202,8 @@ async def test_a_faded_scratched_scan_is_scored_and_nothing_is_left_behind(clien
     assert result["faded"] == 1 and result["dusty"] == 0 and result["scratched"] == pytest.approx((560 / 640 - 0.4) / 1.2, abs=0.01)
     assert result["measures"]["scratches"] == 1 and result["measures"]["specks"] == 0
     assert result["measures"]["change"] > 22 and result["measures"]["length"] == pytest.approx(560 / 640, abs=0.01)
-    assert body["meta"]["producer"] == "damage/1+bopb-detection"
+    assert result["blurred"] == 0 and result["shaken"] == 0 and result["measures"]["edge"] < 1.2
+    assert body["meta"]["producer"] == "damage/2+bopb-detection"
     (request,) = [q for q in fake_worker.requests if q["op"] == "detect_defects"]
     assert request["dark"] is False
     assert os.listdir(rw) == []
@@ -142,7 +211,7 @@ async def test_a_faded_scratched_scan_is_scored_and_nothing_is_left_behind(clien
 
 async def test_capabilities_name_what_image_damage_answers_as(client):
     body = (await client.get("/v0/capabilities")).json()
-    assert "image.damage" in body["ops"] and body["models"]["damage"] == "damage/1+bopb-detection"
+    assert "image.damage" in body["ops"] and body["models"]["damage"] == "damage/2+bopb-detection"
 
 
 async def test_a_turned_picture_and_one_opencv_cannot_read_are_refused(client, dirs):

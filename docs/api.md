@@ -613,10 +613,10 @@ not touched.
 
 Result: `{ "path", "bytes" }`. `meta.producer` is `exiftool/<version>`.
 
-### 4.3g `image.damage` _(implemented, 0.3.15)_
+### 4.3g `image.damage` _(implemented, 0.3.15; blur 0.3.16)_
 
-How damaged a picture is — how faded, how dusty, how scratched — to tell which pictures of many are
-worth restoring, and with what. Nothing is written.
+How damaged a picture is — how faded, dusty, scratched, blurred and shaken — to tell which pictures
+of many are worth restoring, and with what. Nothing is written.
 
 ```json
 { "file": { "path": "…/print.jpg" } }
@@ -636,19 +636,34 @@ worth restoring, and with what. Nothing is written.
   picture's edge (a print's or plate's own) or has fewer than 3 pixels is left out. Dust scores 0
   at 40 specks a million pixels shown and 1 at 200; scratches 0 at 0.4 shorter sides of length
   together and 1 at 1.6.
+- **blurred** (out of focus) and **shaken** (the camera moved) come from the width of the picture's
+  edges, on the picture shrunk to 1024 px with 6 % of each side left out (a print's border, a
+  plate's edge). An edge is where the picture rises by a fifth of its contrast within 9 pixels, at
+  its steepest; its width is the rise over the slope, as the sigma of a Gaussian blur, so a sharp
+  picture's edges are about 1 pixel wide. The picture is cut in tiles of 64 px, and **blurred**
+  goes by its sharpest tiles, the 5 % whose edges are narrowest: a picture with shallow focus or a
+  soft subject (a face, a cup of coffee) still has a sharp part, a blurred one has none. It scores 0
+  at 1.2 pixels and 1 at 1.8. A picture too blurred to have edges at 1024 px is measured at 512 or
+  256 and its width scaled up. **shaken** is how much wider the edges are one way than another (the
+  narrowest edges of each of six directions, the widest over the narrowest): movement blurs the
+  edges across it and leaves those along it sharp. It scores 0 at 1.45 and 1 at 1.9. A picture with
+  too few edges to tell (an empty sky, a blank page) scores 0 for both.
 - A score is 0 for none and 1 for as much as a picture worth restoring for it has, linear between
   and clamped. Over 40 public-domain scans of damaged and faded prints and 16 ordinary photographs,
   13 of the scans and none of the photographs reached 0.5 for dust or scratches; a sea's horizon
-  came closest (0.50 scratched).
-- Blur is not measured: on a picture this small shallow focus and soft subjects look like it.
+  came closest (0.50 scratched). None of them reached 0.5 for blur or shake; the photographs blurred
+  by a Gaussian of sigma 3 (at 1024 px) all did for blur, and 26 of 32 shaken by 9 or 17 pixels
+  did for shake. Grain does not hide blur: the blurred photographs with grain added scored as
+  without it.
 - The file is taken as stored: `angle` and `mirror` are refused. Any picture OpenCV reads, 8 or 16
   bits; a file it has no reader for is `unsupported`, one it cannot decode `undecodable`. On fry's
   card 0.2–0.6 s for a picture of a few megapixels, longer for a large scan, which is read whole.
 
-Result: `{ "width", "height", "faded", "dusty", "scratched", "measures": { "change", "specks", "scratches", "length", "marked" } }`
+Result: `{ "width", "height", "faded", "dusty", "scratched", "blurred", "shaken", "measures": { "change", "specks", "scratches", "length", "marked", "edge", "shake" } }`
 — `measures` what the scores come from: the change in 8-bit steps, the specks and scratches
-counted, the scratches' length in shorter sides, and the share of the picture shown the detector
-marked at all. `meta.producer` is `damage/<n>+bopb-detection`, the number raised whenever the same
+counted, the scratches' length in shorter sides, the share of the picture shown the detector
+marked at all, the sharpest edges' width in pixels and the widest direction's over the narrowest
+(`null` both, for a picture with too few edges). `meta.producer` is `damage/<n>+bopb-detection`, the number raised whenever the same
 picture would score otherwise; `models.damage` in capabilities (_4.23_) names it.
 
 ### 4.4 `video.frames` _(implemented)_
@@ -1303,13 +1318,13 @@ setting names the card (`EMS_<FAMILY>_DEVICE=cuda`) stays on it whatever the sha
 What this EMS can do, for a caller to check before it relies on it:
 
 ```json
-{ "api": "0.3.15", "name": "fry", "build": { "version": "0.1.0", "commit": "fb6a7d9", "date": "2026-11-07T18:02:11+01:00" },
+{ "api": "0.3.16", "name": "fry", "build": { "version": "0.1.0", "commit": "fb6a7d9", "date": "2026-11-07T18:02:11+01:00" },
   "gpu": { "present": true, "name": "NVIDIA GeForce RTX 5060 Ti", "memory_mb": 16311 },
   "ops": [ "media.probe", "faces.detect", … ],
   "tools": { "exiftool": "13.10", "ffprobe": "9.0.1", "ffmpeg": "9.0.1", "magick": "7.1.1" },
   "models": { "text_embed": "bge-m3", "whisper": "large-v3", "faces": "retinaface-r34+transface",
               "image_embed": "ViT-SO400M-16-SigLIP2-384__webli", "ocr": "PP-OCRv6_medium+multicentury-ppocrv6-medium+multicentury-htr-model+trocr-large-handwritten",
-              "damage": "damage/1+bopb-detection" },
+              "damage": "damage/2+bopb-detection" },
   "limits": { "models": 8, "tools": 6, "encodes": 2, "queue_depth": 64, "interactive_reserve": 1, "watches": 4 },
   "encode": { "video_encoder": "av1_nvenc", "cpu_budget": "4000/170/64" },
   "signatures": { "transcribe": "whisper-large-v3:…,on=cuda:float16,…",

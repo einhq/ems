@@ -1,13 +1,15 @@
-"""How damaged a picture is: how faded, how dusty and how scratched.
+"""How damaged a picture is: how faded, dusty, scratched, blurred and shaken.
 
 Two steps, each a process of its own (`python -m ems.tools.damage STEP …`, the parameters on
 stdin), answering as ems.tools.inpaint's do:
 
-- `look IMAGE SHOWN` measures the fading and writes the picture the defect detector is shown, as
-  `image.defects` shows it at `scale`. Fading is the mean change `image.unfade` would make to the
-  picture shrunk to FADE_EDGE pixels, in 8-bit steps: a faded print's channels are squeezed and
-  cast, so stretching and balancing them moves every pixel; a picture whose colours are whole
-  barely moves.
+- `look IMAGE SHOWN` measures the fading and the blur and writes the picture the defect detector
+  is shown, as `image.defects` shows it at `scale`. Fading is the mean change `image.unfade` would
+  make to the picture shrunk to FADE_EDGE pixels, in 8-bit steps: a faded print's channels are
+  squeezed and cast, so stretching and balancing them moves every pixel; a picture whose colours
+  are whole barely moves. Blur is the width of the picture's sharpest edges (`sharpness`): a
+  picture with shallow focus or a soft subject still has a sharp part, a blurred one has none, and
+  a shaken one has its edges across the movement wider than those along it.
 - `count FOUND SHOWN` reads the detector's answer (each pixel's probability, a PNG of 16 bits) at
   `threshold` and sorts what it marks into connected parts: a part at least SCRATCH_LENGTH of the
   shorter side long and at most SCRATCH_WIDTH pixels wide on average is a scratch, any other a
@@ -47,6 +49,30 @@ SPECK_PIXELS = 3
 # the median of its gradient (Sobel, over the picture's contrast) below SMOOTH.
 RING = (2, 6)
 SMOOTH = 0.10
+# Sharpness is measured on the picture shrunk to this longer side, without MARGIN of each side
+# (a print's border, a plate's edge), and on a half and a quarter of it when the picture is too
+# blurred to have SHARP_TILES tiles with edges there.
+SHARP_EDGE = 1024
+MARGIN = 0.06
+# An edge is a pixel steepest among its neighbours where the picture rises by STEP of its contrast
+# within WINDOW pixels; its width is that rise over its slope, as the sigma of a Gaussian blur.
+WINDOW = 9
+STEP = 0.2
+# The picture's sharpest edges: in tiles of TILE pixels, overlapping by half, with TILE_EDGES edges
+# or more, each tile's 10th percentile of width; the mean of the sharpest SHARPEST of those tiles.
+TILE = 64
+TILE_EDGES = 20
+SHARP_TILES = 4
+SHARPEST = 0.05
+# Shake: the edges' 5th percentile of width in each of DIRECTIONS bins of their direction that has
+# DIRECTION_EDGES edges or more, the widest over the narrowest, when MIN_DIRECTIONS bins have them.
+DIRECTIONS = 6
+DIRECTION_EDGES = 50
+MIN_DIRECTIONS = 4
+# The sharpest edges' width, in pixels of the picture at SHARP_EDGE, at which blur scores 0 and 1;
+# and the widths' ratio across directions at which shake does.
+BLURRED = (1.2, 1.8)
+SHAKEN = (1.45, 1.9)
 # Specks, per million pixels the detector is shown, at which dust scores 0 and 1.
 DUSTY = (40.0, 200.0)
 # The scratches' length together, in shorter sides, at which scratches score 0 and 1.
@@ -71,6 +97,82 @@ def fading(picture) -> float:
     top = float(np.iinfo(small.dtype).max)
     change = np.mean([np.abs(plane.astype(np.float32) - old).mean() for plane, old in zip(unfade_tool.colour_planes(small), before)])
     return float(change) / top * 255
+
+
+def edge_widths(grey):
+    """The width of each edge of `grey` (floats from 0 to 1), `inf` where there is none, and each
+    pixel's gradient direction in degrees from 0 to 180."""
+    import cv2
+    import numpy as np
+
+    gx = cv2.Sobel(grey, cv2.CV_32F, 1, 0, ksize=3) / 8
+    gy = cv2.Sobel(grey, cv2.CV_32F, 0, 1, ksize=3) / 8
+    slope = np.hypot(gx, gy)
+    window = np.ones((WINDOW, WINDOW), np.uint8)
+    rise = cv2.dilate(grey, window) - cv2.erode(grey, window)
+    lo, hi = np.percentile(grey, (1, 99))
+    edge = (rise > STEP * max(float(hi - lo), 0.05)) & (slope > 0) & (slope >= cv2.dilate(slope, np.ones((3, 3), np.uint8)))
+    # A step of height r blurred by a Gaussian of sigma s is r / (sqrt(2 pi) s) steep at its middle.
+    width = np.full(grey.shape, np.inf, np.float32)
+    width[edge] = rise[edge] / slope[edge] / np.sqrt(2 * np.pi)
+    return width, np.degrees(np.arctan2(gy, gx)) % 180
+
+
+def sharpest(width) -> float | None:
+    """The width of the sharpest edges in `width` (edge_widths'); None where too few tiles have edges."""
+    import numpy as np
+
+    h, w = width.shape
+    step = TILE // 2
+    tiles = []
+    for y in range(0, max(h - TILE, 0) + 1, step):
+        for x in range(0, max(w - TILE, 0) + 1, step):
+            found = width[y:y + TILE, x:x + TILE]
+            found = found[np.isfinite(found)]
+            if found.size >= TILE_EDGES:
+                tiles.append(float(np.percentile(found, 10)))
+    if len(tiles) < SHARP_TILES:
+        return None
+    tiles.sort()
+    return float(np.mean(tiles[:max(1, round(len(tiles) * SHARPEST))]))
+
+
+def sharpness(picture) -> tuple[float | None, float | None]:
+    """How wide `picture`'s sharpest edges are, in pixels of it shrunk to SHARP_EDGE (a sharp
+    picture's about 1), and how much wider its edges are one way than another (1 for none); None
+    for a picture with too few edges to tell (an empty sky, a blank page)."""
+    import cv2
+    import numpy as np
+
+    if picture.ndim == 3:
+        picture = cv2.cvtColor(picture, cv2.COLOR_BGRA2GRAY if picture.shape[2] == 4 else cv2.COLOR_BGR2GRAY)
+    grey = picture.astype(np.float32) / np.iinfo(picture.dtype).max
+    h, w = grey.shape
+    dy, dx = round(h * MARGIN), round(w * MARGIN)
+    grey = grey[dy:h - dy, dx:w - dx]
+    h, w = grey.shape
+    base = min(1.0, SHARP_EDGE / max(h, w))
+    tried = set()
+    for edge in (SHARP_EDGE, SHARP_EDGE // 2, SHARP_EDGE // 4):
+        factor = min(1.0, edge / max(h, w))
+        size = (max(1, round(w * factor)), max(1, round(h * factor)))
+        if size in tried:
+            continue
+        tried.add(size)
+        small = cv2.resize(grey, size, interpolation=cv2.INTER_AREA) if factor < 1 else grey
+        width, direction = edge_widths(small)
+        sharp = sharpest(width)
+        if sharp is None:
+            continue
+        found = np.isfinite(width)
+        widths = []
+        for b in range(DIRECTIONS):
+            these = width[found & (direction >= b * 180 / DIRECTIONS) & (direction < (b + 1) * 180 / DIRECTIONS)]
+            if these.size >= DIRECTION_EDGES:
+                widths.append(float(np.percentile(these, 5)))
+        shake = max(widths) / min(widths) if len(widths) >= MIN_DIRECTIONS else 1.0
+        return sharp * base / factor, shake
+    return None, None
 
 
 def gradient(grey):
@@ -155,6 +257,7 @@ def main(argv: list[str]) -> int:
             print(json.dumps({"error": refusal.code, "message": str(refusal)}))
             return REFUSED
         change = fading(picture)
+        edge, shake = sharpness(picture)
         if not cv2.imwrite(argv[3], defects_tool.shrink(picture, int(params["scale"]))):
             raise RuntimeError("OpenCV wrote no picture to look at")
         print(json.dumps({
@@ -162,6 +265,10 @@ def main(argv: list[str]) -> int:
             "height": picture.shape[0],
             "change": round(change, 2),
             "faded": score(change, FADED),
+            "edge": None if edge is None else round(edge, 3),
+            "shake": None if shake is None else round(shake, 3),
+            "blurred": 0.0 if edge is None else score(edge, BLURRED),
+            "shaken": 0.0 if shake is None else score(shake, SHAKEN),
             "opencv": cv2.__version__,
         }))
     elif name == "count":

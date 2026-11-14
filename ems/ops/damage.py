@@ -1,6 +1,7 @@
-"""`image.damage` — how faded, dusty and scratched a picture is, to tell which are worth restoring.
+"""`image.damage` — how faded, dusty, scratched, blurred and shaken a picture is, to tell which are
+worth restoring.
 
-The tool measures the fading and shrinks the picture for the defect detector (ems.tools.damage),
+The tool measures the fading and the blur and shrinks the picture for the defect detector (ems.tools.damage),
 the model worker gives each pixel of that a probability of being damage (model family `defects`,
 as for `image.defects`), and the tool sorts what it marks into specks and scratches. Nothing is
 written but scratch files.
@@ -24,7 +25,7 @@ from ._models import model_slot
 
 # The version of the method, in meta.producer: raised whenever the same request would give
 # other scores.
-METHOD = "damage/1"
+METHOD = "damage/2"
 # The shorter side the detector is shown, as image.defects shows it by default, and the
 # probability from which a pixel is marked.
 SCALE = 640
@@ -64,8 +65,12 @@ async def damage(ctx: Context, req: DamageRequest, progress: Progress) -> Outcom
         "faded": looked["faded"],
         "dusty": counted["dusty"],
         "scratched": counted["scratched"],
+        "blurred": looked["blurred"],
+        "shaken": looked["shaken"],
         "measures": {
             "change": looked["change"],
+            "edge": looked["edge"],
+            "shake": looked["shake"],
             "specks": counted["specks"],
             "scratches": counted["scratches"],
             "length": counted["length"],
