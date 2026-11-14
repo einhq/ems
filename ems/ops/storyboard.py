@@ -5,8 +5,8 @@ One sheet per video, whatever its length: the interval grows with the length rat
 sheet, so a three-minute film gets a frame a second and a two-hour tape one every half minute,
 which is still a few pixels of a timeline per frame.
 
-The whole picture is decoded on the card, where the frames never touch the CPU's memory; without
-one, only keyframes are, which is coarse — a frame repeats until the next keyframe — but bounded.
+Every frame is decoded, on the card when there is one and on the CPU otherwise, so a sheet holds
+the same frames either way and only the time differs: the CPU takes about twice the card's.
 The sheet is encoded like a rendition (`render_targets`), through a temporary file beside it.
 """
 
@@ -79,14 +79,14 @@ def storyboard_plan(duration: float, width: int, height: int, sar: float | None,
 
 
 def decode_attempts(path: str, sheet: str, plan: SheetPlan, *, gpu: bool) -> list[tuple[str, list[str]]]:
-    """The ffmpeg runs to try in order, each named for the producer: the card's, then keyframes on the CPU.
+    """The ffmpeg runs to try in order, each named for the producer: the card's, then the CPU's.
 
     `fps` keeps the frame nearest each tick, and at the end of the picture passes the last frame
     on for a tick not yet reached: without that, frames that all lie within half an interval of
-    the first — a clip under half a second, or the keyframes of one whose only keyframe opens it —
-    reach the sheet as nothing at all. The scale squares the pixels, since the tile is already
-    the display shape; `showinfo` logs every frame that reaches the sheet; `tile` lays
-    them out and emits the sheet when the grid is full, or at the end of the picture.
+    the first, as in a clip under half a second, reach the sheet as nothing at all. The scale
+    squares the pixels, since the tile is already the display shape, bicubic on either side;
+    `showinfo` logs every frame that reaches the sheet; `tile` lays them out and emits the sheet
+    when the grid is full, or at the end of the picture.
     """
     ffmpeg = require("ffmpeg")
     tick = f"fps=fps=1/{plan.interval:g}:round=near:eof_action=pass"
@@ -98,7 +98,7 @@ def decode_attempts(path: str, sheet: str, plan: SheetPlan, *, gpu: bool) -> lis
     attempts = []
     if gpu:
         attempts.append(("cuda", base + ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda", "-i", path, "-vf", f"{tick},scale_cuda={size}:interp_algo=bicubic:format=nv12,hwdownload,format=nv12,setsar=1,{grid}", *out]))
-    attempts.append(("keyframes", base + ["-skip_frame", "nokey", "-i", path, "-vf", f"{tick},scale={size}:flags=area,setsar=1,{grid}", *out]))
+    attempts.append(("cpu", base + ["-i", path, "-vf", f"{tick},scale={size}:flags=bicubic,setsar=1,{grid}", *out]))
     return attempts
 
 

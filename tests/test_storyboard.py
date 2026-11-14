@@ -41,18 +41,18 @@ def test_a_clip_shorter_than_a_row_uses_only_the_columns_it_fills():
     assert (clip.count, clip.columns, clip.rows) == (5, 5, 1)
 
 
-def test_the_card_decodes_the_whole_picture_and_the_cpu_only_its_keyframes(monkeypatch):
+def test_the_card_and_the_cpu_both_decode_every_frame(monkeypatch):
     monkeypatch.setattr(storyboard, "require", lambda name: f"/usr/bin/{name}")
     shape = plan(181.2, 720, 576, 16 / 15)
     attempts = storyboard.decode_attempts("/in.mp4", "/s/sheet.png", shape, gpu=True)
-    assert [name for name, _ in attempts] == ["cuda", "keyframes"]
+    assert [name for name, _ in attempts] == ["cuda", "cpu"]
     cuda, cpu = attempts[0][1], attempts[1][1]
     assert cuda[cuda.index("-hwaccel") + 1] == "cuda" and "-skip_frame" not in cuda
     assert cuda[cuda.index("-vf") + 1] == "fps=fps=1/1:round=near:eof_action=pass,scale_cuda=160:120:interp_algo=bicubic:format=nv12,hwdownload,format=nv12,setsar=1,showinfo,tile=12x16"
-    assert cpu[cpu.index("-skip_frame") + 1] == "nokey" and cpu.index("-skip_frame") < cpu.index("-i")
-    assert cpu[cpu.index("-vf") + 1] == "fps=fps=1/1:round=near:eof_action=pass,scale=160:120:flags=area,setsar=1,showinfo,tile=12x16"
+    assert "-skip_frame" not in cpu
+    assert cpu[cpu.index("-vf") + 1] == "fps=fps=1/1:round=near:eof_action=pass,scale=160:120:flags=bicubic,setsar=1,showinfo,tile=12x16"
     assert all(run[-1] == "/s/sheet.png" and "-display_rotation" in run for _, run in attempts)
-    assert [name for name, _ in storyboard.decode_attempts("/in.mp4", "/s/sheet.png", shape, gpu=False)] == ["keyframes"]
+    assert [name for name, _ in storyboard.decode_attempts("/in.mp4", "/s/sheet.png", shape, gpu=False)] == ["cpu"]
 
 
 def install(monkeypatch, *, fail_cuda=False, frames=182):
@@ -102,17 +102,17 @@ async def test_the_op_writes_one_sheet_and_says_how_to_read_it(client, dirs, mon
     assert "/cuda+magick/" in body["meta"]["producer"]
 
 
-async def test_without_the_card_the_keyframes_make_the_sheet(client, dirs, monkeypatch):
+async def test_without_the_card_the_cpu_makes_the_sheet(client, dirs, monkeypatch):
     ro, rw = dirs
     (ro / "1920x1080.mp4").write_bytes(b"mp4")
     runs = install(monkeypatch, fail_cuda=True, frames=150)
     r = await client.post("/v0/video/storyboard", json={"file": {"path": str(ro / "1920x1080.mp4")}, "output": {"path": str(rw / "storyboard-160.avif")}})
     body = r.json()
     assert r.status_code == 200, body
-    assert len(runs) == 2 and "-skip_frame" in runs[1]
+    assert len(runs) == 2 and "-hwaccel" not in runs[1]
     # The picture ended before the last tick: the sheet says how many tiles it holds.
     assert body["result"]["count"] == 150
-    assert "/keyframes+magick/" in body["meta"]["producer"]
+    assert "/cpu+magick/" in body["meta"]["producer"]
 
 
 async def test_a_turned_file_or_an_oversized_sheet_is_refused(client, dirs, monkeypatch):
