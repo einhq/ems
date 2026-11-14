@@ -81,12 +81,15 @@ def storyboard_plan(duration: float, width: int, height: int, sar: float | None,
 def decode_attempts(path: str, sheet: str, plan: SheetPlan, *, gpu: bool) -> list[tuple[str, list[str]]]:
     """The ffmpeg runs to try in order, each named for the producer: the card's, then keyframes on the CPU.
 
-    `fps` keeps the frame nearest each tick; the scale squares the pixels, since the tile is
-    already the display shape; `showinfo` logs every frame that reaches the sheet; `tile` lays
+    `fps` keeps the frame nearest each tick, and at the end of the picture passes the last frame
+    on for a tick not yet reached: without that, frames that all lie within half an interval of
+    the first — a clip under half a second, or the keyframes of one whose only keyframe opens it —
+    reach the sheet as nothing at all. The scale squares the pixels, since the tile is already
+    the display shape; `showinfo` logs every frame that reaches the sheet; `tile` lays
     them out and emits the sheet when the grid is full, or at the end of the picture.
     """
     ffmpeg = require("ffmpeg")
-    tick = f"fps=fps=1/{plan.interval:g}:round=near"
+    tick = f"fps=fps=1/{plan.interval:g}:round=near:eof_action=pass"
     size = f"{plan.tile_width}:{plan.tile_height}"
     grid = f"showinfo,tile={plan.columns}x{plan.rows}"
     # showinfo logs at info, so the level is info and the banner and progress are silenced instead.

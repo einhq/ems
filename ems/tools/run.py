@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import shutil
 import signal
 import time
@@ -35,6 +36,11 @@ BACKGROUND_NICE = 19
 # How often a running tool's activity is read. A stall is noticed within this of its limit.
 ACTIVITY_POLL_SECONDS = 10.0
 
+# ffmpeg's closing lines, which say how far it came rather than what went wrong: the stats line,
+# the per-stream byte summary and the bare verdict. A failure's tail skips them, or they are all
+# it would hold and the line that names the fault would be cut off.
+_FFMPEG_SUMMARY = re.compile(r"^(?:frame=|size=|Conversion failed!$|\[out#\d+/\S+ @ 0x[0-9a-f]+\] video:\S+ audio:)")
+
 
 @dataclass
 class Completed:
@@ -48,7 +54,8 @@ class Completed:
         return self.stderr.decode(errors="replace")
 
     def tail(self, lines: int = 3, limit: int = 400) -> str:
-        text = self.stderr_text.strip().splitlines()
+        """The last `lines` lines of stderr that say something, at most `limit` characters."""
+        text = [line for line in self.stderr_text.strip().splitlines() if line.strip() and not _FFMPEG_SUMMARY.match(line.strip())]
         return "\n".join(text[-lines:])[-limit:]
 
 

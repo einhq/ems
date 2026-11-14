@@ -48,9 +48,9 @@ def test_the_card_decodes_the_whole_picture_and_the_cpu_only_its_keyframes(monke
     assert [name for name, _ in attempts] == ["cuda", "keyframes"]
     cuda, cpu = attempts[0][1], attempts[1][1]
     assert cuda[cuda.index("-hwaccel") + 1] == "cuda" and "-skip_frame" not in cuda
-    assert cuda[cuda.index("-vf") + 1] == "fps=fps=1/1:round=near,scale_cuda=160:120:interp_algo=bicubic:format=nv12,hwdownload,format=nv12,setsar=1,showinfo,tile=12x16"
+    assert cuda[cuda.index("-vf") + 1] == "fps=fps=1/1:round=near:eof_action=pass,scale_cuda=160:120:interp_algo=bicubic:format=nv12,hwdownload,format=nv12,setsar=1,showinfo,tile=12x16"
     assert cpu[cpu.index("-skip_frame") + 1] == "nokey" and cpu.index("-skip_frame") < cpu.index("-i")
-    assert cpu[cpu.index("-vf") + 1] == "fps=fps=1/1:round=near,scale=160:120:flags=area,setsar=1,showinfo,tile=12x16"
+    assert cpu[cpu.index("-vf") + 1] == "fps=fps=1/1:round=near:eof_action=pass,scale=160:120:flags=area,setsar=1,showinfo,tile=12x16"
     assert all(run[-1] == "/s/sheet.png" and "-display_rotation" in run for _, run in attempts)
     assert [name for name, _ in storyboard.decode_attempts("/in.mp4", "/s/sheet.png", shape, gpu=False)] == ["keyframes"]
 
