@@ -72,6 +72,7 @@ OP_FAMILIES = {
     "image.defects": "defects",
     "image.damage": "defects",
     "image.denoise": "denoise",
+    "image.deblur": "deblur",
     "ocr.read": "ocr",
 }
 

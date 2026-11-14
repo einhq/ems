@@ -24,6 +24,7 @@ response per connection.
   -> {"op":"inpaint","crops":[{"image":"/scratch/…/image-0000.png","mask":"/scratch/…/mask-0000.png","out":"/scratch/…/out-0000.png"}]}
   -> {"op":"detect_defects","path":"/scratch/…/shown.png","out":"/scratch/…/found.png","dark":false}
   -> {"op":"denoise","path":"/files/…/master.tif","out":"/scratch/…/.ems-….tiff","noise":"15","strength":0.5,"format":"tiff"}
+  -> {"op":"deblur","path":"/files/…/master.tif","out":"/scratch/…/.ems-….tiff","blur":"motion","strength":1,"edge":2048,"format":"tiff"}
   -> {"op":"restore_faces","path":"/files/…/master.tif","out":"/scratch/…/.ems-….tiff","faces":[{"landmarks":[[x,y],…]}],"strength":0.5,"format":"tiff"}
   -> {"op":"shot_boundaries","path":"/scratch/…/frames.rgb","times":[0.0,0.04,…],"duration":180.5,"threshold":0.6,…}
   -> {"op":"embed_image_texts","texts":["segelbåt"]}
@@ -301,6 +302,10 @@ def _log_model_cache() -> None:
         if not os.path.isfile(os.path.join(registry.DENOISE_ROOT, f"{name}.pth")):
             log(f"WARNING denoiser {name}.pth is missing from {registry.DENOISE_ROOT} — image.denoise will fail for it. "
                 f"Rebuild the image or set CFG_DENOISE_ROOT.")
+    for name in registry.DEBLUR_WEIGHTS.values():
+        if not os.path.isfile(os.path.join(registry.DEBLUR_ROOT, f"{name}.pth")):
+            log(f"WARNING deblurrer {name}.pth is missing from {registry.DEBLUR_ROOT} — image.deblur will fail for it. "
+                f"Rebuild the image or set CFG_DEBLUR_ROOT.")
     if not os.path.isfile(os.path.join(registry.GFPGAN_ROOT, f"{registry.GFPGAN_MODEL}.pth")):
         log(f"WARNING face restorer {registry.GFPGAN_MODEL}.pth is missing from {registry.GFPGAN_ROOT} — image.restore_faces will fail. "
             f"Rebuild the image or set CFG_GFPGAN_ROOT.")
@@ -477,6 +482,13 @@ def handle(request: dict) -> dict:
         if not path or not out:
             raise ValueError("denoise: missing path or out")
         return ops.denoise(path, out, str(request.get("noise") or "15"), float(request.get("strength", 1.0)), str(request.get("format") or "png"))
+
+    if op == "deblur":
+        path, out = request.get("path"), request.get("out")
+        if not path or not out:
+            raise ValueError("deblur: missing path or out")
+        return ops.deblur(path, out, str(request.get("blur") or "focus"), float(request.get("strength", 1.0)),
+                          int(request.get("edge") or 2048), str(request.get("format") or "png"))
 
     if op == "restore_faces":
         path, out, faces = request.get("path"), request.get("out"), request.get("faces")

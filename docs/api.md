@@ -2,9 +2,9 @@
 
 EMS (EiN Media Service) is a stateless service that answers questions about media bytes and
 produces media bytes: probing, renditions, transcodes, fingerprints, face detection, speech,
-image-text embeddings, text embeddings, document text extraction, faded colours restored, inpainting and the defects it fills, denoising, face restoration, and one picture's metadata copied onto another. It owns the tools (ffmpeg,
+image-text embeddings, text embeddings, document text extraction, faded colours restored, inpainting and the defects it fills, denoising, deblurring, face restoration, and one picture's metadata copied onto another. It owns the tools (ffmpeg,
 ImageMagick, exiftool, chromaprint, OpenCV) and the models (SigLIP2, RetinaFace and TransFace, a text
-embedder (bge-m3), PP-OCRv6, whisper, NeMo diarization and voiceprints, LR-ASD, LaMa, the scratch detector of Bringing Old Photos Back to Life, SCUNet, GFPGAN) so that a caller never
+embedder (bge-m3), PP-OCRv6, whisper, NeMo diarization and voiceprints, LR-ASD, LaMa, the scratch detector of Bringing Old Photos Back to Life, SCUNet, Restormer, GFPGAN) so that a caller never
 depends on which tool or model answers.
 
 This document is the contract. It is written to stand on its own: a caller with a directory of
@@ -666,6 +666,47 @@ marked at all, the sharpest edges' width in pixels and the widest direction's ov
 (`null` both, for a picture with too few edges). `meta.producer` is `damage/<n>+bopb-detection`, the number raised whenever the same
 picture would score otherwise; `models.damage` in capabilities (_4.23_) names it.
 
+### 4.3h `image.deblur` _(implemented, 0.3.17)_
+
+A picture with its blur taken out: a photograph out of focus, or blurred by a camera that moved.
+
+```json
+{
+  "file": { "path": "…/print.tif" },
+  "blur": "motion",
+  "strength": 1,
+  "edge": 2048,
+  "output": { "path": "…/sharper.tif", "format": "tiff" }
+}
+```
+
+- The deblurrer is Restormer, model family `deblur`, with its authors' weights. `blur` picks them:
+  `focus` (the default) was trained on photographs out of focus (DPDD), `motion` on a shaken
+  camera's (GoPro). `image.damage`'s `blurred` and `shaken` (_4.3g_) say which a picture has.
+- Only the detail the model adds is kept: its change, less that change blurred by a Gaussian of 6
+  pixels. The `focus` weights also shift a picture's tones by 4–10 8-bit steps, which made
+  photographs blurred for a bench further from the sharp picture than before; their detail alone
+  brought them nearer. On such photographs the detail of `motion` brought pictures shaken by 9 to 17
+  pixels about 5 dB nearer the sharp one; that of `focus` pictures out of focus by a disc of radius
+  4 to 6 pixels 1–2 dB nearer, and a slight blur (radius 2) not at all. Detail the blur wiped out
+  is not invented: a picture far out of focus stays soft.
+- `strength` (0–1, default 1) is how much of that detail is added: 0 is the picture as it was.
+- A picture longer than `edge` pixels (256–8192, default 2048) is shown to the model shrunk to it,
+  and the detail it adds there is enlarged and added to the picture: on a large scan the blur is
+  wider than the model was taught to undo. It goes through the model in tiles of 384 px, each with
+  48 px of picture around it, so a picture of any size never goes to the card whole.
+- The output keeps the file's bit depth (8 or 16 bits) and its channels (grey, RGB or RGBA, whose
+  alpha is kept as it is); every pixel may change. It carries no metadata and no colour profile, as
+  `image.inpaint`'s. Output formats `png` (the default) and `tiff`, lossless, so `quality` is
+  refused. The file is taken as stored: `angle` and `mirror` are refused. A file OpenCV has no
+  reader for, or of floats, is `unsupported`; one it cannot decode `undecodable`.
+- _long_ for a large picture, about 0.3 s a tile on fry's card, some 15 s at 2048 px: it streams
+  `fraction` by the tiles done.
+
+Result: `{ "path", "width", "height", "channels", "depth", "bytes" }`. `meta.producer` is
+`restormer-` and the weights' name, `restormer-single_image_defocus_deblurring` or
+`restormer-motion_deblurring`.
+
 ### 4.4 `video.frames` _(implemented)_
 
 Frames as images. _long_.
@@ -1318,7 +1359,7 @@ setting names the card (`EMS_<FAMILY>_DEVICE=cuda`) stays on it whatever the sha
 What this EMS can do, for a caller to check before it relies on it:
 
 ```json
-{ "api": "0.3.16", "name": "fry", "build": { "version": "0.1.0", "commit": "fb6a7d9", "date": "2026-11-07T18:02:11+01:00" },
+{ "api": "0.3.17", "name": "fry", "build": { "version": "0.1.0", "commit": "fb6a7d9", "date": "2026-11-07T18:02:11+01:00" },
   "gpu": { "present": true, "name": "NVIDIA GeForce RTX 5060 Ti", "memory_mb": 16311 },
   "ops": [ "media.probe", "faces.detect", … ],
   "tools": { "exiftool": "13.10", "ffprobe": "9.0.1", "ffmpeg": "9.0.1", "magick": "7.1.1" },
@@ -1514,7 +1555,7 @@ PDF's pages (`EMS_OCR_DPI`, `EMS_OCR_MIN_PAGE_CHARS`, `EMS_OCR_MAX_PAGES`), and 
 biased towards the languages the archive holds; `ems/modelworker/model_registry.py` has the
 reasoning), `EMS_MODEL_PINNED`, `EMS_MODEL_IDLE_EVICT`, `EMS_ROOM_IDLE` (how long a family may sit
 idle before it is unloaded to make room for another on the card; 30), `EMS_MODEL_MAX_RSS`, `EMS_TITANET_DEVICE`,
-`EMS_IMAGE_EMBED_MODEL` / `EMS_IMAGE_EMBED_DEVICE` / `EMS_IMAGE_EMBED_GPU_MEM_MB` (`vision.embed`), `EMS_IMAGE_EMBED_TEXT_DEVICE` (`vision.embed_text`; `cpu` by default, ~0.3 s a query, so the card keeps room for the batch families), `EMS_COPY_DETECT_DEVICE` (`fingerprint.compute`'s `sscd-*` kinds; `auto`), `EMS_TRANSNET_DEVICE` (`video.shots`; `auto`), `EMS_INPAINT_DEVICE` (`image.inpaint`'s `lama`; `auto`), `EMS_DEFECTS_DEVICE` (`image.defects`; `auto`), `EMS_DENOISE_DEVICE` (`image.denoise`; `auto`), `EMS_GFPGAN_DEVICE` (`image.restore_faces`; `auto`), `EMS_OCR_DEVICE` / `EMS_OCR_PHOTO_TIER` (`medium`; `small` is baked too) / `EMS_OCR_HAND_ROOT` (the handwriting recogniser's directory) / `EMS_HTR_ROOT` / `EMS_HTR_DEVICE` (the transcriber's; `auto`) / `EMS_HTR_EN_ROOT` / `EMS_HTR_EN_DEVICE` (the English transcriber's; `auto`) / `EMS_OCR_LANGUAGE_MIN_LETTERS` / `EMS_OCR_LANGUAGE_MIN_CONFIDENCE` / `EMS_OCR_MIN_LINE_SCORE` / `EMS_OCR_MAX_SIDE` (1600: the longest side the detector sees, whose arena grows with the area) / `EMS_OCR_GPU_MEM_MB` (2048 per session) (`ocr.read`; `auto`), `EMS_TEXT_EMBED_DEVICE` / `EMS_TEXT_EMBED_QUERY_DEVICE` / `EMS_TEXT_EMBED_MAX_TOKENS` (`text.embed`; documents on the card, queries on the CPU by default), …
+`EMS_IMAGE_EMBED_MODEL` / `EMS_IMAGE_EMBED_DEVICE` / `EMS_IMAGE_EMBED_GPU_MEM_MB` (`vision.embed`), `EMS_IMAGE_EMBED_TEXT_DEVICE` (`vision.embed_text`; `cpu` by default, ~0.3 s a query, so the card keeps room for the batch families), `EMS_COPY_DETECT_DEVICE` (`fingerprint.compute`'s `sscd-*` kinds; `auto`), `EMS_TRANSNET_DEVICE` (`video.shots`; `auto`), `EMS_INPAINT_DEVICE` (`image.inpaint`'s `lama`; `auto`), `EMS_DEFECTS_DEVICE` (`image.defects`; `auto`), `EMS_DENOISE_DEVICE` (`image.denoise`; `auto`), `EMS_DEBLUR_DEVICE` (`image.deblur`; `auto`), `EMS_GFPGAN_DEVICE` (`image.restore_faces`; `auto`), `EMS_OCR_DEVICE` / `EMS_OCR_PHOTO_TIER` (`medium`; `small` is baked too) / `EMS_OCR_HAND_ROOT` (the handwriting recogniser's directory) / `EMS_HTR_ROOT` / `EMS_HTR_DEVICE` (the transcriber's; `auto`) / `EMS_HTR_EN_ROOT` / `EMS_HTR_EN_DEVICE` (the English transcriber's; `auto`) / `EMS_OCR_LANGUAGE_MIN_LETTERS` / `EMS_OCR_LANGUAGE_MIN_CONFIDENCE` / `EMS_OCR_MIN_LINE_SCORE` / `EMS_OCR_MAX_SIDE` (1600: the longest side the detector sees, whose arena grows with the area) / `EMS_OCR_GPU_MEM_MB` (2048 per session) (`ocr.read`; `auto`), `EMS_TEXT_EMBED_DEVICE` / `EMS_TEXT_EMBED_QUERY_DEVICE` / `EMS_TEXT_EMBED_MAX_TOKENS` (`text.embed`; documents on the card, queries on the CPU by default), …
 Changing any of them is a restart.
 
 Search queries have a model worker of their own, `EMS_QUERY_WORKER` (on by default; `0` keeps

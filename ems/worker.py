@@ -124,6 +124,7 @@ WORKER_OP_FAMILIES = {
     "inpaint": "lama",
     "detect_defects": "defects",
     "denoise": "denoise",
+    "deblur": "deblur",
     "read_text": "ocr",
 }
 

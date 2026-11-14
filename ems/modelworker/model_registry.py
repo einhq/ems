@@ -318,6 +318,15 @@ DENOISE_WEIGHTS = {"15": "scunet_color_15", "25": "scunet_color_25", "real": "sc
 # 18 M parameters over tiles of 512 px (denoise.TILE): 1.3 GB reserved at most on fry (2026-11-12).
 DENOISE_MIN_FREE_MB = float(os.environ.get('CFG_DENOISE_MIN_FREE_MB', '1500'))
 
+# The deblurrer (`image.deblur`, see deblur.py): Restormer, its authors' weights baked at pinned
+# sha256s, one file a blur the caller names. `restormer-` and the file's name is the producer.
+# auto = the card when it has room; float32 either way.
+DEBLUR_ROOT = os.environ.get('CFG_DEBLUR_ROOT', '/opt/deblur')
+DEBLUR_DEVICE = os.environ.get('CFG_DEBLUR_DEVICE', 'auto')
+DEBLUR_WEIGHTS = {"focus": "single_image_defocus_deblurring", "motion": "motion_deblurring"}
+# 26 M parameters over tiles of 384 px (deblur.TILE): 1.75 GB reserved at most on fry (2026-11-14).
+DEBLUR_MIN_FREE_MB = float(os.environ.get('CFG_DEBLUR_MIN_FREE_MB', '2000'))
+
 # The face restorer (`image.restore_faces`, see faces_restore.py): GFPGAN v1.4, its authors' weights
 # baked at a pinned sha256. Its name is the producer. auto = the card when it has room; float32
 # either way.
@@ -1021,6 +1030,11 @@ def catalog() -> dict[str, dict]:
             "purpose": "Lessens the grain and noise of a scanned photo, for a quieter copy beside the original.",
             "ops": ["image.denoise"],
         },
+        "deblur": {
+            "model": "restormer", "device": DEBLUR_DEVICE,
+            "purpose": "Takes out the blur of a photo out of focus or shaken, for a sharper copy beside the original.",
+            "ops": ["image.deblur"],
+        },
         "gfpgan": {
             "model": GFPGAN_MODEL, "device": GFPGAN_DEVICE,
             "purpose": "Redraws the faces in a scanned photo, sharper, when someone asks for it: the detail it adds "
@@ -1238,6 +1252,7 @@ CARD_NEED_MB = {
     "lama": LAMA_MIN_FREE_MB,
     "defects": DEFECTS_MIN_FREE_MB,
     "denoise": DENOISE_MIN_FREE_MB,
+    "deblur": DEBLUR_MIN_FREE_MB,
     "ocr": OCR_MIN_FREE_MB,
     "htr": HTR_MIN_FREE_MB,
     "htr-en": HTR_EN_MIN_FREE_MB,
@@ -1607,6 +1622,30 @@ def denoiser(device: str, noise: str):
     def load():
         from denoise import Denoiser
         return Denoiser(os.path.join(DENOISE_ROOT, f"{name}.pth"), device)
+
+    return _get(key, load)
+
+
+def deblur_device() -> str:
+    return place("deblur", DEBLUR_DEVICE)
+
+
+def deblur_model(blur: str) -> str:
+    """What answers `image.deblur` for `blur`: Restormer and its weights, by the name its authors gave them."""
+    if blur not in DEBLUR_WEIGHTS:
+        raise ValueError(f"no deblurrer for blur {blur!r}; one of {', '.join(DEBLUR_WEIGHTS)}")
+    return f"restormer-{DEBLUR_WEIGHTS[blur]}"
+
+
+def deblurrer(device: str, blur: str):
+    """Restormer with the weights for `blur` (deblur.Deblurrer)."""
+    deblur_model(blur)
+    name = DEBLUR_WEIGHTS[blur]
+    key = f"deblur:{device}:{name}"
+
+    def load():
+        from deblur import Deblurrer
+        return Deblurrer(os.path.join(DEBLUR_ROOT, f"{name}.pth"), device)
 
     return _get(key, load)
 

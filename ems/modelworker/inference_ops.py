@@ -30,6 +30,7 @@ GFPGAN = "gfpgan"
 LAMA = "lama"
 DEFECTS = "defects"
 DENOISE = "denoise"
+DEBLUR = "deblur"
 OCR = "ocr"
 HTR = "htr"
 TEXT_EMBED = "text-embed"
@@ -1246,6 +1247,60 @@ def denoise(path: str, out: str, noise: str = "15", strength: float = 1.0, fmt: 
     if not cv2.imwrite(out, result, params):
         raise OSError(f"{out} could not be written")
     return {"model": registry.denoise_model(noise), "width": width, "height": height,
+            "channels": 1 if grey else picture.shape[2], "depth": picture.dtype.itemsize * 8}
+
+
+def deblur(path: str, out: str, blur: str = "focus", strength: float = 1.0, edge: int = 2048, fmt: str = "png") -> dict:
+    """The picture at `path` (8 or 16 bits; grey, RGB or RGBA) with its blur taken out, written to
+    `out` as `fmt` (`png` or `tiff`) at its own depth and channels: the detail Restormer adds with
+    the weights for `blur` (`focus` or `motion`, deblur.detail), by `strength` (1 is all of it). A
+    picture longer than `edge` is shown to the model shrunk to it, and the detail it adds there is
+    enlarged and added to the picture. An alpha channel is kept as it is.
+    """
+    import cv2
+    import deblur as deblurring
+    import numpy as np
+
+    # "could not load image" is how the front learns a picture is unsupported (worker.classify).
+    if not cv2.haveImageReader(path):
+        raise RuntimeError(f"could not load image: OpenCV has no reader for {os.path.basename(path)}")
+    picture = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+    if picture is None:
+        raise Undecodable(f"{os.path.basename(path)} cannot be decoded")
+    if picture.dtype not in (np.uint8, np.uint16):
+        raise RuntimeError(f"could not load image: {picture.dtype} samples; only 8 and 16 bits are deblurred")
+    top = float(np.iinfo(picture.dtype).max)
+    grey = picture.ndim == 2
+    height, width = picture.shape[:2]
+    colour = picture if grey else picture[:, :, :3]
+    rgb = cv2.cvtColor(colour, cv2.COLOR_GRAY2RGB if grey else cv2.COLOR_BGR2RGB).astype(np.float32) / top
+    factor = min(1.0, edge / max(height, width))
+    shown = cv2.resize(rgb, (max(1, round(width * factor)), max(1, round(height * factor))), interpolation=cv2.INTER_AREA) if factor < 1 else rgb
+    change = np.zeros_like(shown)
+    boxes = list(deblurring.tiles(*shown.shape[:2]))
+    for index, ((cy0, cy1, cx0, cx1), (y0, y1, x0, x1)) in enumerate(boxes):
+        tile = shown[y0:y1, x0:x1]
+
+        def run():
+            return registry.deblurrer(registry.deblur_device(), blur).run(tile)
+
+        with registry.family_lock(DEBLUR):
+            found = registry.run_on_model_thread(DEBLUR, run)
+        change[cy0:cy1, cx0:cx1] = (found - tile)[cy0 - y0 : cy1 - y0, cx0 - x0 : cx1 - x0]
+        registry.report_progress((index + 1) / len(boxes))
+    change = deblurring.detail(change)
+    if factor < 1:
+        change = cv2.resize(change, (width, height), interpolation=cv2.INTER_CUBIC)
+    sharper = np.clip(rgb + strength * change, 0, 1)
+    result = picture.copy()
+    if grey:
+        result[:] = np.clip(np.rint(sharper.mean(axis=2) * top), 0, top).astype(picture.dtype)
+    else:
+        result[:, :, :3] = cv2.cvtColor(np.clip(np.rint(sharper * top), 0, top).astype(picture.dtype), cv2.COLOR_RGB2BGR)
+    params = [cv2.IMWRITE_TIFF_COMPRESSION, cv2.IMWRITE_TIFF_COMPRESSION_ADOBE_DEFLATE, cv2.IMWRITE_TIFF_PREDICTOR, cv2.IMWRITE_TIFF_PREDICTOR_HORIZONTAL] if fmt == "tiff" else []
+    if not cv2.imwrite(out, result, params):
+        raise OSError(f"{out} could not be written")
+    return {"model": registry.deblur_model(blur), "width": width, "height": height,
             "channels": 1 if grey else picture.shape[2], "depth": picture.dtype.itemsize * 8}
 
 

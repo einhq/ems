@@ -438,6 +438,19 @@ RUN pip install --no-cache-dir einops==0.8.2 \
     done
 ENV CFG_DENOISE_ROOT=/opt/denoise
 
+# The deblurrer (image.deblur, ems/modelworker/deblur.py): Restormer (MIT), its authors' weights from
+# the repository's v1.0 release, one a blur the request names (camera shake, out of focus), each
+# checked against its sha256. The network (restormer.py) needs einops, installed above. ~210 MB.
+ARG DEBLUR_WEIGHTS="motion_deblurring:194e38fb5b607c9dc5a5b3e08e65b2e79ee2bf0ef5048e0612f6b2ff2f79da31 \
+    single_image_defocus_deblurring:7dce451f33f8f5e0faf7c4e3996e5dcc1bd425ecd1ada99b0f9750e490fd4c9e"
+RUN mkdir -p /opt/deblur \
+    && for entry in ${DEBLUR_WEIGHTS}; do \
+        name="${entry%%:*}"; sum="${entry##*:}"; \
+        curl -fsSL -o "/opt/deblur/$name.pth" "https://github.com/swz30/Restormer/releases/download/v1.0/$name.pth" \
+        && echo "$sum  /opt/deblur/$name.pth" | sha256sum -c - || exit 1; \
+    done
+ENV CFG_DEBLUR_ROOT=/opt/deblur
+
 # The face restorer (image.restore_faces, ems/modelworker/faces_restore.py): GFPGAN v1.4, Tencent
 # ARC's weights from GFPGAN's v1.3.0 release, checked against their sha256. GFPGAN's code is
 # Apache-2.0; its LICENSE also names third-party parts under non-commercial terms, which EiN's list

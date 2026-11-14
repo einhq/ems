@@ -18,7 +18,7 @@ async def test_capabilities_lists_ops(client, tmp_path, monkeypatch):
     assert r.status_code == 200
     assert "faces.detect" in body["ops"] and "media.probe" in body["ops"]
     assert "roots" not in body
-    assert body["api"] == "0.3.16"
+    assert body["api"] == "0.3.17"
     assert "document.renditions" in body["ops"]
     assert "video.storyboard" in body["ops"] and "video.shots" in body["ops"]
     assert "ocr.read" in body["ops"] and body["models"]["ocr"] == "PP-OCRv6_medium"

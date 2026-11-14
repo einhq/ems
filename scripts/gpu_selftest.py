@@ -310,6 +310,43 @@ def main() -> int:
             if after > before / 2:
                 raise RuntimeError(f'{name}: the noise was not lessened ({before:.1f} -> {after:.1f})')
 
+    @check('Restormer deblurrer (card against CPU)')
+    def _deblur():
+        import os
+        import sys
+
+        import cv2
+
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'ems', 'modelworker'))
+        from deblur import Deblurrer, detail
+
+        root = os.environ.get('CFG_DEBLUR_ROOT', '/opt/deblur')
+        # Discs with sharp edges over a fine texture, as a photograph has (on flat colour alone the
+        # models add nothing), blurred as each was trained: shaken 13 pixels sideways, or out of
+        # focus by a disc 9 pixels across.
+        rng = np.random.default_rng(0)
+        sharp = np.full((256, 320, 3), 0.5, np.float32)
+        for _ in range(30):
+            cv2.circle(sharp, tuple(int(v) for v in rng.integers(20, 300, 2)), int(rng.integers(6, 30)), tuple(float(v) for v in rng.uniform(0, 1, 3)), -1)
+        texture = cv2.GaussianBlur(rng.normal(0, 1, (256, 320)).astype(np.float32), (0, 0), 1.0)
+        sharp = np.clip(sharp + 0.15 * texture[:, :, None] / texture.std(), 0, 1)
+        shake = np.full((1, 13), 1 / 13, np.float32)
+        disc = np.zeros((9, 9), np.float32)
+        cv2.circle(disc, (4, 4), 4, 1.0, -1)
+        for name, kernel in (('motion_deblurring', shake), ('single_image_defocus_deblurring', disc / disc.sum())):
+            blurred = cv2.filter2D(sharp, -1, kernel, borderType=cv2.BORDER_REFLECT)
+            path = os.path.join(root, name + '.pth')
+            card, cpu = Deblurrer(path, 'cuda').run(blurred), Deblurrer(path, 'cpu').run(blurred)
+            apart = float(np.abs(card - cpu).max()) * 255
+            # As image.deblur keeps it: the picture with the detail the model adds.
+            kept = np.clip(blurred + detail(card - blurred), 0, 1)
+            before, after = float(np.abs(blurred - sharp).mean()) * 255, float(np.abs(kept - sharp).mean()) * 255
+            print(f'{name}: card/CPU largest difference {apart:.2f}/255 | error {before:.1f} -> {after:.1f}')
+            if apart > 2:
+                raise RuntimeError(f'{name}: card and CPU disagree ({apart:.2f}/255)')
+            if after > before * 0.9:
+                raise RuntimeError(f'{name}: the blur was not lessened ({before:.1f} -> {after:.1f})')
+
     @check('GFPGAN face restorer (card against CPU)')
     def _restore_faces():
         import os
