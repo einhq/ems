@@ -82,13 +82,22 @@ async def test_a_recording_gets_its_chromaprint_and_no_model_runs(client, fake_w
 
     async def fake_run(args, *, timeout):
         assert args[0] == "ffmpeg" and args[args.index("-f") + 1] == "chromaprint"
+        assert args[args.index("-map") + 1] == "0:1"
         return Completed(args, 0, struct.pack("<3I", 1, 2, 3), b"")
+
+    async def fake_probe(path, *, timeout):
+        # A cover picture first, the sound second.
+        return fingerprint.ffprobe_tool.Probe({"streams": [
+            {"index": 0, "codec_type": "video", "codec_name": "mjpeg"},
+            {"index": 1, "codec_type": "audio", "codec_name": "aac", "sample_rate": "44100", "channels": 2},
+        ]}, None)
 
     async def fake_producer(*names):
         return "+".join(f"{n}/1" for n in names)
 
     monkeypatch.setattr(fingerprint, "require", lambda name: name)
     monkeypatch.setattr(fingerprint, "run", fake_run)
+    monkeypatch.setattr(fingerprint.ffprobe_tool, "probe", fake_probe)
     monkeypatch.setattr(fingerprint, "producer", fake_producer)
     r = await client.post("/v0/fingerprint/compute", json={"file": {"path": str(ro / "a.m4a"), "mimetype": "audio/mp4"}})
     body = r.json()
