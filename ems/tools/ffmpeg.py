@@ -9,7 +9,7 @@ from __future__ import annotations
 import glob
 import os
 
-from .ffprobe import decode_failure
+from .ffprobe import audio_map, decode_failure, probe
 from .run import require, run
 
 
@@ -21,10 +21,14 @@ async def extract_audio(path: str, out_wav: str, *, timeout: float, sample_rate:
     """A PCM WAV of the file's sound at `out_wav`. False when the file has no audio stream.
 
     ffmpeg exits 0 having written nothing for a container without sound, so the size is checked
-    rather than the exit code alone.
+    rather than the exit code alone. The stream is the probe's `audio()`, and a file whose audio
+    streams none can be decoded has no sound; when the probe cannot read the file, ffmpeg picks.
     """
+    probed = await probe(path, timeout=timeout)
+    if probed.refusal is None and probed.audio() is None:
+        return False
     done = await run(
-        [require("ffmpeg"), "-y", "-v", "error", "-vn", "-i", path, "-acodec", "pcm_s16le", "-ar", str(sample_rate), "-ac", str(channels), out_wav],
+        [require("ffmpeg"), "-y", "-v", "error", "-vn", "-i", path, *audio_map(probed), "-acodec", "pcm_s16le", "-ar", str(sample_rate), "-ac", str(channels), out_wav],
         timeout=timeout,
     )
     if done.code != 0:

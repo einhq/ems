@@ -31,6 +31,7 @@ from ..context import Context
 from ..errors import EmsError, TOOL_FAILED, invalid
 from ..schemas import FileRef, Strict, WithOptions
 from ..streaming import Outcome, Progress, run_op
+from ..tools import ffprobe as ffprobe_tool
 from ..tools.run import require, run
 from ..tools.versions import producer
 from .image import MAX_TARGETS, RenditionTarget, render_targets
@@ -74,12 +75,12 @@ def _colour(value: str) -> str:
     return value
 
 
-def filter_graph(boxes: list[tuple[int, int]], style: WaveformStyle) -> str:
+def filter_graph(boxes: list[tuple[int, int]], style: WaveformStyle, stream: str = "0:a") -> str:
     fg, bg = _colour(style.foreground), _colour(style.background)
     baseline = _colour(style.baseline) if style.baseline else None
     n = len(boxes)
     split = "".join(f"[a{i}]" for i in range(n))
-    parts = [f"[0:a]aformat=channel_layouts=mono,aresample={SAMPLE_RATE},asplit={n}{split}"]
+    parts = [f"[{stream}]aformat=channel_layouts=mono,aresample={SAMPLE_RATE},asplit={n}{split}"]
     for i, (w, h) in enumerate(boxes):
         size = f"{w * OVERSAMPLE}x{h * OVERSAMPLE}"
         parts.append(f"[a{i}]showwavespic=s={size}:colors={fg}:filter=average:scale=sqrt[fg{i}]")
@@ -92,7 +93,10 @@ def filter_graph(boxes: list[tuple[int, int]], style: WaveformStyle) -> str:
 async def draw(ctx: Context, path: str, scratch: str, boxes: list[tuple[int, int]], style: WaveformStyle) -> list[str]:
     """Every picture from one decode, as PNGs in `scratch`."""
     outs = [os.path.join(scratch, f"wave-{i}.png") for i in range(len(boxes))]
-    args = [require("ffmpeg"), "-y", "-v", "error", "-i", path, "-filter_complex", filter_graph(boxes, style)]
+    # The sound `Probe.audio` picks; ffmpeg's own when the probe finds none, so its error says why.
+    sound = (await ffprobe_tool.probe(path, timeout=ctx.settings.tool_stall_seconds)).audio()
+    graph = filter_graph(boxes, style, f"0:{sound['index']}" if sound else "0:a")
+    args = [require("ffmpeg"), "-y", "-v", "error", "-i", path, "-filter_complex", graph]
     for i, out in enumerate(outs):
         args += ["-map", f"[out{i}]", "-frames:v", "1", out]
     done = await run(args, timeout=ctx.settings.tool_stall_seconds)

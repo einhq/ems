@@ -9,9 +9,9 @@ from ems.tools import run as run_tool
 
 
 def fake_probe(duration="10.0", fps="25/1", codec="h264", audio=True, width=1920, height=1080):
-    streams = [{"codec_type": "video", "codec_name": codec, "r_frame_rate": fps, "width": width, "height": height}]
+    streams = [{"index": 0, "codec_type": "video", "codec_name": codec, "r_frame_rate": fps, "width": width, "height": height}]
     if audio:
-        streams.append({"codec_type": "audio", "codec_name": "aac", "bit_rate": "128000", "sample_rate": "44100", "channels": 2})
+        streams.append({"index": 1, "codec_type": "audio", "codec_name": "aac", "bit_rate": "128000", "sample_rate": "44100", "channels": 2})
     return ffprobe_tool.Probe({"format": {"duration": duration, "format_name": "mov,mp4"}, "streams": streams}, None)
 
 
@@ -179,7 +179,7 @@ async def test_audio_transcode_keeps_the_ceilings_and_publishes(client, dirs, mo
     ro, rw = dirs
     (ro / "tape.mp3").write_bytes(b"mp3")
     ffmpeg = FakeFfmpeg()
-    source = ffprobe_tool.Probe({"format": {"duration": "2756.3", "format_name": "mp3"}, "streams": [{"codec_type": "audio", "codec_name": "mp3", "bit_rate": "64000", "sample_rate": "44100", "channels": 1}]}, None)
+    source = ffprobe_tool.Probe({"format": {"duration": "2756.3", "format_name": "mp3"}, "streams": [{"index": 0, "codec_type": "audio", "codec_name": "mp3", "bit_rate": "64000", "sample_rate": "44100", "channels": 1}]}, None)
     install(monkeypatch, ffmpeg, probe=source)
     r = await client.post("/v0/audio/transcode", json={"file": {"path": str(ro / "tape.mp3")}, "output": {"path": str(rw / "128k-44100.m4a")}, "audio": {"bitrate": "128k", "sample_rate": 44100}})
     body = r.json()
@@ -190,7 +190,7 @@ async def test_audio_transcode_keeps_the_ceilings_and_publishes(client, dirs, mo
     assert body["result"]["bitrate"] == 64000 and body["result"]["channels"] == 1
     assert body["meta"]["producer"].endswith("/aac")
 
-    silent = ffprobe_tool.Probe({"format": {"duration": "2.0", "format_name": "mp4"}, "streams": [{"codec_type": "video", "codec_name": "h264"}]}, None)
+    silent = ffprobe_tool.Probe({"format": {"duration": "2.0", "format_name": "mp4"}, "streams": [{"index": 0, "codec_type": "video", "codec_name": "h264"}]}, None)
     install(monkeypatch, ffmpeg, probe=silent)
     r = await client.post("/v0/audio/transcode", json={"file": {"path": str(ro / "tape.mp3")}, "output": {"path": str(rw / "x.m4a")}})
     assert r.status_code == 422 and r.json()["error"]["code"] == "refused"
@@ -204,3 +204,29 @@ async def test_capabilities_name_the_encoder_and_the_budget(client, monkeypatch)
     assert caps["encode"] == {"video_encoder": "libsvtav1", "cpu_budget": "4000/170/64"}
     assert caps["limits"]["encodes"] == 2
     assert "video.transcode" in caps["ops"] and "audio.transcode" in caps["ops"]
+
+
+# A camera's MPEG (HP Photosmart): an AC-3 id over bytes that are not AC-3, the picture, the real sound.
+CAMERA_MPEG = ffprobe_tool.Probe({"format": {"duration": "6.09", "format_name": "mpeg"}, "streams": [
+    {"index": 0, "codec_type": "audio", "codec_name": "ac3", "sample_rate": "0", "channels": 3},
+    {"index": 1, "codec_type": "video", "codec_name": "mpeg1video", "r_frame_rate": "60000/1001", "width": 320, "height": 240},
+    {"index": 2, "codec_type": "audio", "codec_name": "mp1", "sample_rate": "44100", "channels": 1},
+]}, None)
+
+
+def test_the_audio_decoded_is_the_first_with_a_sample_rate():
+    assert CAMERA_MPEG.audio()["index"] == 2
+    assert ffprobe_tool.audio_map(CAMERA_MPEG) == ["-map", "0:2"]
+    assert ffprobe_tool.audio_map(fake_probe(audio=False)) == []
+
+
+async def test_a_rendition_maps_the_picture_and_the_sound_that_decodes(client, dirs, monkeypatch):
+    ro, rw = dirs
+    (ro / "clip.mp4").write_bytes(b"mp4")
+    ffmpeg = FakeFfmpeg()
+    install(monkeypatch, ffmpeg, probe=CAMERA_MPEG)
+    r = await client.post("/v0/video/transcode", json=video_body(ro, rw))
+    assert r.status_code == 200, r.json()
+    args = next(run for run in ffmpeg.runs if "-progress" in run)
+    maps = [args[i + 1] for i, arg in enumerate(args) if arg == "-map"]
+    assert maps == ["0:1", "0:2"]

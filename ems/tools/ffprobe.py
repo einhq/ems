@@ -34,6 +34,23 @@ class Probe:
                 return stream
         return None
 
+    def audio(self) -> dict | None:
+        """The audio stream to decode: the first that has a sample rate and channels.
+
+        Left to itself ffmpeg takes the audio stream with the most channels, and a camera's MPEG
+        can carry one that only looks like sound (an AC-3 id over other bytes, with no sample
+        rate). Picked, it fails the whole run, the picture with it."""
+        for stream in self.streams:
+            if stream.get("codec_type") == "audio" and number(stream.get("sample_rate")) and stream.get("channels"):
+                return stream
+        return None
+
+
+def audio_map(probe: Probe) -> list[str]:
+    """The `-map` of `probe.audio()`, or nothing when there is none."""
+    stream = probe.audio()
+    return ["-map", f"0:{stream['index']}"] if stream else []
+
 
 def _refusal(stderr: str, path: str) -> str:
     first = next((line.strip() for line in stderr.splitlines() if line.strip()), "")

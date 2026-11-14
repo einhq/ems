@@ -19,6 +19,7 @@ from ..context import Context
 from ..errors import EmsError, TOOL_FAILED, UNSUPPORTED, invalid
 from ..schemas import FileRef, WithOptions
 from ..streaming import Outcome, Progress, run_op
+from ..tools import ffprobe as ffprobe_tool
 from ..tools.run import require, run
 from ..tools.versions import producer
 from ._models import call_on_pictures, mimetype_of, model_slot
@@ -73,9 +74,11 @@ def parse_raw_fingerprint(raw: bytes) -> list[int]:
 
 
 async def chromaprint(ctx: Context, path: str) -> list[dict]:
-    # The whole recording, with Chromaprint's default algorithm, as `fpcalc -raw -length 0` takes it.
+    # The whole recording, with Chromaprint's default algorithm, as `fpcalc -raw -length 0` takes
+    # it, from the sound `Probe.audio` picks.
+    probed = await ffprobe_tool.probe(path, timeout=ctx.settings.tool_stall_seconds)
     done = await run(
-        [require("ffmpeg"), "-nostdin", "-v", "error", "-i", path, "-f", "chromaprint", "-fp_format", "raw", "-"],
+        [require("ffmpeg"), "-nostdin", "-v", "error", "-i", path, *ffprobe_tool.audio_map(probed), "-f", "chromaprint", "-fp_format", "raw", "-"],
         timeout=ctx.settings.tool_stall_seconds,
     )
     if done.code != 0:
