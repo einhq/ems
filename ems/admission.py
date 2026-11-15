@@ -67,7 +67,6 @@ OP_FAMILIES = {
     "text.embed": "text-embed",
     "fingerprint.compute": "sscd",
     "video.shots": "transnet",
-    "image.restore_faces": "faces",
     "image.inpaint": "lama",
     "image.defects": "defects",
     "image.damage": "defects",
