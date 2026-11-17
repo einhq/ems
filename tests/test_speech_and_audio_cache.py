@@ -59,7 +59,7 @@ async def test_voiceprint_is_one_call_per_recording(client, fake_worker, dirs, f
     ]
     assert result["turns"][1]["embedding"] is None and result["turns"][1]["dimension"] is None
     assert result["turns"][0]["dimension"] == 3
-    assert body["meta"]["producer"] == "sortformer+titanet"
+    assert body["meta"]["producer"] == "voices/1+sortformer+titanet"
 
     ops = [(req["op"], req.get("spans")) for req in fake_worker.requests]
     assert ops[0][0] == "diarize"
@@ -74,13 +74,17 @@ async def test_voiceprint_is_one_call_per_recording(client, fake_worker, dirs, f
     assert r.status_code == 400
 
 
-async def test_voiceprint_of_silence(client, fake_worker, dirs, fake_extract):
+async def test_voiceprint_of_silence(client, fake_worker, dirs, fake_extract, monkeypatch):
+    monkeypatch.delenv("CFG_TITANET_MODEL", raising=False)
+    monkeypatch.delenv("EMS_TITANET_MODEL", raising=False)
     ro, _ = dirs
     (ro / "hum.mp4").write_bytes(b"mp4")
     (ro / "silent.mp4").write_bytes(b"mp4")
     fake_worker.on("diarize", lambda req: {"speech": False, "duration": 5.0, "window": 90, "model": "sortformer", "turns": []})
     r = await client.post("/v0/speech/voiceprint", json={"file": {"path": str(ro / "hum.mp4")}})
     assert r.json()["result"] == {"speech": False, "audio": True, "duration": 5.0, "turns": []}
+    # Both models, as capabilities names them, though nothing was embedded.
+    assert r.json()["meta"]["producer"] == "voices/1+sortformer+speakerverification_en_titanet_large"
     r = await client.post("/v0/speech/voiceprint", json={"file": {"path": str(ro / "silent.mp4")}})
     assert r.json()["result"] == {"speech": False, "audio": False, "duration": 0.0, "turns": []}
     assert [req["op"] for req in fake_worker.requests] == ["diarize"]

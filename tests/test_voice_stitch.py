@@ -1,5 +1,7 @@
 """Window-local diarizer labels become file-wide speakers (ems/ops/_voices.py)."""
 
+import math
+
 import pytest
 
 from ems.ops._voices import cosine, merge_adjacent, stitch_windows, window_of
@@ -75,13 +77,39 @@ def test_a_crumb_joins_the_anchor_it_resembles_at_the_lower_bar():
 
 
 def test_a_crumb_never_joins_an_anchor_from_its_own_window():
+    # The diarizer told the two apart, so the crumb is a voice of its own.
     turns = [turn(0, 10, "w0/speaker_0"), turn(20, 22, "w0/speaker_1")]
-    assert stitch_windows(turns, [voice(0), voice(0)]) == ["speaker_0", None]
+    assert stitch_windows(turns, [voice(0), voice(0)]) == ["speaker_0", "speaker_1"]
 
 
-def test_a_crumb_unlike_every_anchor_is_unattributed():
+def test_a_crumb_unlike_every_anchor_is_a_speaker_of_its_own():
     turns = [turn(0, 10, "w0/speaker_0"), turn(100, 102, "w1/speaker_0")]
-    assert stitch_windows(turns, [voice(0), voice(2)]) == ["speaker_0", None]
+    assert stitch_windows(turns, [voice(0), voice(2)]) == ["speaker_0", "speaker_1"]
+
+
+def test_crumbs_from_different_windows_join_into_one_speaker():
+    # One short voice heard in three windows, none of it like the anchor: one speaker, not three.
+    turns = [turn(0, 10, "w0/speaker_0"), turn(20, 22, "w0/speaker_1"), turn(100, 103, "w1/speaker_0"), turn(190, 192, "w2/speaker_1")]
+    speakers = stitch_windows(turns, [voice(0), voice(2, 0.01), voice(2, 0.02), voice(2, 0.03)])
+    assert speakers == ["speaker_0", "speaker_1", "speaker_1", "speaker_1"]
+
+
+def test_crumbs_join_each_other_only_at_the_stitch_threshold():
+    # Two noisy centroids against each other: cosine 0.55 is enough to join an anchor, not another crumb.
+    turns = [turn(0, 10, "w0/speaker_0"), turn(100, 102, "w1/speaker_0"), turn(200, 202, "w2/speaker_0")]
+    other = [0.0, 0.0, 0.55, math.sqrt(1 - 0.55**2)]
+    speakers = stitch_windows(turns, [voice(0), voice(2), other], threshold=0.6, attach_threshold=0.5)
+    assert speakers == ["speaker_0", "speaker_1", "speaker_2"]
+
+
+def test_crumbs_from_one_window_stay_apart():
+    turns = [turn(0, 10, "w0/speaker_0"), turn(100, 102, "w1/speaker_0"), turn(104, 106, "w1/speaker_1")]
+    assert stitch_windows(turns, [voice(0), voice(2), voice(2)]) == ["speaker_0", "speaker_1", "speaker_2"]
+
+
+def test_a_crumb_joining_an_anchor_founds_no_speaker():
+    turns = [turn(0, 10, "w0/speaker_0"), turn(100, 102, "w1/speaker_0")]
+    assert stitch_windows(turns, [voice(0), voice(0, 0.1)]) == ["speaker_0", "speaker_0"]
 
 
 def test_merge_leaves_unattributed_turns_apart():

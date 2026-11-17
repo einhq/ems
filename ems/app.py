@@ -18,16 +18,17 @@ from .card import CardArbiter, CardBudget
 from .config import Settings
 from .context import Context
 from .errors import INTERNAL, INVALID_REQUEST, OP_NOT_SERVED, EmsError
-from .ops import audio, copy_tags, damage, deblur, defects, denoise, document, document_page, faces, fingerprint, image, inpaint, media, ocr, shots, speech, storyboard, system, text, transcode, unfade, video, vision, watches
+from .ops import audio, copy_tags, damage, deblur, defects, denoise, document, document_page, faces, fingerprint, image, inpaint, media, ocr, pages, shots, speech, storyboard, stream, system, text, transcode, unfade, video, vision, watches
 from .remote import Mounts
 from .tools.audio import AudioCache
 from .tools.exiftool import ExifTool
 from .tools.run import which
 from .clips import ffmpeg_join, ffmpeg_segments
+from .pages import Pages, renderer
 from .watches import Watches, ffmpeg_crop, ffmpeg_frames
 from .worker import QUERY_FAMILIES, Worker
 
-OP_MODULES = (media, image, copy_tags, unfade, inpaint, defects, damage, denoise, deblur, video, storyboard, shots, audio, transcode, fingerprint, document, document_page, ocr, faces, speech, vision, text, watches)
+OP_MODULES = (media, image, copy_tags, unfade, inpaint, defects, damage, denoise, deblur, video, storyboard, shots, audio, transcode, stream, fingerprint, document, document_page, ocr, faces, speech, vision, text, watches, pages)
 
 
 def log(message: str) -> None:
@@ -180,6 +181,7 @@ def create_app(
         settings.watches, source=ffmpeg_frames, find=watches.frame_finder(ctx, kept), crop=ffmpeg_crop, log=log, idle=kept.release,
         folder=os.path.join(settings.scratch, "watches"), segments=ffmpeg_segments, join=ffmpeg_join,
     )
+    ctx.pages = Pages(settings.pages, settings.page_memory_mb, renderer(settings.page_memory_mb, stream.h264_encoders, lambda: ctx.scratch_dir("page")), log)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -205,6 +207,7 @@ def create_app(
             yield
         finally:
             await ctx.watches.stop()
+            await ctx.pages.stop()
             await ctx.card.stop()
             if start_worker:
                 if query_worker is not None:

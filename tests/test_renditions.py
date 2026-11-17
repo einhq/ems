@@ -252,6 +252,31 @@ def test_a_raw_is_read_at_half_size_when_every_output_fits_in_it():
     assert not raw_tool.half_size(sensor, 0, [magick.Plan(temp="", format="avif", quality=None, width=None, height=None, fit="contain", crop=None)])
 
 
+def test_a_raw_is_cut_to_the_cameras_crop():
+    from collections import namedtuple
+
+    Sizes = namedtuple("Sizes", "width height left_margin top_margin crop_left_margin crop_top_margin crop_width crop_height")
+    # A 350D: LibRaw's frame starts 42, 14 into the sensor area, the camera's crop 52, 20.
+    eos350d = Sizes(3474, 2314, 42, 14, 52, 20, 3456, 2303)
+    assert raw_tool.camera_crop(eos350d) == (10, 6, 3456, 2303)
+    # No crop named (a NEF) is the whole frame; one running past the frame is clamped to it.
+    assert raw_tool.camera_crop(Sizes(3899, 2616, 2, 0, 0, 0, 0, 0)) == (0, 0, 3899, 2616)
+    assert raw_tool.camera_crop(Sizes(100, 80, 0, 0, 10, 10, 100, 80)) == (10, 10, 90, 70)
+
+    class Raster:
+        def __init__(self, cols, rows, cut=None):
+            self.shape, self.cut = (rows, cols, 3), cut
+
+        def __getitem__(self, key):
+            return Raster(key[1].stop - key[1].start, key[0].stop - key[0].start, (key[1].start, key[0].start))
+
+    # A 7D's crop sits 10, 4 into its 5202x3464 frame: a half-size read cuts it at 5, 2.
+    half = raw_tool.cut(Raster(2601, 1732), (10, 4, 5184, 3456), (5202, 3464))
+    assert (half.cut, half.shape[:2]) == ((5, 2), (1728, 2592))
+    full = raw_tool.cut(Raster(5202, 3464), (10, 4, 5184, 3456), (5202, 3464))
+    assert (full.cut, full.shape[:2]) == ((10, 4), (3456, 5184))
+
+
 def test_the_decode_hears_the_outputs_it_is_for():
     plans = [magick.Plan(temp="t", format="avif", quality=70, width=384, height=384, fit="contain", crop=magick.Rect(0.1, 0.2, 0.3, 0.4))]
     assert raw_tool.plans_of(json.loads(json.dumps(raw_tool.needs(90, plans)))) == [

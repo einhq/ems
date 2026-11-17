@@ -1,4 +1,7 @@
-"""`document.extract` — the text of a PDF, DOCX, ODT, picture or plain-text file.
+"""`document.extract` — the text of a PDF, Word, RTF, ODT, picture or plain-text file.
+
+Old Word and RTF are converted to PDF by LibreOffice, as `document.renditions` converts them, and
+that PDF is read as any other: a page that is only a picture is read by the text reader.
 
 A scanned PDF has no text layer, so its text layer is "" for every page and the document
 would be indexed as empty — no error, simply never findable. `ocr: auto` rasterizes any page
@@ -25,10 +28,13 @@ from ..errors import EmsError, TOOL_FAILED, UNSUPPORTED
 from ..schemas import FileRef, WithOptions
 from ..streaming import Outcome, Progress, run_op
 from ._models import call_on_pictures, mimetype_of, model_slot
+from .document_page import CONVERTED, convert
 from .media import kind_of
 
 DOCX = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 ODT = "application/vnd.oasis.opendocument.text"
+# What no Python reader here opens, read as the PDF LibreOffice converts it to.
+OFFICE = frozenset({"application/msword", "application/rtf", "text/rtf"})
 
 OCR_DPI = int(os.environ.get("EMS_OCR_DPI", "200"))
 MIN_PAGE_TEXT_CHARS = int(os.environ.get("EMS_OCR_MIN_PAGE_CHARS", "32"))
@@ -159,7 +165,7 @@ def extract_plaintext(path: str) -> tuple[str, int, str]:
         return handle.read().strip(), 0, "text"
 
 
-async def extract(path: str, mimetype: str | None, ocr: str, reader: Reader, scratch: str) -> tuple[str, int, str]:
+async def extract(ctx: Context, path: str, mimetype: str | None, ocr: str, reader: Reader, scratch: str) -> tuple[str, int, str]:
     """A document's text, its page count and how it was read. Pictures are not documents here:
     `run_extract` reads them before it takes a tools slot."""
     if mimetype == "application/pdf":
@@ -168,6 +174,9 @@ async def extract(path: str, mimetype: str | None, ocr: str, reader: Reader, scr
         return await asyncio.to_thread(extract_docx, path)
     if mimetype == ODT:
         return await asyncio.to_thread(extract_odt, path)
+    if mimetype in OFFICE:
+        pdf = await convert(ctx, path, CONVERTED[mimetype], scratch)
+        return await extract_pdf(pdf, ocr, reader, scratch)
     if mimetype and mimetype.startswith("text/"):
         return await asyncio.to_thread(extract_plaintext, path)
     raise EmsError(UNSUPPORTED, f"no text extractor for {mimetype or 'an unknown type'}")
@@ -186,7 +195,7 @@ async def run_extract(ctx: Context, req: DocumentRequest, progress: Progress) ->
             scratch = ctx.scratch_dir("extract")
             try:
                 async with ctx.admission.slot("tools", interactive=req.options.interactive):
-                    text, pages, method = await extract(path, mimetype, req.ocr, reader, scratch)
+                    text, pages, method = await extract(ctx, path, mimetype, req.ocr, reader, scratch)
             finally:
                 shutil.rmtree(scratch, ignore_errors=True)
     except EmsError:

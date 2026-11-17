@@ -18,11 +18,23 @@ async def test_capabilities_lists_ops(client, tmp_path, monkeypatch):
     assert r.status_code == 200
     assert "faces.detect" in body["ops"] and "media.probe" in body["ops"]
     assert "roots" not in body
-    assert body["api"] == "0.4.0"
+    assert body["api"] == "0.4.6"
     assert "document.renditions" in body["ops"]
     assert "video.storyboard" in body["ops"] and "video.shots" in body["ops"]
     assert "ocr.read" in body["ops"] and body["models"]["ocr"] == "PP-OCRv6_medium"
     assert "vision.describe" not in body["ops"] and "text.generate" not in body["ops"] and "vlm" not in body["models"]
+
+
+async def test_capabilities_names_the_voice_models_as_the_worker_does(client, monkeypatch):
+    for name in ("CFG_SORTFORMER_MODEL", "EMS_SORTFORMER_MODEL", "CFG_TITANET_MODEL", "EMS_TITANET_MODEL"):
+        monkeypatch.delenv(name, raising=False)
+    body = (await client.get("/v0/capabilities")).json()
+    assert body["models"]["voiceprint"] == "voices/1+diar_streaming_sortformer_4spk-v2+speakerverification_en_titanet_large"
+    monkeypatch.setenv("EMS_SORTFORMER_MODEL", "acme/diarizer-x")
+    monkeypatch.setenv("EMS_TITANET_MODEL", "acme/voice-y")
+    monkeypatch.setenv("CFG_TITANET_MODEL", "acme/voice-z")
+    body = (await client.get("/v0/capabilities")).json()
+    assert body["models"]["voiceprint"] == "voices/1+diarizer-x+voice-z"
 
 
 async def test_capabilities_names_the_handwriting_readers_where_the_image_has_them(client, tmp_path, monkeypatch):

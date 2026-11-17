@@ -8,6 +8,7 @@ error — plenty of any archive is silent phone clips.
 
 from __future__ import annotations
 
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import APIRouter, Request
@@ -19,6 +20,7 @@ from ..schemas import Box, FileRef, Strict, WithOptions
 from ..streaming import Outcome, Progress, run_op
 from ._models import model_slot
 from .faces import PRODUCER as FACES_PRODUCER
+from ._voices import METHOD as VOICES_METHOD
 from ._voices import merge_adjacent, speakers_of, stitch_windows
 
 # Shortest turn worth a voiceprint, in seconds.
@@ -28,6 +30,23 @@ from ._voices import merge_adjacent, speakers_of, stitch_windows
 # to vote in the caller's identity step. Such turns are still reported, without a vector, so
 # the timeline stays complete.
 MIN_TURN_SECONDS = 1.5
+
+
+def _worker_model(env, name: str, default: str) -> str:
+    """A model the model worker runs, as it names it: its `CFG_<name>` setting, which `EMS_<name>`
+    reaches it as, or `default`, without the publisher."""
+    return (env.get(f"CFG_{name}") or env.get(f"EMS_{name}") or default).split("/")[-1]
+
+
+def voice_embedder(env=os.environ) -> str:
+    """The voiceprint model, as the model worker names it (model_registry's TITANET_MODEL)."""
+    return _worker_model(env, "TITANET_MODEL", "nvidia/speakerverification_en_titanet_large")
+
+
+def voiceprint_producer(env=os.environ) -> str:
+    """What `speech.voiceprint` writes as its producer: the stitching's version, then the diarizer and
+    the embedder as the model worker names them (model_registry's SORTFORMER_MODEL and TITANET_MODEL)."""
+    return f"{VOICES_METHOD}+{_worker_model(env, 'SORTFORMER_MODEL', 'nvidia/diar_streaming_sortformer_4spk-v2')}+{voice_embedder(env)}"
 
 
 class Vad(Strict):
@@ -169,7 +188,7 @@ async def voiceprint(ctx: Context, req: VoiceprintRequest, progress: Progress) -
                 for t in raw.get("turns") or []
             ]
             if not turns:
-                return Outcome({"speech": False, "audio": True, "duration": duration, "turns": []}, producer=diarizer)
+                return Outcome({"speech": False, "audio": True, "duration": duration, "turns": []}, producer=f"{VOICES_METHOD}+{diarizer}+{voice_embedder()}")
 
             await progress.emit("voiceprint")
             vectors, embedder = await _embed_spans(ctx, wav, turns, deadline)
@@ -202,7 +221,9 @@ async def voiceprint(ctx: Context, req: VoiceprintRequest, progress: Progress) -
         }
         for t in merged
     ]
-    producer = diarizer if embedder is None else f"{diarizer}+{embedder}"
+    # Both models, also when no turn was long enough to embed: the caller compares it with
+    # capabilities' `models.voiceprint`.
+    producer = f"{VOICES_METHOD}+{diarizer}+{embedder or voice_embedder()}"
     return Outcome(
         {"speech": True, "audio": True, "duration": duration, "turns": result_turns, "speakers": speakers_of(merged)},
         producer=producer,

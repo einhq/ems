@@ -110,13 +110,13 @@ async def render_targets(ctx: Context, source: str, angle: int, mirror: bool, ta
     names = requested or [t.output.path for t in targets]
     scratch = ctx.scratch_dir("raw") if raw else None
     try:
-        sensor = None
+        frame = None
         if scratch:
             decoded = await raw_tool.decode(source, os.path.join(scratch, "decoded.ppm"), angle, plans, timeout=ctx.settings.tool_stall_seconds)
-            source, sensor = decoded.path, decoded.frame
+            source, frame = decoded.path, decoded.frame
         rendered = await magick.render(source, angle, mirror, plans, timeout=ctx.settings.tool_stall_seconds)
-        if sensor:
-            rendered.frame = (sensor[1], sensor[0]) if angle % 180 == 90 else sensor
+        if frame:
+            rendered.frame = (frame[1], frame[0]) if angle % 180 == 90 else frame
         for plan in plans:
             if not os.path.isfile(plan.temp) or os.path.getsize(plan.temp) == 0:
                 raise EmsError(TOOL_FAILED, f"magick exited 0 but wrote no bytes for {plan.format}:{os.path.basename(plan.temp)}")

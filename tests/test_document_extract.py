@@ -1,5 +1,7 @@
 """`document.extract`: what is refused before anything runs, and how pictures and scanned pages are read."""
 
+import shutil
+
 import pytest
 
 from ems.errors import EmsError, UNSUPPORTED
@@ -10,7 +12,7 @@ async def test_unknown_type_is_refused_permanently(tmp_path):
     f = tmp_path / "blob.bin"
     f.write_bytes(b"\x00")
     with pytest.raises(EmsError) as raised:
-        await extract(str(f), "application/octet-stream", "auto", None, str(tmp_path))
+        await extract(None, str(f), "application/octet-stream", "auto", None, str(tmp_path))
     assert raised.value.code is UNSUPPORTED
 
 
@@ -75,3 +77,16 @@ async def test_a_broken_pdf_fails_permanently(client, dirs):
     (ro / "broken.pdf").write_bytes(b"%PDF-1.4 not really")
     body = (await client.post("/v0/document/extract", json={"file": {"path": str(ro / "broken.pdf"), "mimetype": "application/pdf"}})).json()
     assert body["ok"] is False and body["error"]["permanent"] is True
+
+
+@pytest.mark.skipif(not shutil.which("soffice"), reason="LibreOffice is not installed")
+async def test_rtf_is_read_from_the_pdf_libreoffice_converts_it_to(client, fake_worker, dirs):
+    pytest.importorskip("pypdfium2")
+    ro, _ = dirs
+    (ro / "brev.rtf").write_text(r"{\rtf1\ansi K\'e4ra Anna, vi kommer p\'e5 l\'f6rdag med t\'e5get.\par}", encoding="ascii")
+    body = (await client.post("/v0/document/extract", json={"file": {"path": str(ro / "brev.rtf"), "mimetype": "application/rtf"}})).json()
+    assert body["ok"], body
+    assert body["result"] == {"text": "Kära Anna, vi kommer på lördag med tåget.", "pages": 1, "method": "pdf-text", "word_count": 8}
+    assert body["meta"]["producer"] == "pdf-text"
+    assert not [q for q in fake_worker.requests if q["op"] == "read_text"]
+

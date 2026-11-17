@@ -30,6 +30,10 @@ from whisper_credits import is_credit_line  # noqa: E402
     "Textning.nu",
     "Svensktextning.nu",
     "Undertexter från Amara.org-gemenskapen",
+    "Textat av Agnes Wrenfield.",
+    "Välkomna att titta på den här videon!",
+    "Välkomna till den här videon!",
+    "Textning Agnes Wrenfield www.btistudios.com",
     "Teksting av Nicolai Winther",
     "Subtitles by the Amara.org community",
     "Субтитры сделал DimaTorzok",
@@ -47,6 +51,8 @@ def test_invented_lines_are_dropped(line):
     "Thank you for watching. Now let's eat.",
     "Grazie per aver guardato i bambini.",
     "Hej!",
+    "Vi textade hela kvällen.",
+    "Välkomna till oss, kom in!",
     "",
 ])
 def test_speech_is_kept(line):

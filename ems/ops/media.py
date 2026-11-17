@@ -21,6 +21,8 @@ from ..tools.versions import producer
 
 DOCUMENT_MIMETYPES = {
     "application/pdf",
+    "application/msword",
+    "application/rtf",
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     "application/vnd.oasis.opendocument.text",
 }

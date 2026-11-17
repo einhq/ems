@@ -62,6 +62,8 @@ The licence's text is Apache-2.0, beside this file.
 - Samsung AI Center's big-lama, https://github.com/advimman/lama, as IOPaint exports it to
   TorchScript, https://github.com/Sanster/models/releases/tag/add_big_lama, in /opt/inpaint; the
   export states no licence of its own
+- Xiaohongshu's FireRedVAD, its AED model, https://huggingface.co/FireRedTeam/FireRedVAD, in
+  /opt/huggingface
 
 The Python packages in /opt/venv carry their own licences in their dist-info folders.
 

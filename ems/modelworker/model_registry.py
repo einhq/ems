@@ -100,12 +100,13 @@ WHISPER_LANGUAGE_FLOOR = float(os.environ.get('CFG_WHISPER_LANGUAGE_FLOOR', '0.1
 # guest speaking at the start, is one vote among several rather than the verdict.
 WHISPER_LANGUAGE_WINDOWS = max(1, int(os.environ.get('CFG_WHISPER_LANGUAGE_WINDOWS', '3')))
 
-# Whether to align each word to its own timestamp, rather than each segment.
+# Whether each segment carries its words, each with its own timestamp.
 #
 # Whisper segments on pauses and a diarizer on voices, so one segment can hold the end of one
 # person's sentence and the start of another's; word timings let a caller cut it at the word
-# nearest the change. Off by default because it is a second pass over the decoder's
-# cross-attention for every segment; a request can ask for it (`word_timestamps`).
+# nearest the change. The words are always aligned, because they are what places a segment back
+# in the file across a cut-out gap (inference_ops.restore_segments); this only decides whether
+# they are returned. Off by default; a request can ask for them (`word_timestamps`).
 WHISPER_WORD_TIMESTAMPS = os.environ.get('CFG_WHISPER_WORD_TIMESTAMPS', '') == '1'
 
 # What whisper decodes with, by device. A host runs it in one place only — on the card if it has
@@ -124,10 +125,10 @@ WHISPER_COMPUTE = {
 #
 # The VAD is what stops whisper hallucinating over silence — an archive of phone clips is
 # mostly silence, and left to itself the decoder fills it with invented speech and
-# repetition loops. But faster-whisper does not merely skip the silence: it cuts every gap
-# longer than MIN_SILENCE out of the audio, concatenates what is left into one stream, and
-# decodes *that*. So the setting decides what the decoder hears, and a tight one feeds it
-# sentences jammed together with no breath between them.
+# repetition loops. But the silence is not merely skipped: every gap longer than MIN_SILENCE
+# is cut out of the audio, what is left is joined into one stream, and *that* is decoded
+# (inference_ops.speech_chunks). So the setting decides what the decoder hears, and a tight one
+# feeds it sentences jammed together with no breath between them.
 #
 # The three are set together. A tight setting (threshold 0.5, pad 400ms, silence 500ms) drops
 # audible speech, and loosening any one of them alone lets whisper invent fluent nonsense over
@@ -158,6 +159,24 @@ def whisper_vad_parameters() -> dict:
     }
 
 
+# The second detector beside Silero: FireRedVAD's AED model, which scores speech, singing and
+# music separately for every 10 ms. Silero scores some plain speech as none at all — on old tape,
+# far from the microphone, under music — and whisper hears all of it when it gets the audio, so
+# whisper decodes what either detector keeps (inference_ops.speech_chunks, ein/core#1289). Only
+# the speech score counts: singing would bring a song's lyrics into the transcript.
+#
+# `threshold` is the smoothed speech score a frame needs; the region it starts is ended, padded
+# and merged with Silero's by the same pad and silence as above. Pinned to a commit and baked
+# into the Hugging Face cache, like the other models here.
+FIREREDVAD_MODEL = os.environ.get('CFG_FIREREDVAD_MODEL', 'FireRedTeam/FireRedVAD')
+FIREREDVAD_REVISION = os.environ.get('CFG_FIREREDVAD_REVISION', '7990aaccc6b7aec1e527743bd30201f2c4a03b8c')
+WHISPER_AED_SPEECH_THRESHOLD = float(os.environ.get('CFG_WHISPER_AED_SPEECH_THRESHOLD', '0.4'))
+
+# How much audio the AED model's features are made from at a time, in seconds. Its feature
+# extractor copies the samples into a Python list, which for an hour of audio is gigabytes.
+AED_PIECE_SECONDS = 120
+
+
 # Segments the decoder itself rates this likely to be non-speech are dropped.
 #
 # Whisper scores every window for "there is no speech here" before decoding it, and the
@@ -179,6 +198,23 @@ WHISPER_NO_SPEECH_PROB_MAX = float(os.environ.get('CFG_WHISPER_NO_SPEECH_PROB_MA
 # language, is held to WHISPER_NO_SPEECH_PROB_MAX alone. A constant, like the credit filter, so
 # it stays out of the transcript signature (inference_ops.transcribe_signature).
 WHISPER_LONE_FOREIGN_NO_SPEECH_PROB_MAX = 0.5
+
+# A segment that spreads a few words over a long stretch of the speech it was given, and that the
+# decoder rated as possibly not speech, is dropped. Over music or noise whisper writes one stock
+# line ("Thank you for watching", "Välkommen tillbaka") timed across a whole 30-second window, and
+# scores it no-speech 0.5-0.8, under WHISPER_NO_SPEECH_PROB_MAX; a real line that long and that
+# sparse is one the decoder was sure of. Measured on the decoder's own timing, before the line is
+# placed back in the file (ein/core#1289). Constants, like the ceiling above.
+WHISPER_SPARSE_SECONDS = 15.0
+WHISPER_SPARSE_WORDS_PER_SECOND = 0.4
+WHISPER_SPARSE_NO_SPEECH_PROB_MIN = 0.45
+
+# A transcript of a few words, every line of which the decoder rated as more likely than not
+# no speech, is dropped whole: over a near-silent clip whisper writes "Hej!", "Hej då!" or a
+# credit, alone, scored no-speech 0.6-0.8, while a few real words spoken into such a clip score
+# under 0.5 (ein/core#1289). A constant, like the ceilings above.
+WHISPER_SHORT_WORDS = 10
+WHISPER_SHORT_NO_SPEECH_PROB_MIN = 0.6
 
 # Speaker diarization: who is talking, and between which seconds. Same baked-model rule as
 # WHISPER_MODEL (the Containerfile), at a pinned commit so a rebuild cannot change the turns under
@@ -971,6 +1007,12 @@ def catalog() -> dict[str, dict]:
         "whisper": {
             "model": WHISPER_MODEL, "device": "auto",
             "purpose": "Speech recognition: transcribes what is said in videos and recordings, detecting the language.",
+            "ops": ["speech.transcribe"],
+        },
+        "fireredvad": {
+            "model": FIREREDVAD_MODEL, "device": "cpu",
+            "purpose": "Finds where speech is, apart from singing and music, so speech the Silero VAD misses still "
+                       "reaches the transcriber.",
             "ops": ["speech.transcribe"],
         },
         "sortformer": {
@@ -1775,6 +1817,24 @@ def whisper(device: str, compute_type: str):
         return faster_whisper().WhisperModel(WHISPER_MODEL, device=device, compute_type=compute_type)
 
     return _get(key, load)
+
+
+def fireredvad_aed():
+    """FireRedVAD's AED model (speech, singing, music) at FIREREDVAD_REVISION, on the CPU.
+
+    A few megabytes and a hundred times faster than real time there, so it never waits for the
+    card. Its two files are baked into the Hugging Face cache; asked by commit, the cache answers
+    without the network.
+    """
+    def load():
+        from fireredvad import FireRedAed, FireRedAedConfig
+        from huggingface_hub import hf_hub_download
+
+        for name in ("cmvn.ark", "model.pth.tar"):
+            path = hf_hub_download(FIREREDVAD_MODEL, f"AED/{name}", revision=FIREREDVAD_REVISION)
+        return FireRedAed.from_pretrained(os.path.dirname(path), FireRedAedConfig(use_gpu=False))
+
+    return _get("fireredvad:cpu", load)
 
 
 def _nemo_checkpoint(repo: str, revision: str) -> str:

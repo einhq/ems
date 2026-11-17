@@ -3,7 +3,8 @@
 Perl startup and tag-table loading cost more than reading a file's metadata, so `-stay_open`
 keeps a few exiftool processes alive and feeds each one request at a time through stdin, the
 answer delimited by `{ready<n>}`. Same arguments as one-shot `exiftool -n -j`, minus the tags
-nobody wants (binary dumps, file-system dates that say nothing about the media).
+nobody wants (binary dumps, file-system dates that say nothing about the media), plus the one tag
+`exiftool.config` defines: `LensName`, the printed `LensID`.
 
 A path containing a newline cannot cross the line protocol; that name gets a one-shot run.
 """
@@ -13,9 +14,13 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from pathlib import Path
 
 from ..errors import EmsError, TOOL_FAILED
 from .run import require, run
+
+# `-config` is read only as the first argument of exiftool's command line.
+CONFIG = ("-config", str(Path(__file__).with_name("exiftool.config")))
 
 READ_ARGS = (
     "-x", "DataDump",
@@ -47,7 +52,7 @@ class _StayOpen:
     async def _start(self) -> None:
         env = dict(os.environ, LC_ALL="C")
         self.proc = await asyncio.create_subprocess_exec(
-            self.executable, "-stay_open", "True", "-@", "-",
+            self.executable, *CONFIG, "-stay_open", "True", "-@", "-",
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=env,
         )
 
@@ -129,7 +134,7 @@ class ExifTool:
 
     async def extract(self, path: str) -> dict:
         if "\n" in path or "\r" in path:
-            done = await run([self.executable, *READ_ARGS, path], timeout=self.timeout)
+            done = await run([self.executable, *CONFIG, *READ_ARGS, path], timeout=self.timeout)
             if done.code != 0 and not done.stdout.strip():
                 raise EmsError(TOOL_FAILED, f"exiftool failed: {done.tail()}")
             return _parse(done.stdout, path)

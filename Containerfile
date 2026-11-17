@@ -58,6 +58,9 @@ ARG WHISPER_MODEL=large-v3
 # curl + xz-utils are for the ffmpeg fetch below, ca-certificates for every download; tzdata is
 # what TZ names; tini is PID 1 (ENTRYPOINT below). The slim base has none of them.
 #
+# libarchive-zip-perl lets exiftool look inside a ZIP, which is how it tells a Word, Excel or
+# PowerPoint file (.docx, .xlsx, .pptx) from a plain ZIP archive; without it each is `application/zip`.
+#
 # libreoffice-writer-nogui converts Word, RTF, OpenDocument and text files to PDF for
 # `document.renditions`, run as its own process; fonts-liberation gives it fonts metric-compatible
 # with Times, Arial and Courier, so a page breaks where the author's did.
@@ -66,6 +69,7 @@ ARG WHISPER_MODEL=large-v3
 # below, which also fingerprints audio, with its chromaprint muxer.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libimage-exiftool-perl \
+    libarchive-zip-perl \
     imagemagick \
     libheif-plugin-aomenc \
     curl \
@@ -451,6 +455,22 @@ RUN mkdir -p /opt/deblur \
     done
 ENV CFG_DEBLUR_ROOT=/opt/deblur
 
+# The second speech detector in front of whisper (inference_ops.speech_chunks): FireRedVAD's AED
+# model (Apache-2.0, Xiaohongshu's FireRed team), which scores speech, singing and music. The
+# package without its declared dependencies: it needs kaldiio and kaldi-native-fbank beside the
+# torch, numpy and soundfile already here, and textgrid only for files EMS never writes. Its two
+# files are baked into the Hugging Face cache at a pinned commit, where model_registry asks for
+# them by the same commit, so a rebuild cannot move the speech under stored transcripts. ~2.4 MB.
+ARG FIREREDVAD_REVISION=7990aaccc6b7aec1e527743bd30201f2c4a03b8c
+RUN pip install --no-cache-dir --no-deps fireredvad==0.0.2 kaldiio==2.18.1 kaldi-native-fbank==1.23.1 \
+    && python3 -c "import os, numpy; from huggingface_hub import hf_hub_download; \
+    from fireredvad import FireRedAed, FireRedAedConfig; \
+    paths = [hf_hub_download('FireRedTeam/FireRedVAD', 'AED/' + name, revision='${FIREREDVAD_REVISION}') for name in ('cmvn.ark', 'model.pth.tar')]; \
+    aed = FireRedAed.from_pretrained(os.path.dirname(paths[0]), FireRedAedConfig(use_gpu=False)); \
+    _, probs = aed.detect((numpy.zeros(16000, numpy.int16), 16000)); \
+    assert probs.shape[1] == 3, probs.shape"
+ENV CFG_FIREREDVAD_REVISION=${FIREREDVAD_REVISION}
+
 # ffmpeg 9.0.1, from BtbN's static LGPL builds. The image installs no distro ffmpeg.
 #
 # The LGPL build, not the GPL one: EMS encodes AV1 only, so it needs none of what --enable-gpl
@@ -497,6 +517,13 @@ RUN pip install --no-cache-dir "fastapi>=0.115" "uvicorn[standard]>=0.30"
 # connections (ems/files_connect.py); the container needs /dev/fuse and SYS_ADMIN for it.
 RUN apt-get update && apt-get install -y --no-install-recommends sshfs socat \
     && rm -rf /var/lib/apt/lists/*
+
+# Chromium and a virtual X display for it, which render a web page into live video (`pages`,
+# ems/pages.py); ffmpeg grabs the display with x11grab. DejaVu fills in the characters Liberation
+# lacks.
+RUN apt-get update && apt-get install -y --no-install-recommends chromium xvfb fonts-dejavu-core \
+    && rm -rf /var/lib/apt/lists/* \
+    && /opt/ffmpeg/bin/ffmpeg -hide_banner -devices | grep -q x11grab
 
 # Nothing installed above brought back PyAV, the CPU onnxruntime or Debian's FFmpeg libraries.
 RUN ! pip show av 2>/dev/null && ! pip show onnxruntime 2>/dev/null \

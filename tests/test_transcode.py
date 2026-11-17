@@ -201,7 +201,7 @@ async def test_capabilities_name_the_encoder_and_the_budget(client, monkeypatch)
     install(monkeypatch, ffmpeg, gpu=False)
     r = await client.get("/v0/capabilities")
     caps = r.json()
-    assert caps["encode"] == {"video_encoder": "libsvtav1", "cpu_budget": "4000/170/64"}
+    assert caps["encode"]["video_encoder"] == "libsvtav1" and caps["encode"]["cpu_budget"] == "4000/170/64"
     assert caps["limits"]["encodes"] == 2
     assert "video.transcode" in caps["ops"] and "audio.transcode" in caps["ops"]
 

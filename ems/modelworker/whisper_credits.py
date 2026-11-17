@@ -19,6 +19,7 @@ _THANKS = [
     # Swedish
     r"(tusen )?tack för att (du|ni) (har )?(tittat|tittade|såg|sett|lyssnat|lyssnade)"
     r"( på (den här|denna|min|vår) (video|videon|videoklipp|film|filmen|kanal|kanalen))?",
+    r"(välkommen|välkomna) (till|att titta på) (den här|denna|min|vår) (video|videon|kanal|kanalen)",
     # Norwegian
     r"(tusen )?takk for at (du|dere) (har )?(så|sett|ser|lyttet|hørte)( på| med)?( (denne|videoen|videoen min))?",
     # Danish
@@ -40,6 +41,8 @@ _CREDITS = [
     r"textning ?nu",
     r"undertexter från",
     r"undertextning av",
+    r"textat av",
+    r"btistudios",
     r"teksting av",
     r"tekstet av",
     r"danske tekster",

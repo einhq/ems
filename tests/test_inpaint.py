@@ -2,6 +2,7 @@
 request's refusals."""
 
 import os
+import shutil
 
 import pytest
 
@@ -75,6 +76,28 @@ def test_an_alpha_channel_is_kept_as_it_is(tmp_path):
     filled = inpaint.fill(picture.copy(), mask != 0, "telea", 3)
     assert np.array_equal(filled[:, :, 3], picture[:, :, 3])
     assert not np.array_equal(filled[:, :, :3], picture[:, :, :3])
+
+
+@pytest.mark.skipif(not shutil.which("magick"), reason="ImageMagick is not installed")
+def test_a_picture_opencv_cannot_decode_is_read_by_imagemagick_as_opencv_would_have(tmp_path, monkeypatch):
+    from ems.tools import inpaint
+
+    pictures = {
+        "colour.png": gradient(depth=8),
+        "clear.png": gradient(depth=8, channels=4),
+        "deep.tif": gradient(depth=16),
+        "grey.png": gradient(depth=16, channels=1),
+    }
+    paths = {name: save(tmp_path / name, picture) for name, picture in pictures.items()}
+    broken = tmp_path / "broken.png"
+    broken.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\0" * 32)
+    monkeypatch.setattr(cv2, "imread", lambda path, flags: None)
+    for name, picture in pictures.items():
+        read = inpaint.read(paths[name], "file")
+        assert read.dtype == picture.dtype and np.array_equal(read, picture), name
+    with pytest.raises(inpaint.Refusal) as refused:
+        inpaint.read(str(broken), "file")
+    assert refused.value.code == "undecodable"
 
 
 async def test_a_grey_picture_and_an_empty_mask_come_back_as_they_are(client, dirs):

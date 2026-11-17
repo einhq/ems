@@ -60,3 +60,22 @@ async def test_probe_video_fixture_without_ffprobe_still_answers(client, dirs):
         assert result["decodable"] is True and "ffprobe" in result["raw"] and result["sound"]["codec"]
     else:
         assert "ffprobe" not in result["raw"] and body["meta"]["warnings"]
+
+
+@needs_exiftool
+async def test_probe_names_a_lens_known_only_by_number(client, dirs):
+    """A Pentax names its lens only as a type, `8 215`; `LensName` is what exiftool's lens table calls it."""
+    ro, _ = dirs
+    shutil.copy(f"{DATA}/pentax-k7-lens.jpg", ro / "pentax.jpg")
+    r = await client.post("/v0/media/probe", json={"file": {"path": str(ro / "pentax.jpg")}})
+    exif = r.json()["result"]["raw"]["exiftool"]
+    assert exif["LensID"] == "8 215"
+    assert exif["LensName"] == "smc PENTAX-DA 18-135mm F3.5-5.6 ED AL [IF] DC WR"
+
+    # A type the table does not know has no name.
+    unknown = ro / "unknown.jpg"
+    shutil.copy(f"{DATA}/pentax-k7-lens.jpg", unknown)
+    subprocess.run(["exiftool", "-q", "-overwrite_original", "-n", "-LensType=8 250", str(unknown)], check=True)
+    r = await client.post("/v0/media/probe", json={"file": {"path": str(unknown)}})
+    exif = r.json()["result"]["raw"]["exiftool"]
+    assert exif["LensID"] == "8 250" and "LensName" not in exif

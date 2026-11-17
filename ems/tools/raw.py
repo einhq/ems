@@ -4,9 +4,15 @@ ImageMagick reads a RAW through LibRaw as well, but always at full size: a 24 Mp
 takes ~9 s to demosaic, for a ladder whose largest output is 2560 px and a face crop of at most
 384 (ein/core#969). LibRaw's half-size mode skips the demosaic, taking each 2x2 block of the
 sensor as one pixel, and reads the same file in ~1 s, at exactly half the sensor frame. A
-stored box is a fraction of that frame, so it lands on the same place in either; the read is
+stored box is a fraction of the frame, so it lands on the same place in either; the read is
 half-size whenever every output can still be cut from it, and full otherwise (a small face in a
 large frame).
+
+The frame is the camera's own crop of the sensor image, as LibRaw reports it from the RAW
+(`crop_*`): what the embedded preview shows, and so what a box `faces.detect` measured on it is a
+fraction of. LibRaw's developed image is a few pixels larger — a 350D's is 3474x2314 around a
+3456x2304 crop — so the decode cuts the crop out, scaled to the size it read at. A RAW naming
+no crop (a NEF) keeps LibRaw's whole image.
 
 A full read takes the cheapest demosaic that still looks like the photo: PPG on a Bayer sensor,
 and on an X-Trans the generic linear one, where Fujifilm's own (which LibRaw runs for anything
@@ -20,7 +26,7 @@ the camera's white balance. It goes to a PPM, which costs no encode and loses no
 
 LibRaw runs in a process of its own (`python -m ems.tools.raw SOURCE OUT`, the outputs' needs on
 stdin), so a decode is a tool like any other: niced, stopped when it stalls, killed with its caller.
-It prints `frame W H`, the full sensor frame, which is what the renditions report as the source's.
+It prints `frame W H`, the frame at full size, which is what the renditions report as the source's.
 """
 
 from __future__ import annotations
@@ -41,8 +47,29 @@ PACKAGE_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(_
 @dataclass
 class Decoded:
     path: str
-    # The full sensor frame, unrotated, whatever size `path` was read at.
+    # The camera's crop of the sensor frame at full size, unrotated, whatever size `path` was read at.
     frame: tuple[int, int]
+
+
+def camera_crop(sizes) -> tuple[int, int, int, int]:
+    """The camera's crop as (left, top, width, height) in LibRaw's frame (rawpy's `sizes`), or the
+    whole frame when the RAW names none. LibRaw gives the crop on the raw sensor area, which the
+    frame starts `left_margin`, `top_margin` into."""
+    whole = (0, 0, sizes.width, sizes.height)
+    if sizes.crop_width <= 0 or sizes.crop_height <= 0:
+        return whole
+    left = max(0, sizes.crop_left_margin - sizes.left_margin)
+    top = max(0, sizes.crop_top_margin - sizes.top_margin)
+    width, height = min(sizes.crop_width, sizes.width - left), min(sizes.crop_height, sizes.height - top)
+    return (left, top, width, height) if width > 0 and height > 0 else whole
+
+
+def cut(rgb, crop: tuple[int, int, int, int], frame: tuple[int, int]):
+    """`crop`, given in a frame, cut out of a raster of that frame read at any size."""
+    rows, cols = rgb.shape[:2]
+    sx, sy = cols / frame[0], rows / frame[1]
+    left, top = round(crop[0] * sx), round(crop[1] * sy)
+    return rgb[top : min(rows, top + round(crop[3] * sy)), left : min(cols, left + round(crop[2] * sx))]
 
 
 def half_size(frame: tuple[int, int], angle: int, plans: list[magick.Plan]) -> bool:
@@ -86,12 +113,14 @@ def main(argv: list[str]) -> int:
     source, out = argv[1], argv[2]
     needed = json.load(sys.stdin)
     with rawpy.imread(source) as raw:
-        frame = (raw.sizes.width, raw.sizes.height)
+        whole = (raw.sizes.width, raw.sizes.height)
+        crop = camera_crop(raw.sizes)
+        frame = crop[2:]
         half = half_size(frame, needed["angle"], plans_of(needed))
         xtrans = raw.raw_pattern is not None and raw.raw_pattern.shape == (6, 6)
         demosaic = rawpy.DemosaicAlgorithm.LINEAR if xtrans else rawpy.DemosaicAlgorithm.PPG
         rgb = raw.postprocess(half_size=half, demosaic_algorithm=demosaic, user_flip=0, use_camera_wb=True, output_bps=8)
-    Image.fromarray(rgb).save(out, format="PPM")
+    Image.fromarray(cut(rgb, crop, whole)).save(out, format="PPM")
     print(f"frame {frame[0]} {frame[1]}")
     return 0
 

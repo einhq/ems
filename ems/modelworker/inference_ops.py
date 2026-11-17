@@ -49,11 +49,13 @@ def transcribe_signature(language: str | None = None, min_silence_ms: int | None
     that drifted from what is actually written would mark every file stale forever.
 
     So every setting that changes the output belongs in here, and nothing else does: the
-    model, where and in what precision it runs on this host, the VAD, the no-speech ceiling, the
-    language — pinned, or how it is detected — and whether words are timed. Beam size, the conditioning flag, the
-    credit-line filter (whisper_credits) and the ceiling for a lone foreign line are constants; if one becomes
-    configurable it goes in too. `device` names another place than the one the card's share puts
-    it in now (`transcribe_places`).
+    model, where and in what precision it runs on this host, the speech detectors (Silero's
+    threshold and FireRedVAD's, and the pad and silence both share), the no-speech ceiling, the
+    language — pinned, or how it is detected — and whether words are returned. Beam size, the
+    conditioning flag, the credit-line filter (whisper_credits), the ceilings for a lone foreign
+    line and a short transcript, and the sparse-line rule (`is_sparse`) are constants; if one becomes configurable it goes
+    in too. `device` names another place than the one the card's share puts it in now
+    (`transcribe_places`).
     """
     # Per-request overrides (the HTTP API's `language`, `vad.min_silence_ms`, `word_timestamps`)
     # take part exactly like the configured values do, so a transcript made with them is
@@ -65,7 +67,7 @@ def transcribe_signature(language: str | None = None, min_silence_ms: int | None
     words = registry.WHISPER_WORD_TIMESTAMPS if word_timestamps is None else word_timestamps
     return (
         f"{_whisper_model_name()}"
-        f":vad={vad['threshold']}/{vad['speech_pad_ms']}/{vad['min_silence_duration_ms']}"
+        f":vad={vad['threshold']}+aed{registry.WHISPER_AED_SPEECH_THRESHOLD}/{vad['speech_pad_ms']}/{vad['min_silence_duration_ms']}"
         f",nospeech={registry.WHISPER_NO_SPEECH_PROB_MAX}"
         f",on={_whisper_placement(device)}"
         f",lang={lang or _detection_signature()}"
@@ -119,32 +121,201 @@ def decode_speech_audio(model, file_path: str):
     return np.frombuffer(frames, dtype="<i2").astype(np.float32) / 32768.0
 
 
-def language_votes(model, audio, vad_params: dict, windows: int) -> list:
+# The sampling rate of the WAV `transcribe` reads, whisper's own and both speech detectors'.
+SPEECH_RATE = 16000
+
+
+def speech_chunks(file_path: str, audio, vad_params: dict) -> list[dict]:
+    """Where the file holds speech, as `{"start", "end"}` in samples: what Silero keeps under
+    `vad_params`, together with what FireRedVAD's speech score keeps (`aed_spans`), merged.
+
+    Either detector alone misses speech the other hears: Silero scores some plain speech as
+    none (old tape, a voice far from the microphone, speech under music), and FireRedVAD some
+    a sung or shouted line Silero keeps. Only FireRedVAD's speech score counts, not its singing.
+    `audio` is the file's samples (`decode_speech_audio`); FireRedVAD reads the WAV itself, at
+    the integer scale its features are made for.
+    """
+    vad = registry.faster_whisper().vad
+    silero = vad.get_speech_timestamps(audio, vad.VadOptions(**vad_params), sampling_rate=SPEECH_RATE)
+    spans = aed_spans(
+        aed_speech(file_path), registry.WHISPER_AED_SPEECH_THRESHOLD,
+        vad_params["speech_pad_ms"] / 1000, vad_params["min_silence_duration_ms"] / 1000, len(audio) / SPEECH_RATE,
+    )
+    return merge_chunks(silero + [{"start": int(a * SPEECH_RATE), "end": int(b * SPEECH_RATE)} for a, b in spans])
+
+
+def aed_speech(file_path: str) -> list:
+    """FireRedVAD's speech score for every 10 ms of a 16-bit mono 16 kHz WAV, from its AED model.
+
+    Read registry.AED_PIECE_SECONDS at a time. Each piece contributes exactly one score per 10 ms
+    of it, so a piece that yields a frame fewer than its length does not shift the next.
+    """
+    import soundfile
+
+    model = registry.fireredvad_aed()
+    out = []
+    with soundfile.SoundFile(file_path) as handle:
+        for block in handle.blocks(blocksize=registry.AED_PIECE_SECONDS * SPEECH_RATE, dtype="int16"):
+            frames = len(block) // AED_FRAME_SAMPLES
+            scores = []
+            if len(block) >= AED_MIN_SAMPLES:
+                _result, probabilities = model.detect((block, SPEECH_RATE))
+                scores = probabilities[:, 0].tolist()
+            out.extend((scores + [0.0] * frames)[:frames])
+    return out
+
+
+# FireRedVAD's frame step, and the shortest audio its features are made from (one 25 ms frame).
+AED_FRAME_SAMPLES = 160
+AED_FRAME_SECONDS = AED_FRAME_SAMPLES / SPEECH_RATE
+AED_MIN_SAMPLES = 400
+
+# The frames FireRedVAD's own post-processing averages its scores over before thresholding.
+AED_SMOOTH_FRAMES = 5
+
+
+def aed_spans(scores: list, threshold: float, pad: float, min_silence: float, duration: float) -> list[tuple]:
+    """Regions of speech, in seconds, from per-frame speech scores, ended and padded like Silero's.
+
+    The scores are averaged over AED_SMOOTH_FRAMES. A region starts at a frame at `threshold`
+    and ends once the score has stayed under `threshold - 0.15` for `min_silence` (Silero's
+    hysteresis); each is padded by `pad` on both sides, kept inside the file, and overlapping
+    ones are merged.
+    """
+    half = AED_SMOOTH_FRAMES // 2
+    count = len(scores)
+    prefix = [0.0]
+    for score in scores:
+        prefix.append(prefix[-1] + score)
+    low = max(threshold - 0.15, 0.01)
+    spans = []
+    active, start, last = False, 0.0, 0.0
+    for index in range(count):
+        lo, hi = max(0, index - half), min(count, index + half + 1)
+        score = (prefix[hi] - prefix[lo]) / AED_SMOOTH_FRAMES
+        time_ = index * AED_FRAME_SECONDS
+        if score >= threshold:
+            if not active:
+                active, start = True, time_
+            last = time_ + AED_FRAME_SECONDS
+        elif active and score < low and time_ - last >= min_silence:
+            spans.append((start, last))
+            active = False
+    if active:
+        spans.append((start, last))
+    padded = [(max(0.0, a - pad), min(duration, b + pad)) for a, b in spans]
+    return [(c["start"], c["end"]) for c in merge_chunks([{"start": a, "end": b} for a, b in padded])]
+
+
+def merge_chunks(chunks: list[dict]) -> list[dict]:
+    """`{"start", "end"}` chunks sorted, with those that overlap or touch made one."""
+    out: list[dict] = []
+    for chunk in sorted(chunks, key=lambda c: c["start"]):
+        if chunk["end"] <= chunk["start"]:
+            continue
+        if out and chunk["start"] <= out[-1]["end"]:
+            out[-1]["end"] = max(out[-1]["end"], chunk["end"])
+        else:
+            out.append({"start": chunk["start"], "end": chunk["end"]})
+    return out
+
+
+def speech_samples(audio, chunks: list[dict]):
+    """The samples of `chunks` joined into one stream: what the decoder and the language vote read."""
+    import numpy as np
+
+    return np.concatenate([audio[c["start"]:c["end"]] for c in chunks])
+
+
+def is_sparse(seconds: float, text: str, no_speech: float | None) -> bool:
+    """Whether a segment the decoder timed at `seconds` spreads `text` too thin to be speech it
+    heard: long, few words a second, and rated as possibly not speech (WHISPER_SPARSE_*)."""
+    if seconds < registry.WHISPER_SPARSE_SECONDS or no_speech is None:
+        return False
+    return (
+        len(text.split()) / seconds < registry.WHISPER_SPARSE_WORDS_PER_SECOND
+        and no_speech >= registry.WHISPER_SPARSE_NO_SPEECH_PROB_MIN
+    )
+
+
+def is_short_and_unsure(texts: list[str], no_speech: list) -> bool:
+    """Whether a whole transcript, its lines' `texts` and their `no_speech` scores, is a few words
+    the decoder rated, every one of them, more likely than not no speech (WHISPER_SHORT_*)."""
+    if not texts or sum(len(text.split()) for text in texts) > registry.WHISPER_SHORT_WORDS:
+        return False
+    return all(score is not None and score >= registry.WHISPER_SHORT_NO_SPEECH_PROB_MIN for score in no_speech)
+
+
+class ChunkTimes:
+    """Maps a time in the joined chunks back to the file, chunk by chunk."""
+
+    def __init__(self, chunks: list[dict], rate: int):
+        self.ends = []  # each chunk's end, in seconds of the joined stream
+        self.shifts = []  # what to add to a time inside each chunk to place it in the file
+        joined = 0
+        for chunk in chunks:
+            self.shifts.append((chunk["start"] - joined) / rate)
+            joined += chunk["end"] - chunk["start"]
+            self.ends.append(joined / rate)
+
+    def index(self, time_: float) -> int:
+        """The chunk a time in the joined stream falls in; past the end, the last."""
+        import bisect
+
+        return min(bisect.bisect_right(self.ends, time_), len(self.ends) - 1)
+
+    def place(self, time_: float, index: int) -> float:
+        """`time_` in the file, inside chunk `index`."""
+        start = self.ends[index - 1] if index else 0.0
+        return round(min(max(time_, start), self.ends[index]) + self.shifts[index], 2)
+
+
+def restore_segments(segment, chunks: list[dict], rate: int) -> list[dict]:
+    """A decoded segment placed back in the file: one entry per chunk its words fall in.
+
+    The decoder reads the chunks joined, so a segment can run from one chunk into the next
+    across a gap that was cut out — a short line timed over minutes. Each word goes to the chunk
+    its middle falls in, and a segment whose words fall in several becomes one entry each. A
+    segment without words keeps the chunk it starts in and ends there at the latest.
+    """
+    times = ChunkTimes(chunks, rate)
+    words = [w for w in (getattr(segment, "words", None) or []) if w.start is not None and w.end is not None]
+    if not words:
+        index = times.index(segment.start)
+        return [{"start": times.place(segment.start, index), "end": times.place(segment.end, index),
+                 "text": segment.text.strip()}]
+    groups: list[tuple[int, list]] = []
+    for word in words:
+        index = times.index((word.start + word.end) / 2)
+        if groups and groups[-1][0] == index:
+            groups[-1][1].append(word)
+        else:
+            groups.append((index, [word]))
+    out = []
+    for index, group in groups:
+        text = segment.text.strip() if len(groups) == 1 else "".join(w.word for w in group).strip()
+        placed = [{"start": times.place(w.start, index), "end": times.place(w.end, index), "word": w.word}
+                  for w in group if w.word.strip()]
+        out.append({"start": times.place(group[0].start, index), "end": times.place(group[-1].end, index),
+                    "text": text, "words": placed})
+    return out
+
+
+def language_votes(model, speech, windows: int) -> list:
     """Whisper's language probabilities for up to `windows` 30-second windows of the speech.
 
-    `audio` is the file's samples at the model's sampling rate (`decode_speech_audio`). It is
-    VAD-filtered the way `transcribe` will do it, so what is judged
-    is the speech the decoder will hear, not the file's opening — a clip that starts on
-    wind noise or a doorbell gets judged on what is said after it. The windows are spread
-    across all of that speech (first, middle and last for three), so a guest speaking at
-    the start is one vote among several. A trailing window shorter than five seconds says
-    little and is left out unless it is all there is.
+    `speech` is the speech the decoder will hear (`speech_samples` of `speech_chunks`), so what
+    is judged is that, not the file's opening — a clip that starts on wind noise or a doorbell
+    gets judged on what is said after it. The windows are spread across all of it (first,
+    middle and last for three), so a guest speaking at the start is one vote among several. A
+    trailing window shorter than five seconds says little and is left out unless it is all
+    there is.
 
     Each entry maps every language code whisper knows to its probability for that window.
-    Empty when the VAD found no speech; the decoder will find none either.
     """
     import math
 
-    import numpy as np
-
-    vad = registry.faster_whisper().vad
-
     rate = model.feature_extractor.sampling_rate
-    chunks = vad.get_speech_timestamps(audio, vad.VadOptions(**vad_params))
-    if not chunks:
-        return []
-    speech = np.concatenate(vad.collect_chunks(audio, chunks)[0])
-
     per_window = model.feature_extractor.n_samples
     count = max(1, math.ceil(len(speech) / per_window))
     if count > 1 and len(speech) - (count - 1) * per_window < 5 * rate:
@@ -291,9 +462,10 @@ def transcribe(file_path: str, language: str | None = None, min_silence_ms: int 
     and once joined they cannot be recovered. `text` is still the flat join, because most
     callers only want that.
 
-    The decode arguments are not defaults. See model_registry for why each is set:
-    VAD (whisper_vad_parameters) so silence is not decoded into invented speech, tuned so
-    that faint and outdoor speech still reaches the decoder; no conditioning on previous text
+    The decode arguments are not defaults. See model_registry for why each is set: two speech
+    detectors (`speech_chunks`), so silence is not decoded into invented speech and speech either
+    one misses still reaches the decoder; segments placed back in the file word by word
+    (`restore_segments`), so none spans a gap that was cut out; no conditioning on previous text
     so a bad segment cannot drag the rest of the file into a repetition loop; the language
     either pinned (WHISPER_LANGUAGE) or detected over several windows of the speech with the
     expected languages given the benefit of the doubt (WHISPER_LANGUAGES, `language_votes`
@@ -301,8 +473,10 @@ def transcribe(file_path: str, language: str | None = None, min_silence_ms: int 
     a ceiling on the decoder's own no-speech score (WHISPER_NO_SPEECH_PROB_MAX) that
     drops the fluent sentences it invents over a window it rated as silence, and a tighter one
     for a transcript that is a single line in a language the archive is not expected to hold
-    (WHISPER_LONE_FOREIGN_NO_SPEECH_PROB_MAX); and a filter (whisper_credits) for the
-    thank-you and credit lines that get under those ceilings.
+    (WHISPER_LONE_FOREIGN_NO_SPEECH_PROB_MAX) and for a transcript of a few words in any
+    (`is_short_and_unsure`); a stock line spread thin over a long stretch (`is_sparse`) and a line
+    with no letters or digits in it; and a filter (whisper_credits) for the thank-you and credit
+    lines that get under those ceilings.
     """
     if not os.path.exists(file_path):
         raise FileNotFoundError(f"audio not found: {file_path}")
@@ -322,6 +496,7 @@ def transcribe(file_path: str, language: str | None = None, min_silence_ms: int 
         # move to the CPU. The stamp names this place, whatever the share says by the end.
         device = registry.whisper_device()
         model = registry.whisper(device, registry.WHISPER_COMPUTE[device])
+        rate = model.feature_extractor.sampling_rate
 
         # Detection is ours, not the decoder's: whisper would read the first window of
         # the file and decide for all of it. The choice is then handed to the decoder as
@@ -331,8 +506,11 @@ def transcribe(file_path: str, language: str | None = None, min_silence_ms: int 
         # The decoder takes the samples, never the path: faster-whisper would read a path with
         # PyAV, which the image does not carry. Detection reads the same samples.
         source = decode_speech_audio(model, file_path)
-        if not lang_hint:
-            votes = language_votes(model, source, vad_params, registry.WHISPER_LANGUAGE_WINDOWS)
+        duration = len(source) / rate
+        chunks = speech_chunks(file_path, source, vad_params)
+        speech = speech_samples(source, chunks) if chunks else None
+        if not lang_hint and speech is not None:
+            votes = language_votes(model, speech, registry.WHISPER_LANGUAGE_WINDOWS)
             detected = choose_language(votes, registry.WHISPER_LANGUAGES, registry.WHISPER_LANGUAGE_FLOOR)
             if detected and detected["language"] != detected["detected"]:
                 print(
@@ -342,59 +520,55 @@ def transcribe(file_path: str, language: str | None = None, min_silence_ms: int 
                     file=sys.stderr, flush=True,
                 )
         voted = time.monotonic()
-        # segments is a generator — consume it before releasing the model. The call runs the VAD
-        # and computes the features; the loop below runs the decoder.
+        if speech is None:
+            return [], {"device": device, "language": lang_hint or None, "language_probability": 0.0, "duration": duration}
+
+        # The detectors' chunks, joined, are what is decoded; faster-whisper's own VAD stays off.
+        # Words are always aligned: they are what places a segment back in the file.
         segments, info = model.transcribe(
-            source,
+            speech,
             beam_size=5,
             language=lang_hint or (detected["language"] if detected else None),
-            vad_filter=True,
-            vad_parameters=vad_params,
+            vad_filter=False,
             condition_on_previous_text=False,
-            word_timestamps=want_words,
+            word_timestamps=True,
         )
         # Empty segments are dropped here rather than downstream: a cue with no text is
         # not a subtitle, and an empty chunk is not worth a vector. So are segments the
-        # decoder rated as almost certainly not speech, and the credit lines it invents
-        # over noise — those are its hallucinations, and they read as sentences, which is
-        # exactly why they must not reach search.
+        # decoder rated as almost certainly not speech, and the lines it invents over noise
+        # — those are its hallucinations, and they read as sentences, which is exactly why
+        # they must not reach search. `segments` is a generator: the loop runs the decoder.
         prepared = time.monotonic()
         out = []
         scores = []
         for segment in segments:
-            text = segment.text.strip()
-            if not text:
-                continue
             no_speech = getattr(segment, "no_speech_prob", None)
             if no_speech is not None and no_speech >= registry.WHISPER_NO_SPEECH_PROB_MAX:
                 continue
-            if is_credit_line(text):
+            if is_sparse(segment.end - segment.start, segment.text, no_speech) or is_credit_line(segment.text):
                 continue
-            entry = {"start": float(segment.start), "end": float(segment.end), "text": text}
-            # Only present when word timestamps were asked for. A segment cannot be split
-            # at a speaker change without knowing where inside it each word falls.
-            words = getattr(segment, "words", None) or []
-            aligned = [
-                {"start": float(w.start), "end": float(w.end), "word": w.word}
-                for w in words
-                if w.start is not None and w.end is not None and w.word.strip()
-            ]
-            if aligned:
-                entry["words"] = aligned
-            out.append(entry)
-            scores.append(no_speech)
+            for entry in restore_segments(segment, chunks, rate):
+                text = entry["text"]
+                if not text or not any(ch.isalnum() for ch in text):
+                    continue
+                if not want_words:
+                    entry.pop("words", None)
+                out.append(entry)
+                scores.append(no_speech)
         # A lone line in a language the archive is not expected to hold is whisper's guess over
-        # music or noise more often than speech, and is held to a tighter no-speech ceiling.
+        # music or noise more often than speech, and is held to a tighter no-speech ceiling; so
+        # is a transcript of a few words in any language (`is_short_and_unsure`).
         language = detected["language"] if detected else None
         if (
             len(out) == 1 and language and registry.WHISPER_LANGUAGES
             and language not in registry.WHISPER_LANGUAGES
             and scores[0] is not None and scores[0] >= registry.WHISPER_LONE_FOREIGN_NO_SPEECH_PROB_MAX
-        ):
+        ) or is_short_and_unsure([entry["text"] for entry in out], scores):
             out = []
         # Where a transcription's time goes, by phase (ein/core#741).
         print(
-            f"transcribe: {os.path.basename(file_path)}: {float(info.duration or 0.0):.0f}s of audio, "
+            f"transcribe: {os.path.basename(file_path)}: {duration:.0f}s of audio, "
+            f"{len(speech) / rate:.0f}s of it speech, "
             f"language {voted - started:.1f}s, prepare {prepared - voted:.1f}s, "
             f"decode {time.monotonic() - prepared:.1f}s",
             file=sys.stderr, flush=True,
@@ -407,7 +581,7 @@ def transcribe(file_path: str, language: str | None = None, min_silence_ms: int 
             "device": device,
             "language": detected["language"] if detected else info.language,
             "language_probability": float(detected["probability"] if detected else info.language_probability or 0.0),
-            "duration": float(info.duration or 0.0),
+            "duration": duration,
         }
 
     with registry.family_lock(WHISPER):
@@ -1209,12 +1383,13 @@ def denoise(path: str, out: str, noise: str = "15", strength: float = 1.0, fmt: 
     """
     import cv2
     import denoise as denoising
+    import image_io
     import numpy as np
 
     # "could not load image" is how the front learns a picture is unsupported (worker.classify).
     if not cv2.haveImageReader(path):
         raise RuntimeError(f"could not load image: OpenCV has no reader for {os.path.basename(path)}")
-    picture = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+    picture = image_io.read_stored(path)
     if picture is None:
         raise Undecodable(f"{os.path.basename(path)} cannot be decoded")
     if picture.dtype not in (np.uint8, np.uint16):
@@ -1258,12 +1433,13 @@ def deblur(path: str, out: str, blur: str = "focus", strength: float = 1.0, edge
     """
     import cv2
     import deblur as deblurring
+    import image_io
     import numpy as np
 
     # "could not load image" is how the front learns a picture is unsupported (worker.classify).
     if not cv2.haveImageReader(path):
         raise RuntimeError(f"could not load image: OpenCV has no reader for {os.path.basename(path)}")
-    picture = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+    picture = image_io.read_stored(path)
     if picture is None:
         raise Undecodable(f"{os.path.basename(path)} cannot be decoded")
     if picture.dtype not in (np.uint8, np.uint16):

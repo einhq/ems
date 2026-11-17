@@ -190,6 +190,27 @@ def open_display_bgr(path: str, angle=0, mirror=False):
     return np.asarray(open_display(path, angle, mirror))[:, :, ::-1].copy()
 
 
+def read_stored(path: str):
+    """The picture as stored, as `cv2.imread` reads it unchanged: its own depth and channels, no
+    turn. One OpenCV cannot decode, such as a GIF whose data breaks off, is decoded by ImageMagick
+    as its renditions are (ems/tools/inpaint.py reads so for the tool ops). None when neither can."""
+    import subprocess
+
+    import cv2
+    import numpy as np
+
+    picture = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+    if picture is not None:
+        return picture
+    try:
+        done = subprocess.run(["magick", f"{path}[0]", "png:-"], capture_output=True, check=False)
+    except OSError:
+        return None
+    if not done.stdout:
+        return None
+    return cv2.imdecode(np.frombuffer(done.stdout, np.uint8), cv2.IMREAD_UNCHANGED)
+
+
 def _normalize_angle(angle) -> int:
     """Anything that is not a supported quarter turn is treated as no rotation."""
     try:

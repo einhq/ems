@@ -18,9 +18,10 @@ from ..tools import encode, nvml
 from ..tools.run import run, which
 from ..tools.versions import tool_version
 from ..worker import Worker
-from . import transcode
+from . import stream, transcode
 from .damage import producer as damage_producer
 from .faces import PRODUCER as FACES_PRODUCER
+from .speech import voiceprint_producer
 
 TOOLS = ("exiftool", "ffprobe", "ffmpeg", "magick")
 
@@ -436,6 +437,9 @@ def register(router: APIRouter, ctx: Context) -> None:
                 "whisper": env.get("EMS_WHISPER_MODEL") or env.get("CFG_WHISPER_MODEL") or "large-v3",
                 # What the faces ops write as their producer; a change is a re-detection for the caller.
                 "faces": FACES_PRODUCER,
+                # What speech.voiceprint writes as its producer, the stitching's version and both models;
+                # a change is a re-diarization for the caller.
+                "voiceprint": voiceprint_producer(env),
                 # What vision.embed writes as its producer; a change is a re-embed for the caller.
                 "image_embed": env.get("EMS_IMAGE_EMBED_MODEL") or env.get("CFG_IMAGE_EMBED_MODEL") or "ViT-SO400M-16-SigLIP2-384__webli",
                 # What ocr.read writes as its producer; a change is a re-read for the caller.
@@ -450,6 +454,8 @@ def register(router: APIRouter, ctx: Context) -> None:
                 "queue_depth": ctx.settings.queue_depth,
                 "interactive_reserve": ctx.settings.interactive_reserve,
                 "watches": ctx.settings.watches,
+                "streams": ctx.settings.streams,
+                "pages": ctx.settings.pages,
             },
             # What decides a transcode's fate on this box: the encoder that will run and the
             # CPU-decode budget a refusal is measured against. A caller records the budget's
@@ -459,5 +465,8 @@ def register(router: APIRouter, ctx: Context) -> None:
                 "cpu_budget": encode.Budget(
                     ctx.settings.cpu_encode_max_mb, ctx.settings.cpu_encode_mb_per_1k_frames, ctx.settings.cpu_encode_max_segments
                 ).signature,
+                "stream_encoders": sorted(await stream.h264_encoders()),
+                # Whether this EMS can render a page (`pages`): a browser and a virtual display.
+                "page_renderer": bool(which("chromium") and which("Xvfb")),
             },
         }

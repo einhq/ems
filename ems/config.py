@@ -47,6 +47,14 @@ class Settings:
     # The most live streams read at once (`watches`): each holds a decode and asks for a face
     # detection a few times a second while there is motion.
     watches: int
+    # The most videos streamed at once (`video.stream`): each holds an encoder for as long as
+    # someone watches.
+    streams: int
+    # The most pages streamed at once (`pages`): each holds a browser, about two cores and an
+    # encoder for as long as it runs.
+    pages: int
+    # The most memory one page's browser may hold, in MB, before its stream is stopped.
+    page_memory_mb: int
     # How long a caller's oldest model request may wait while its requests for a family already
     # running go first.
     affinity_wait: int
@@ -151,6 +159,9 @@ class Settings:
             queue_depth=integer("EMS_QUEUE_DEPTH", 64),
             interactive_reserve=integer("EMS_INTERACTIVE_RESERVE", 1),
             watches=integer("EMS_WATCHES", 4),
+            streams=integer("EMS_STREAMS", 2),
+            pages=integer("EMS_PAGES", 2),
+            page_memory_mb=integer("EMS_PAGE_MEMORY_MB", 2048),
             affinity_wait=integer("EMS_AFFINITY_WAIT", 300),
             expect_gpu=e.get("EMS_EXPECT_GPU", "") == "1",
             exiftool_workers=integer("EMS_EXIFTOOL_WORKERS", 2),

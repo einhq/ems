@@ -62,14 +62,36 @@ class Refusal(Exception):
 
 
 def read(path: str, what: str):
+    """The picture as OpenCV reads it, unchanged. One OpenCV has a reader for and still cannot
+    decode, such as a GIF whose data breaks off, is decoded by ImageMagick as its renditions are."""
     import cv2
 
     if not cv2.haveImageReader(path):
         raise Refusal(UNSUPPORTED.name, f"the {what} is in a format OpenCV has no reader for")
     picture = cv2.imread(path, cv2.IMREAD_UNCHANGED)
     if picture is None:
+        picture = read_magick(path)
+    if picture is None:
         raise Refusal(UNDECODABLE.name, f"the {what} cannot be decoded")
     return picture
+
+
+def read_magick(path: str):
+    """The first frame as ImageMagick decodes it, as stored and at its own depth, in the layout
+    `cv2.imread` gives; None when ImageMagick is missing or makes nothing of it. ImageMagick says
+    so on a broken file and still gives what it decoded, as it does for the renditions."""
+    import subprocess
+
+    import cv2
+    import numpy as np
+
+    try:
+        done = subprocess.run(["magick", f"{path}[0]", "png:-"], capture_output=True, check=False)
+    except OSError:
+        return None
+    if not done.stdout:
+        return None
+    return cv2.imdecode(np.frombuffer(done.stdout, np.uint8), cv2.IMREAD_UNCHANGED)
 
 
 def read_both(image: str, mask_path: str):

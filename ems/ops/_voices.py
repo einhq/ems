@@ -21,6 +21,10 @@ from __future__ import annotations
 
 import math
 
+# The version of the stitching, first in `speech.voiceprint`'s producer: raised whenever the same
+# turns and voiceprints would make other speakers, so a caller finds the voices to make again.
+METHOD = "voices/1"
+
 # Cosine similarity above which two window-local speakers are taken to be one person.
 #
 # Erring high is the safer direction — leaving one person split across two labels within a
@@ -29,11 +33,12 @@ import math
 # false-accept/false-reject examples from the archive.
 STITCH_THRESHOLD = 0.6
 
-# Embedded voice, in seconds, a window-local label needs to found a speaker of its own.
+# Embedded voice, in seconds, a window-local label needs to be an anchor.
 #
 # A long recording has a few labels carrying nearly all the voice and many with a turn or two:
-# a centroid made of one short utterance rarely resembles anything, and one made of nothing
-# cannot. So a label under this much voice is a crumb: it may join a speaker but never be one.
+# a centroid made of one short utterance is a poor guide to which voice it is. So a label under
+# this much voice is a crumb: it does not shape the anchors' clustering, and is placed only once
+# the anchors are settled — on the anchor it resembles, or else in a speaker of crumbs.
 ANCHOR_MIN_SECONDS = 10.0
 
 # Similarity at which a crumb joins an anchor. Lower than STITCH_THRESHOLD on purpose: the
@@ -72,53 +77,18 @@ def _centroid(vectors: list[list[float]]) -> list[float]:
     return [value / len(vectors) for value in out]
 
 
-def stitch_windows(
-    turns: list[dict],
-    vectors: list[list[float] | None],
-    threshold: float = STITCH_THRESHOLD,
-    anchor_seconds: float = ANCHOR_MIN_SECONDS,
-    attach_threshold: float = ATTACH_THRESHOLD,
-) -> list[str | None]:
-    """Resolve window-local speakers to file-level ones.
+def _cluster(label: str, entry: dict) -> dict:
+    return {
+        "labels": [label],
+        "windows": {window_of(label)},
+        "centroid": _centroid(entry["vectors"]),
+        "count": len(entry["vectors"]),
+        "first": entry["first"],
+    }
 
-    `turns` are the diarizer's `{"start", "end", "localSpeaker"}` and `vectors[i]` is the
-    voiceprint of `turns[i]`, or None where it was too short to embed. Returns one file-wide
-    label (`speaker_0`, `speaker_1`, … ordered by first appearance) per turn, in order, or
-    None for a turn nothing could attribute.
 
-    Labels with at least `anchor_seconds` of embedded voice are the anchors, and only they
-    found speakers: greedy agglomeration over their centroids, most similar pair first,
-    refusing any merge that would put two labels from the same window together. Greedy rather
-    than optimal because the input is tiny — a handful of labels per window — and because
-    taking the strongest evidence first is what makes the refusals land on the weak pairs.
-
-    Every other label is a crumb. One with a centroid joins the most similar anchor at
-    `attach_threshold`, again never one holding its own window; one with no vector, or no
-    anchor like it, leaves its turns unattributed. The turns are still reported — a stretch
-    where somebody spoke whom nothing recognised is information — but they are not a speaker.
-    """
-    by_label: dict[str, dict] = {}
-    for turn, vector in zip(turns, vectors):
-        if vector is None:
-            continue
-        entry = by_label.setdefault(turn["localSpeaker"], {"vectors": [], "first": turn["start"], "seconds": 0.0})
-        entry["vectors"].append(vector)
-        entry["first"] = min(entry["first"], turn["start"])
-        entry["seconds"] += turn["end"] - turn["start"]
-
-    ordered = sorted(by_label.items(), key=lambda item: (item[1]["first"], item[0]))
-    clusters = [
-        {
-            "labels": [label],
-            "windows": {window_of(label)},
-            "centroid": _centroid(entry["vectors"]),
-            "count": len(entry["vectors"]),
-            "first": entry["first"],
-        }
-        for label, entry in ordered
-        if entry["seconds"] >= anchor_seconds
-    ]
-
+def _agglomerate(clusters: list[dict], threshold: float) -> list[dict]:
+    """Greedy agglomeration, most similar pair first, never putting two labels of one window together."""
     while True:
         best = None
         for i in range(len(clusters)):
@@ -130,7 +100,7 @@ def stitch_windows(
                 if sim >= threshold and (best is None or sim > best[2]):
                     best = (i, j, sim)
         if best is None:
-            break
+            return clusters
         i, j, _ = best
         a, b = clusters[i], clusters[j]
         total = a["count"] + b["count"]
@@ -145,21 +115,66 @@ def stitch_windows(
         }
         del clusters[j]
 
+
+def stitch_windows(
+    turns: list[dict],
+    vectors: list[list[float] | None],
+    threshold: float = STITCH_THRESHOLD,
+    anchor_seconds: float = ANCHOR_MIN_SECONDS,
+    attach_threshold: float = ATTACH_THRESHOLD,
+) -> list[str | None]:
+    """Resolve window-local speakers to file-wide ones.
+
+    `turns` are the diarizer's `{"start", "end", "localSpeaker"}` and `vectors[i]` is the
+    voiceprint of `turns[i]`, or None where it was too short to embed. Returns one file-wide
+    label (`speaker_0`, `speaker_1`, … ordered by first appearance) per turn, in order, or
+    None for a turn nothing could attribute.
+
+    Labels with at least `anchor_seconds` of embedded voice are the anchors, clustered first:
+    greedy agglomeration over their centroids, most similar pair first, refusing any merge that
+    would put two labels from the same window together. Greedy rather than optimal because the
+    input is tiny — a handful of labels per window — and because taking the strongest evidence
+    first is what makes the refusals land on the weak pairs.
+
+    Every other label is a crumb. A crumb joins the most similar anchor at `attach_threshold`,
+    again never one holding its own window. The crumbs that join none are still voices the
+    diarizer told apart from everyone else in their window, so they are clustered among
+    themselves the same way, at `threshold`, and each cluster is a speaker of its own — usually
+    a short one, which is for whoever decides identities to weigh. Only a label with no vector
+    at all leaves its turns unattributed: they are still reported, as a stretch where somebody
+    spoke whom nothing could characterise, but they are not a speaker.
+    """
+    by_label: dict[str, dict] = {}
+    for turn, vector in zip(turns, vectors):
+        if vector is None:
+            continue
+        entry = by_label.setdefault(turn["localSpeaker"], {"vectors": [], "first": turn["start"], "seconds": 0.0})
+        entry["vectors"].append(vector)
+        entry["first"] = min(entry["first"], turn["start"])
+        entry["seconds"] += turn["end"] - turn["start"]
+
+    ordered = sorted(by_label.items(), key=lambda item: (item[1]["first"], item[0]))
+    clusters = _agglomerate([_cluster(label, entry) for label, entry in ordered if entry["seconds"] >= anchor_seconds], threshold)
+
     # A crumb joins the anchor it most resembles. Anchors are settled by now, so the join
     # neither moves a centroid nor depends on the order the crumbs are tried in.
+    strays = []
     for label, entry in ordered:
         if entry["seconds"] >= anchor_seconds:
             continue
-        centroid = _centroid(entry["vectors"])
+        crumb = _cluster(label, entry)
         best = None
         for cluster in clusters:
             if window_of(label) in cluster["windows"]:
                 continue
-            sim = cosine(centroid, cluster["centroid"])
+            sim = cosine(crumb["centroid"], cluster["centroid"])
             if sim >= attach_threshold and (best is None or sim > best[1]):
                 best = (cluster, sim)
         if best is not None:
             best[0]["labels"].append(label)
+        else:
+            strays.append(crumb)
+    clusters += _agglomerate(strays, threshold)
 
     # Name speakers by when they are first heard, so the labels read in file order.
     clusters.sort(key=lambda c: c["first"])

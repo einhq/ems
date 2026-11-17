@@ -1,12 +1,18 @@
 name: image
 
 # EMS's image (Containerfile), published for the installer to pull: ghcr.io/einhq/ems:main is main
-# as of the last build, :sha-<commit> each commit built. Built once a day when main has moved since
-# (ein/core#835), and at once when run by hand. Built on a runner without a graphics card, so
-# nothing here runs `make gpu-check`.
+# as of the last build, :sha-<commit> each commit built, :<api> the newest build of that API_VERSION
+# and :<line> the newest of its compatible line (0.4 for 0.4.x, 1 for 1.x), which the installer
+# pulls for the range a module asks for. The label eu.einhq.api says the API_VERSION too. Built when
+# GitHub's main moves, which the daily publish does (ein/core#1287), so the image is that day's
+# (ein/core#1418); each morning after it, when main's commit has no image yet, which a failed build
+# leaves; and at once when run by hand. Built on a runner without a graphics card, so nothing here
+# runs `make gpu-check`.
 on:
+  push:
+    branches: [main]
   schedule:
-    - cron: '17 1 * * *'
+    - cron: '47 7 * * *'
   workflow_dispatch:
 
 # One build at a time; a run started during it waits, and only the newest waiting run is kept.
@@ -24,6 +30,8 @@ jobs:
       contents: read
     outputs:
       sha: ${{ steps.check.outputs.sha }}
+      api: ${{ steps.check.outputs.api }}
+      line: ${{ steps.check.outputs.line }}
       build: ${{ steps.check.outputs.build }}
     steps:
       - uses: actions/checkout@v7
@@ -33,6 +41,11 @@ jobs:
         run: |
           sha=$(git rev-parse --short=9 HEAD)
           echo "sha=$sha" >>"$GITHUB_OUTPUT"
+          api=$(sed -n 's/^API_VERSION = "\([0-9]*\.[0-9]*\.[0-9]*\)"$/\1/p' ems/__init__.py)
+          [ -n "$api" ] || { echo "no API_VERSION in ems/__init__.py"; exit 1; }
+          major=${api%%.*} minor=${api#*.}
+          echo "api=$api" >>"$GITHUB_OUTPUT"
+          echo "line=$([ "$major" = 0 ] && echo "0.${minor%%.*}" || echo "$major")" >>"$GITHUB_OUTPUT"
           if [ "$GITHUB_EVENT_NAME" = schedule ] && docker manifest inspect "$IMAGE:sha-$sha" >/dev/null 2>&1; then
             echo "$IMAGE:sha-$sha exists"
             echo build=false >>"$GITHUB_OUTPUT"
@@ -73,9 +86,12 @@ jobs:
           tags: |
             ghcr.io/${{ github.repository_owner }}/ems:main
             ghcr.io/${{ github.repository_owner }}/ems:sha-${{ needs.check.outputs.sha }}
+            ghcr.io/${{ github.repository_owner }}/ems:${{ needs.check.outputs.api }}
+            ghcr.io/${{ github.repository_owner }}/ems:${{ needs.check.outputs.line }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
+            eu.einhq.api=${{ needs.check.outputs.api }}
             org.opencontainers.image.description=EMS, the EiN Media Service: every media tool and model behind one HTTP API, run by compose from ein/deploy
           cache-from: type=registry,ref=ghcr.io/${{ github.repository_owner }}/ems:main
           cache-to: type=inline

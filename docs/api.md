@@ -1,9 +1,9 @@
 # EMS API
 
 EMS (EiN Media Service) is a stateless service that answers questions about media bytes and
-produces media bytes: probing, renditions, transcodes, fingerprints, face detection, speech,
+produces media bytes: probing, renditions, transcodes, web pages rendered into live video, fingerprints, face detection, speech,
 image-text embeddings, text embeddings, document text extraction, faded colours restored, inpainting and the defects it fills, denoising, deblurring, face restoration, and one picture's metadata copied onto another. It owns the tools (ffmpeg,
-ImageMagick, exiftool, chromaprint, OpenCV) and the models (SigLIP2, RetinaFace and TransFace, a text
+ImageMagick, exiftool, chromaprint, OpenCV, Chromium) and the models (SigLIP2, RetinaFace and TransFace, a text
 embedder (bge-m3), PP-OCRv6, whisper, NeMo diarization and voiceprints, LR-ASD, LaMa, the scratch detector of Bringing Old Photos Back to Life, SCUNet, Restormer) so that a caller never
 depends on which tool or model answers.
 
@@ -122,6 +122,10 @@ never remove or reinterpret, and a breaking change is a new minor. From 1.0.0 th
 minor and major, and a new major is a new path prefix. A
 caller should refuse to run against a major it does not know and may warn on a minor below what
 it was written for.
+
+The published image carries the version as the label `eu.einhq.api` and in its tags:
+`ghcr.io/einhq/ems:<api>` (`0.4.6`) and `:<line>`, the newest build of a compatible line (`0.4` for
+0.4.x, `1` for 1.x). An installation pulls the line of the range its modules ask for.
 
 ### 2.5 Admission
 
@@ -308,7 +312,8 @@ Result:
 }
 ```
 
-- `kind` is `image | video | audio | document | other`.
+- `kind` is `image | video | audio | document | other`. A document is a PDF, Word (`.docx`, `.doc`),
+  RTF, OpenDocument text or text file.
 - `picture.rotation` is what the _file_ says: the degrees clockwise a naive viewer must turn the
   stored raster to show it upright — exiftool's `Rotation` for a video container, or EXIF
   `Orientation` mapped to degrees for an image (also reported raw as `picture.orientation`, with
@@ -325,7 +330,10 @@ Result:
   decode that fails on a file ffprobe reads is `tool_failed`, which a caller may retry.
 - `sha256` is computed only when asked (`"hash": true`); it is a full read.
 - `raw.exiftool` is exiftool's numeric, ungrouped JSON (`-n -j`); `raw.ffprobe` is
-  `-show_format -show_streams` JSON. Their tag names belong to those tools.
+  `-show_format -show_streams` JSON. Their tag names belong to those tools, but for one EMS adds
+  (`ems/tools/exiftool.config`): `LensName`, `LensID` printed, the name exiftool's lens table gives
+  a lens a camera records only as a number (Pentax's `8 215` is `smc PENTAX-DA 18-135mm F3.5-5.6 ED
+  AL [IF] DC WR`). It is absent when printing changes nothing or the table does not know the lens.
 - ffprobe runs for video and audio (and for anything exiftool could not read). An EMS without
   ffprobe still answers from exiftool and says so in `meta.warnings`; `decodable` is then
   unmeasured and reported `true`.
@@ -366,9 +374,11 @@ Several sized renditions of one image, from one decode. _long_ for large sources
   already upright, and a viewer applying a leftover tag would turn them back.
 - All targets are written or none: every output is validated before any is put in place.
 - A RAW's sensor image is decoded at half size when every target can still be cut from that,
-  in full otherwise, and with a fast demosaic either way; `frame` is still the full sensor
-  image's. One whose sensor image cannot be decoded (a truncated raw section) is rendered from
-  its embedded JPEG when it has one, and the result says so (`"source": "preview"`).
+  in full otherwise, and with a fast demosaic either way. Its frame is the camera's crop of the
+  sensor image when the RAW names one (the frame of its embedded preview, a few pixels inside
+  LibRaw's), and `frame` is that at full size, whatever size was read. One whose sensor image
+  cannot be decoded (a truncated raw section) is rendered from its embedded JPEG when it has
+  one, and the result says so (`"source": "preview"`).
 - At most 32 targets.
 
 Result: `{ "frame": {"width", "height"}, "targets": [ { "path", "width", "height", "bytes" } ] }` —
@@ -427,7 +437,9 @@ small tears of a scanned print or negative, given a mask of where they are.
   caller that wants the profile and the file's other tags copies them on with `image.copy_tags`.
 - Output formats: `png` (the default) and `tiff` (Deflate, with a horizontal predictor), both
   lossless, so `quality` is refused. A file OpenCV has no reader for (HEIF, a camera RAW) is
-  `unsupported`, and so is one of floats or 32-bit integers; one it cannot decode is `undecodable`.
+  `unsupported`, and so is one of floats or 32-bit integers. One it cannot decode, such as a GIF
+  whose data breaks off, is decoded by ImageMagick as its renditions are; one neither can decode is
+  `undecodable`. So it is for every operation here that takes a picture as stored.
 - An empty mask is an answer like any other: the file written again, with `filled: 0`.
 
 Result: `{ "path", "width", "height", "channels", "depth", "bytes", "filled" }` — `depth` the bits
@@ -463,7 +475,8 @@ mask `image.inpaint` takes.
   in the inverted picture: emulsion lost to black, dark cracks, dust on a print. That finds more
   damage and more of the picture's own dark lines with it.
 - The file is taken as stored: `angle` and `mirror` are refused rather than applied, so the mask
-  lies on the same pixels `image.inpaint` fills (_3.3_). Any picture OpenCV reads, 8 or 16 bits.
+  lies on the same pixels `image.inpaint` fills (_3.3_). Any picture OpenCV or ImageMagick reads, as
+  `image.inpaint` reads it, 8 or 16 bits.
 - The output is a PNG of one 8-bit channel the size of the file, 255 where marked and 0
   elsewhere. Only `png` is written.
 
@@ -498,7 +511,7 @@ A picture with less noise: the grain and the scanner's noise of a scanned print 
   alpha is kept as it is); every pixel may change. It carries no metadata and no colour profile, as
   `image.inpaint`'s. Output formats `png` (the default) and `tiff`, lossless, so `quality` is
   refused. The file is taken as stored: `angle` and `mirror` are refused. A file OpenCV has no
-  reader for, or of floats, is `unsupported`; one it cannot decode `undecodable`.
+  reader for, or of floats, is `unsupported`; one neither OpenCV nor ImageMagick can decode `undecodable`.
 - _long_ for a large scan, about 2.6 s a megapixel on fry's card: it streams `fraction` by the tiles done.
 
 Result: `{ "path", "width", "height", "channels", "depth", "bytes" }`. `meta.producer` is the
@@ -537,7 +550,7 @@ has turned red, magenta or yellow, its blacks grey and its whites cream.
   alpha is kept as it is); every pixel may change. It carries no metadata and no colour profile,
   as `image.inpaint`'s. Output formats `png` (the default) and `tiff`, lossless, so `quality` is
   refused. The file is taken as stored: `angle` and `mirror` are refused. A file OpenCV has no
-  reader for, or of floats, is `unsupported`; one it cannot decode `undecodable`.
+  reader for, or of floats, is `unsupported`; one neither OpenCV nor ImageMagick can decode `undecodable`.
 
 Result: `{ "path", "width", "height", "channels", "depth", "bytes", "levels", "gammas" }` —
 `levels` each channel's black and white point and `gammas` its balance, red first, as fractions of
@@ -622,8 +635,9 @@ of many are worth restoring, and with what. Nothing is written.
   by a Gaussian of sigma 3 (at 1024 px) all did for blur, and 26 of 32 shaken by 9 or 17 pixels
   did for shake. Grain does not hide blur: the blurred photographs with grain added scored as
   without it.
-- The file is taken as stored: `angle` and `mirror` are refused. Any picture OpenCV reads, 8 or 16
-  bits; a file it has no reader for is `unsupported`, one it cannot decode `undecodable`. On fry's
+- The file is taken as stored: `angle` and `mirror` are refused. Any picture read as
+  `image.inpaint` reads it, 8 or 16 bits; a file OpenCV has no reader for is `unsupported`, one
+  neither OpenCV nor ImageMagick can decode `undecodable`. On fry's
   card 0.2–0.6 s for a picture of a few megapixels, longer for a large scan, which is read whole.
 
 Result: `{ "width", "height", "faded", "dusty", "scratched", "blurred", "shaken", "measures": { "change", "specks", "scratches", "length", "marked", "edge", "shake" } }`
@@ -666,7 +680,7 @@ A picture with its blur taken out: a photograph out of focus, or blurred by a ca
   alpha is kept as it is); every pixel may change. It carries no metadata and no colour profile, as
   `image.inpaint`'s. Output formats `png` (the default) and `tiff`, lossless, so `quality` is
   refused. The file is taken as stored: `angle` and `mirror` are refused. A file OpenCV has no
-  reader for, or of floats, is `unsupported`; one it cannot decode `undecodable`.
+  reader for, or of floats, is `unsupported`; one neither OpenCV nor ImageMagick can decode `undecodable`.
 - _long_ for a large picture, about 0.3 s a tile on fry's card, some 15 s at 2048 px: it streams
   `fraction` by the tiles done.
 
@@ -814,6 +828,51 @@ Result: `{ "path", "width", "height", "duration", "bytes", "video_codec", "audio
 Transcodes run in the `encodes` lane (`EMS_LIMIT_ENCODES`), so a long encode never sits ahead
 of the probes and renditions queued in the tool lane.
 
+### 4.6a `video.stream` _(implemented, 0.4.2)_
+
+A video as H.264 and AAC in fragmented MP4 or MPEG-TS, made while it is read, for a player that
+cannot decode the AV1 renditions (a Cast or DLNA screen). Nothing is written: the response body is
+the stream. A part of set length on the source's clock is a segment of an HLS playlist the caller
+makes, which a player seeks in by asking for another segment (_0.4.4_).
+
+```json
+{
+  "file": { "path": "…/DJI_0114.MP4", "angle": 0 },
+  "video": { "box": { "width": 1920, "height": 1080 }, "fps": 30, "quality": 23 },
+  "audio": { "bitrate": "128k" },
+  "start": 95.5,
+  "duration": 4,
+  "source_clock": true,
+  "format": "mpegts",
+  "hints": { "source_codec": "hevc" }
+}
+```
+
+- `video.box` is a bounding box as in `video.transcode` (1920×1080 by default), and the picture
+  comes out in the display frame. `fps` is a ceiling (30 by default, at most 60): a faster source is
+  thinned, a slower one kept. `quality` is NVENC's `cq` for H.264 (0–51, 23 by default).
+- `audio: null` drops the sound; otherwise it is AAC in two channels at `bitrate`.
+- `start` is where in the video the stream begins, in seconds: an input-side seek, decoded from the
+  keyframe before it so the first frame is the one at `start`. The stream's own clock starts at 0
+  there, or with `source_clock` (_0.4.4_) at `start`, so the parts of one video line up.
+- `duration` (_0.4.4_) ends the stream after that many seconds of the video; without it, it runs to
+  the end.
+- `format` (_0.4.4_) is `mp4` (fragmented, the default) or `mpegts`, written with no mux delay.
+- `hints.source_codec` as in `video.transcode`.
+
+The answer is `200` with `Content-Type: video/mp4` (`video/mp2t` for `mpegts`) and `EMS-Producer` naming what runs
+(`ffmpeg/9.0.1/h264_nvenc/cuda`, `…/h264_nvenc/upload`, `…/libopenh264`). The header goes out
+at once and then a fragment at least every second, with a keyframe at the start and every two seconds after; the picture
+is High profile at level 4.1, at most 8 Mbit/s. The encoder is chosen before the first byte, as
+`video.transcode` chooses (everything in VRAM, a CPU decode into NVENC, the CPU alone), so a failure
+to start is an ordinary error envelope; once bytes have gone out, a failure ends the stream short.
+The stream runs as fast as its reader takes it, and closing the connection stops it. A reader that
+pauses holds the encoder until it reads on or closes.
+
+Past `EMS_STREAMS` streams at once (2) a new one is `busy`: each holds an encoder for as long as
+someone watches, and a card has few encoder sessions, shared with `video.transcode`. A file with no
+picture is `refused`. `capabilities.encode.stream_encoders` lists the H.264 encoders this EMS has.
+
 ### 4.7 `audio.transcode` _(implemented)_
 
 `{ "file", "output": { "path": "…/128k-44100.m4a", "format": "m4a" }, "audio": { "codec": "aac", "bitrate": "128k", "sample_rate": 44100 } }`.
@@ -938,9 +997,13 @@ face is found inside the box.
 { "file": {…}, "language": "sv", "vad": { "min_silence_ms": 500 }, "word_timestamps": false }
 ```
 
-Any container with sound; EMS extracts the audio itself. `language` is an ISO-639-1 code that
+Any container with sound; EMS extracts the audio itself. What whisper decodes is the speech two
+detectors find, joined: Silero VAD's, and FireRedVAD's speech score, which hears speech Silero
+misses (old tape, a voice far off, speech under music) and leaves singing out. `vad.min_silence_ms`
+is the pause that ends a stretch of speech for both. Each line is placed back in the file by its
+words, so none spans a stretch that was left out. `language` is an ISO-639-1 code that
 pins the decode and skips detection. Without it EMS detects the language over several windows
-spread across the speech the VAD found (not whisper's own first-30-seconds guess, which
+spread across the speech the detectors found (not whisper's own first-30-seconds guess, which
 mislabels a Swedish clip that opens on noise as Norwegian and decodes all of it that way), and
 lets the operator's expected languages (`EMS_WHISPER_LANGUAGES`, with `EMS_WHISPER_LANGUAGE_FLOOR`
 and `EMS_WHISPER_LANGUAGE_WINDOWS`, §6) win when the averaged probability reaches the floor —
@@ -956,7 +1019,9 @@ is that averaged probability for the language chosen.
 with no sound track at all answers `audio: false` as well, so the two can be told apart.
 
 Lines whisper invents over silence, music or noise are left out: a segment the decoder itself
-rates as likely no speech (`EMS_WHISPER_NO_SPEECH_PROB_MAX`), a thank-you-for-watching or
+rates as likely no speech (`EMS_WHISPER_NO_SPEECH_PROB_MAX`), one of 15 seconds or more with
+fewer than 0.4 words a second that the decoder rates 0.45 or more likely no speech, a line with
+no letters or digits, a thank-you-for-watching or
 subtitle credit, and a transcript that is a single line in a language outside
 `EMS_WHISPER_LANGUAGES` when the decoder rated it 0.5 or more likely no speech, which is how
 its stock lines ("Thank you.", "We'll be right back.") over music come out.
@@ -995,19 +1060,22 @@ each turn's length, made unit again. A turn with `speaker: null` belongs to no s
 `speaker` is **file-wide** (`speaker_0`, `speaker_1`, … in order of first appearance): EMS
 diarizes in windows, embeds every turn, pools each window-local speaker's voiceprints and merges
 the ones that match — refusing to merge two labels from the _same_ window, which the diarizer
-already said are different people — and rejoins the turns a window boundary cut in half. Only a
-window-local label with enough embedded voice (10 s) can found a speaker; a label with less
-joins the speaker it most resembles at a lower bar, and if it resembles none, or had nothing
-long enough to embed, its turns come back with `speaker: null` — somebody spoke there whom
-nothing could attribute. A turn too short to characterise a voice (under 1.5 s) is still listed,
+already said are different people — and rejoins the turns a window boundary cut in half. The
+window-local labels with enough embedded voice (10 s) are stitched first; a label with less
+joins the speaker it most resembles at a lower bar, and the short labels that resemble none are
+stitched among themselves and become speakers of their own, often with only a few seconds of
+talk. A label with nothing long enough to embed comes back with `speaker: null` on its turns —
+somebody spoke there whom nothing could characterise. A turn too short to characterise a voice (under 1.5 s) is still listed,
 with `embedding` and `dimension` `null`, so the timeline stays complete. `speech: false` comes
 with empty `turns`; a file with no sound track answers `audio: false` as well.
 
 One request per recording, whatever its length. The sound is extracted once and every turn is
 sliced from the samples in memory, so the cost is the diarization plus one model call per
 turn, not one decode per turn (the shape the per-span form of this op had until 2026-09-22,
-which put a 45-minute tape side past a 15-minute step budget). The producer names both
-models, `<diarizer>+<embedder>`.
+which put a 45-minute tape side past a 15-minute step budget). The producer is
+`voices/<n>+<diarizer>+<embedder>`, the number raised whenever the same turns would be stitched
+into other speakers; it names both models also for a recording with no turn long enough to embed,
+and `models.voiceprint` in capabilities (_4.23_, _0.4.1_) names it.
 
 The extracted sound is kept in scratch for a while (`EMS_AUDIO_CACHE_SECONDS`, default 30 min,
 within `EMS_AUDIO_CACHE_MB`), so a `speech.active_speaker` score per turn afterwards decodes the
@@ -1098,7 +1166,9 @@ A change of the configured embedder changes every stored vector's meaning: the c
 ### 4.21 `document.extract` _(implemented)_
 
 `{ "file", "ocr": "auto" | "always" | "never" }` →
-`{ "text": "…", "pages": 5, "method": "pdf-text" | "ocr" | "docx" | "odf" | "text" }`. `auto`
+`{ "text": "…", "pages": 5, "method": "pdf-text" | "ocr" | "docx" | "odf" | "text" }`. An old Word
+(`.doc`) or RTF file is converted to PDF by LibreOffice, as `document.renditions` converts it
+(§4.21b), and read as that PDF is; one LibreOffice cannot open is `undecodable`. `auto`
 reads a PDF page as a picture only when it carries no usable text layer (fewer than
 `EMS_OCR_MIN_PAGE_CHARS` characters), rasterized at `EMS_OCR_DPI` and at most `EMS_OCR_MAX_PAGES`
 pages; a picture, a camera RAW through its preview included, is read whole in the display frame
@@ -1326,15 +1396,17 @@ setting names the card (`EMS_<FAMILY>_DEVICE=cuda`) stays on it whatever the sha
 What this EMS can do, for a caller to check before it relies on it:
 
 ```json
-{ "api": "0.4.0", "name": "fry", "build": { "version": "0.1.0", "commit": "fb6a7d9", "date": "2026-11-07T18:02:11+01:00" },
+{ "api": "0.4.6", "name": "fry", "build": { "version": "0.1.0", "commit": "fb6a7d9", "date": "2026-11-07T18:02:11+01:00" },
   "gpu": { "present": true, "name": "NVIDIA GeForce RTX 5060 Ti", "memory_mb": 16311 },
   "ops": [ "media.probe", "faces.detect", … ],
   "tools": { "exiftool": "13.10", "ffprobe": "9.0.1", "ffmpeg": "9.0.1", "magick": "7.1.1" },
   "models": { "text_embed": "bge-m3", "whisper": "large-v3", "faces": "retinaface-r34+transface",
               "image_embed": "ViT-SO400M-16-SigLIP2-384__webli", "ocr": "PP-OCRv6_medium+multicentury-ppocrv6-medium+multicentury-htr-model+trocr-large-handwritten",
-              "damage": "damage/2+bopb-detection" },
-  "limits": { "models": 8, "tools": 6, "encodes": 2, "queue_depth": 64, "interactive_reserve": 1, "watches": 4 },
-  "encode": { "video_encoder": "av1_nvenc", "cpu_budget": "4000/170/64" },
+              "damage": "damage/2+bopb-detection",
+              "voiceprint": "voices/1+diar_streaming_sortformer_4spk-v2+speakerverification_en_titanet_large" },
+  "limits": { "models": 8, "tools": 6, "encodes": 2, "queue_depth": 64, "interactive_reserve": 1, "watches": 4, "streams": 2, "pages": 2 },
+  "encode": { "video_encoder": "av1_nvenc", "cpu_budget": "4000/170/64", "stream_encoders": [ "h264_nvenc", "libopenh264" ],
+              "page_renderer": true },
   "signatures": { "transcribe": "whisper-large-v3:…,on=cuda:float16,…",
                   "transcribe_places": [ "whisper-large-v3:…,on=cuda:float16,…", "whisper-large-v3:…,on=cpu:int8,…" ] } }
 ```
@@ -1347,7 +1419,9 @@ it lists.
 
 `encode.video_encoder` is what `video.transcode` will run first, and `encode.cpu_budget` the
 signature of the CPU-decode budget a refusal is measured against — a caller that records
-refusals compares it to know when a raised budget has made them stale. `signatures.transcribe` is what a transcript
+refusals compares it to know when a raised budget has made them stale. `encode.stream_encoders` (_0.4.2_)
+are the H.264 encoders `video.stream` and `pages` can use, and `encode.page_renderer` (_0.4.3_) whether this
+EMS can render a page (_4.25_). `signatures.transcribe` is what a transcript
 decoded right now would be stamped with — every setting that decides `speech.transcribe`'s
 output, as one string, among them where this host decodes and in what precision (`on=cuda:float16`
 on the card, `on=cpu:int8` on the CPU; `EMS_WHISPER_CARD_COMPUTE`, `EMS_WHISPER_CPU_COMPUTE`).
@@ -1479,6 +1553,102 @@ opens a clip now, or lengthens the open one, for `request`, and answers `{ "clip
 its `clip` event will carry. A watch without `clips` answers `invalid_request`; an unknown clip is
 `not_found`.
 
+### 4.25 `pages` — a page rendered into live video _(implemented, 0.4.3)_
+
+A web page drawn as a screen would show it, encoded as live H.264 for a player that plays video and
+nothing else: a Cast device's built-in player, a DLNA screen, a screen a browser hands the stream to.
+EMS opens the page in Chromium on a virtual display of its own, grabs the display at a steady frame
+rate and encodes it once; every reader, in any format, is served from that one encode. Nothing is kept: a page lives in EMS's
+memory, and the caller puts it again when EMS has started anew.
+
+```
+PUT    /v0/pages/<id>            start it, or start it again when its body changed or it ended
+GET    /v0/pages                 every page and how it is doing
+GET    /v0/pages/<id>            one
+DELETE /v0/pages/<id>            stop it
+GET    /v0/pages/<id>/live.mp4   the stream as fragmented MP4, without end; ?duration=<s> (0.4.6)
+GET    /v0/pages/<id>/live.ts    the stream as MPEG-TS, without end
+GET    /v0/pages/<id>/hls/<name> the stream as live HLS: index.m3u8 and its segments (0.4.5)
+```
+
+```json
+PUT /v0/pages/kitchen-tv
+{ "url": "http://host.containers.internal:8080/__page/3f…",
+  "video": { "width": 1920, "height": 1080, "fps": 30, "quality": 23 },
+  "idle": 20 }
+```
+
+| Field           | Default | Meaning                                                                                                    |
+| --------------- | ------- | ---------------------------------------------------------------------------------------------------------- |
+| `url`           |         | The page, `http://` or `https://`, as EMS reaches it; whatever signs the browser in is the caller's, in it |
+| `video.width`   | 1920    | The browser's window and the picture, 320 to 1920 pixels wide                                              |
+| `video.height`  | 1080    | 240 to 1080 pixels high                                                                                    |
+| `video.fps`     | 30      | Frames a second, 5 to 30: the display is grabbed this often whether the page changed or not                |
+| `video.quality` | 23      | NVENC's `cq` (0–51)                                                                                        |
+| `idle`          | 20      | Seconds without a reader, 5 to 600, after which the page stops itself                                      |
+
+The id is as a watch's (_4.24_). The same body put again leaves a running page as it is and answers
+`made: false`; another body, or a page that has ended, starts it anew. The answer comes once both
+formats have their first keyframe, typically within half a second, while the page itself may still
+be loading; a page that gives no picture within 30 s, or that cannot start at all (no browser, no
+H.264 encoder), is `tool_failed` with why. Past `EMS_PAGES` running pages (2) a new one is `busy`:
+each holds a browser, about two cores to draw a moving page in software, and an encoder session. Each
+answer's `result` is the page's status:
+
+```json
+{
+  "id": "kitchen-tv",
+  "url": "http://host.containers.internal:8080/__page/3f…",
+  "state": "running",
+  "since": "2026-11-16T09:35:29.930Z",
+  "video": { "width": 1920, "height": 1080, "fps": 30, "quality": 23 },
+  "idle": 20,
+  "encoder": "h264_nvenc",
+  "readers": { "mp4": 1, "ts": 0, "hls": 0 },
+  "bytes": 146555,
+  "memory_mb": 406,
+  "made": true
+}
+```
+
+`state` is `starting`, `running` or `ended` (with `reason`: `idle`, `deleted`, or what failed, such
+as `chromium exited with 1`); an ended page is listed for a minute and then forgotten. `encoder` is
+`h264_nvenc`, or `libopenh264` where the card's could not start; `readers` how many read each
+format, `hls` 1 while a file of the HLS form was asked for within 5 s (_0.4.5_), since an HLS player
+holds no answer open; `bytes` how much has been encoded;
+`memory_mb` what the browser holds, all its processes together. A browser over
+`EMS_PAGE_MEMORY_MB` (2048) ends the page.
+
+**Reading it.** `live.mp4` is fragmented MP4 (`video/mp4`), what a Cast player takes; `live.ts` is
+MPEG-TS (`video/mp2t`), what a DLNA screen takes. Both are H.264, High profile at level 4.1 on the
+card (Constrained Baseline on the CPU), at most 8 Mbit/s, with a keyframe every second and no sound.
+A reader gets the format's header (the MP4's `ftyp` and `moov`; the TS's PAT and PMT), then
+everything since the latest keyframe, then the stream as it comes, a fragment at least every 200 ms;
+the TS repeats the picture's parameters at every keyframe, and an MP4 reader's clock starts at 0.
+With `?duration=<seconds>` (16 to 604800, _0.4.6_) the MP4's header says the stream lasts that
+long (`mvhd`, each track's `tkhd` and `mdhd`, and an `mehd`) instead of nothing: a browser counts
+an endless MP4 only as long as what it has read, and Chrome hands a screen near it (the Remote
+Playback API) nothing of 15 s or less, nor HLS on Android. Such a reader also has a second of the
+stream at once, padded to a multiple of 32 KiB with a `free` box: Chrome reads a stream's metadata,
+which it must have before it offers a screen, only once it holds about a second of media, and fills
+its reads 32 KiB at a time, so a new page's few hundred bytes of blank page a fragment took seconds.
+Where what came since the latest keyframe is less than a second, its first fragment is sent again
+straight after itself, which leaves the decoder as it was, and the stream follows that much later.
+Both answers carry `Access-Control-Allow-Origin: *`, since a player fetches from a page of its own.
+A reader that falls a minute behind is let go and its answer ends; every answer ends when the page
+does. A page asked for before its first keyframe is `busy`, one that has ended `not_found` with why.
+
+**As HLS** _(0.4.5)_. `hls/index.m3u8` is a live playlist (`application/vnd.apple.mpegurl`, no
+`#EXT-X-ENDLIST` while the page runs) of the latest ten seconds, in MPEG-TS segments
+(`hls/index<n>.ts`, `video/mp2t`) of a second each, every one starting at a keyframe; older
+segments are deleted. It is what Safari hands an AirPlay screen; Chrome on Android hands a Cast
+screen no HLS, and takes the MP4 with `?duration` instead. The playlist is waited for while the first segment is still being
+made, up to 10 s; after that it is `busy`. A segment no longer listed, a name that is neither, or a
+page that has ended is `not_found`. Each file asked for counts as reading the page, for its `idle`.
+
+`capabilities.limits.pages` is `EMS_PAGES`, and `capabilities.encode.page_renderer` whether this
+EMS has a browser and a virtual display to render pages with.
+
 ## 5. Error codes
 
 | Code                | HTTP | Permanent | Meaning                                                                                                        |
@@ -1506,7 +1676,7 @@ this instance serves, a comma list of globs over their names such as
 `media.*,image.*,video.frames,vision.embed`; `*`, every op, by default — a glob that matches no op is
 a warning in health),
 the admission limits (`EMS_LIMIT_MODELS`, `EMS_LIMIT_TOOLS`, `EMS_LIMIT_ENCODES`,
-`EMS_QUEUE_DEPTH`, `EMS_INTERACTIVE_RESERVE`, `EMS_AFFINITY_WAIT`), `EMS_WATCHES` (the most watches at once, 4), `EMS_EXIFTOOL_WORKERS`, `EMS_EXPECT_GPU` (`1`: a card
+`EMS_QUEUE_DEPTH`, `EMS_INTERACTIVE_RESERVE`, `EMS_AFFINITY_WAIT`), `EMS_WATCHES` (the most watches at once, 4), `EMS_STREAMS` (the most `video.stream`s at once, 2), `EMS_PAGES` (the most pages rendered at once, 2), `EMS_PAGE_MEMORY_MB` (the most a page's browser may hold, 2048), `EMS_EXIFTOOL_WORKERS`, `EMS_EXPECT_GPU` (`1`: a card
 is expected, and health lists `what: "gpu"` under `degraded` when none is visible), `EMS_CARD_BUDGET_MB` (the most of the card the models
 treat as there — how a smaller card is rehearsed; 0 is the whole card), `EMS_CARD_SHARE_MB` (the most
 of the card EMS's own processes hold when it starts, for a card shared with another service such as
