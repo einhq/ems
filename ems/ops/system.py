@@ -466,7 +466,7 @@ def register(router: APIRouter, ctx: Context) -> None:
                     ctx.settings.cpu_encode_max_mb, ctx.settings.cpu_encode_mb_per_1k_frames, ctx.settings.cpu_encode_max_segments
                 ).signature,
                 "stream_encoders": sorted(await stream.h264_encoders()),
-                # Whether this EMS can render a page (`pages`): a browser and a virtual display.
-                "page_renderer": bool(which("chromium") and which("Xvfb")),
+                # Whether this EMS can render a page (`pages`): a browser, a virtual display and a sound server.
+                "page_renderer": bool(which("chromium") and which("Xvfb") and which("pulseaudio")),
             },
         }

@@ -1,5 +1,7 @@
-"""`PUT|GET|DELETE /v0/pages/<id>`, `GET /v0/pages`, `GET /v0/pages/<id>/live.mp4[?duration=s]|live.ts` and
-`GET /v0/pages/<id>/hls/<name>`: a page rendered into live H.264 for a screen (ems/pages.py, _4.25_)."""
+"""`PUT|GET|DELETE /v0/pages/<id>`, `GET /v0/pages`, `GET /v0/pages/<id>/live.mp4[?duration=s]|live.ts`,
+`GET /v0/pages/<id>/hls/<name>`, `POST /v0/pages/<id>/keys`, `GET /v0/pages/<id>/state` and
+`POST /v0/pages/<id>/message`: a page rendered into live H.264 and AAC for a screen, keys pressed in it,
+what it says it shows and what it is told (ems/pages.py, _4.25_)."""
 
 from __future__ import annotations
 
@@ -10,7 +12,7 @@ from fastapi.responses import Response, StreamingResponse
 
 from .. import API_VERSION
 from ..context import Context
-from ..pages import PageSpec
+from ..pages import PageKeys, PageMessage, PageSpec
 
 MEDIA_TYPES = {"mp4": "video/mp4", "ts": "video/mp2t"}
 # A screen's player fetches the stream from a page of its own.
@@ -54,6 +56,19 @@ def register(router: APIRouter, ctx: Context) -> None:
     async def pages_delete(page_id: str):
         await ctx.pages.delete(page_id)
         return _ok(None)
+
+    @router.post("/pages/{page_id}/keys")
+    async def pages_keys(page_id: str, body: PageKeys):
+        await ctx.pages.get(page_id).press(body.keys)
+        return _ok(None)
+
+    @router.get("/pages/{page_id}/state")
+    async def pages_state(page_id: str):
+        return _ok(await ctx.pages.get(page_id).shown())
+
+    @router.post("/pages/{page_id}/message")
+    async def pages_message(page_id: str, body: PageMessage):
+        return _ok({"taken": await ctx.pages.get(page_id).tell(body.message)})
 
     @router.get("/pages/{page_id}/live.mp4")
     async def pages_mp4(page_id: str, duration: int | None = Query(default=None, ge=16, le=7 * 86400)):

@@ -124,7 +124,7 @@ caller should refuse to run against a major it does not know and may warn on a m
 it was written for.
 
 The published image carries the version as the label `eu.einhq.api` and in its tags:
-`ghcr.io/einhq/ems:<api>` (`0.4.6`) and `:<line>`, the newest build of a compatible line (`0.4` for
+`ghcr.io/einhq/ems:<api>` (`0.4.8`) and `:<line>`, the newest build of a compatible line (`0.4` for
 0.4.x, `1` for 1.x). An installation pulls the line of the range its modules ask for.
 
 ### 2.5 Admission
@@ -179,8 +179,8 @@ fast it answers, never what (`model_registry.place`):
   a family that would take EMS past it runs on the CPU, even while the rest of the card is free.
   EMS starts with `EMS_CARD_SHARE_MB`; its user changes it while EMS runs with `system.card`
   (_4.22a_), from 0, nothing on the card, to all of it. The other side is set to leave EMS what it
-  needs (ein/llm's `LLM_CARD_RESERVE_MB`). `EMS_CARD_BUDGET_MB` makes the card look smaller, to
-  rehearse one.
+  needs (the language model's `LLM_CARD_RESERVE_MB` in EiN's deployment). `EMS_CARD_BUDGET_MB`
+  makes the card look smaller, to rehearse one.
 
 `system.health` lists each resident copy with its device and measured size, and `degraded` names
 a card the host should have and does not see, or one whose context is lost. EiN's `docs/architecture/media-hardware.md` has the
@@ -1557,8 +1557,11 @@ its `clip` event will carry. A watch without `clips` answers `invalid_request`; 
 
 A web page drawn as a screen would show it, encoded as live H.264 for a player that plays video and
 nothing else: a Cast device's built-in player, a DLNA screen, a screen a browser hands the stream to.
-EMS opens the page in Chromium on a virtual display of its own, grabs the display at a steady frame
-rate and encodes it once; every reader, in any format, is served from that one encode. Nothing is kept: a page lives in EMS's
+EMS opens the page in Chromium on a virtual display of its own, in its dark scheme (_0.4.7_: dark
+rather than white until the page paints, and a page that follows the scheme dark), with a sound server of its own that
+takes nothing but the page's sound (_0.4.7_), grabs the display at a steady frame rate and the sound
+as it plays, and encodes them once; every reader, in any format, is served from that one encode.
+Keys pressed in the page reach it as someone's at it would (_0.4.7_). Nothing is kept: a page lives in EMS's
 memory, and the caller puts it again when EMS has started anew.
 
 ```
@@ -1569,6 +1572,9 @@ DELETE /v0/pages/<id>            stop it
 GET    /v0/pages/<id>/live.mp4   the stream as fragmented MP4, without end; ?duration=<s> (0.4.6)
 GET    /v0/pages/<id>/live.ts    the stream as MPEG-TS, without end
 GET    /v0/pages/<id>/hls/<name> the stream as live HLS: index.m3u8 and its segments (0.4.5)
+POST   /v0/pages/<id>/keys       press keys in the page (0.4.7)
+GET    /v0/pages/<id>/state      what the page says it shows (0.4.8)
+POST   /v0/pages/<id>/message    hand the page a message (0.4.8)
 ```
 
 ```json
@@ -1588,9 +1594,11 @@ PUT /v0/pages/kitchen-tv
 | `idle`          | 20      | Seconds without a reader, 5 to 600, after which the page stops itself                                      |
 
 The id is as a watch's (_4.24_). The same body put again leaves a running page as it is and answers
-`made: false`; another body, or a page that has ended, starts it anew. The answer comes once both
-formats have their first keyframe, typically within half a second, while the page itself may still
-be loading; a page that gives no picture within 30 s, or that cannot start at all (no browser, no
+`made: false`; another body, or a page that has ended, starts it anew. The answer comes once the
+page has loaded and painted (its document's `readyState` complete, then two animation frames) and
+both formats have a keyframe grabbed since, so a reader, who starts at the latest keyframe, starts
+at the page and not at the browser opening it (_0.4.7_; typically 2–5 s); a page still loading
+after 15 s is answered as it is. A page that gives no picture within 30 s, or that cannot start at all (no browser, no
 H.264 encoder), is `tool_failed` with why. Past `EMS_PAGES` running pages (2) a new one is `busy`:
 each holds a browser, about two cores to draw a moving page in software, and an encoder session. Each
 answer's `result` is the page's status:
@@ -1621,7 +1629,9 @@ holds no answer open; `bytes` how much has been encoded;
 
 **Reading it.** `live.mp4` is fragmented MP4 (`video/mp4`), what a Cast player takes; `live.ts` is
 MPEG-TS (`video/mp2t`), what a DLNA screen takes. Both are H.264, High profile at level 4.1 on the
-card (Constrained Baseline on the CPU), at most 8 Mbit/s, with a keyframe every second and no sound.
+card (Constrained Baseline on the CPU), at most 8 Mbit/s, with a keyframe every second, and the
+page's sound as AAC, 48 kHz stereo at 128 kbit/s, silence while it plays none (_0.4.7_). The
+picture is the first track, and a reader starts at its keyframes.
 A reader gets the format's header (the MP4's `ftyp` and `moov`; the TS's PAT and PMT), then
 everything since the latest keyframe, then the stream as it comes, a fragment at least every 200 ms;
 the TS repeats the picture's parameters at every keyframe, and an MP4 reader's clock starts at 0.
@@ -1646,8 +1656,27 @@ screen no HLS, and takes the MP4 with `?duration` instead. The playlist is waite
 made, up to 10 s; after that it is `busy`. A segment no longer listed, a name that is neither, or a
 page that has ended is `not_found`. Each file asked for counts as reading the page, for its `idle`.
 
+**Keys** _(0.4.7)_. `POST /v0/pages/<id>/keys` with `{ "keys": ["ArrowRight"] }` (1 to 32) presses
+and releases each key in the page in turn, through the browser's DevTools, as someone at it would:
+the page has `keydown` and `keyup` with the key's `key`, `code` and `keyCode`, and a key that types
+types. A key is a letter or a digit (`a`, `5`) or one of `ArrowLeft`, `ArrowUp`, `ArrowRight`,
+`ArrowDown`, `Space`, `Enter`, `Escape`, `Tab`, `Backspace`, `Home`, `End`, `PageUp` and `PageDown`;
+any other is `invalid_request`. The answer, `result: null`, comes once the browser has taken them; a
+page that has ended is `not_found`, and a browser that does not answer within 5 s `tool_failed`.
+What a key does is the page's: EiN's slideshow, for one, moves on with `ArrowRight`.
+
+**What it shows, and messages** _(0.4.8)_. A page may say what it shows, and take messages, by
+defining `globalThis.einScreen` with two functions: `state()`, answering any JSON, and
+`message(m)`, given the JSON object put to it and answering anything but `null` or `undefined` when
+it took it (either may answer a promise). `GET /v0/pages/<id>/state` answers what `state()` answers
+(`result`, as it is), or `null` for a page that defines none; `POST /v0/pages/<id>/message` with
+`{ "message": { "seek": 80 } }` calls `message` and answers `{ "taken": true }`, or `false` for a page
+that defines none or does not take it. What either means is the page's: EiN's slideshow gives the file
+it shows and, for a video, where it is, and takes `seek`. A page that has ended is `not_found`, and
+a `state()` or `message()` that throws, or a browser that does not answer within 5 s, `tool_failed`.
+
 `capabilities.limits.pages` is `EMS_PAGES`, and `capabilities.encode.page_renderer` whether this
-EMS has a browser and a virtual display to render pages with.
+EMS has a browser, a virtual display and a sound server to render pages with.
 
 ## 5. Error codes
 

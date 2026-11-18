@@ -519,11 +519,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends sshfs socat \
     && rm -rf /var/lib/apt/lists/*
 
 # Chromium and a virtual X display for it, which render a web page into live video (`pages`,
-# ems/pages.py); ffmpeg grabs the display with x11grab. DejaVu fills in the characters Liberation
-# lacks.
-RUN apt-get update && apt-get install -y --no-install-recommends chromium xvfb fonts-dejavu-core \
+# ems/pages.py), and a PulseAudio server whose sink takes the page's sound; ffmpeg grabs the
+# display with x11grab and the sink with pulse. DejaVu fills in the characters Liberation lacks.
+# Debian's PulseAudio depends on ALSA's plugins, which bring Debian's GPL libavcodec (see the
+# check below); nothing here plays through ALSA into PulseAudio, so an empty package, held, stands
+# in for them.
+RUN mkdir -p /tmp/alsa-plugins/DEBIAN \
+    && printf 'Package: libasound2-plugins\nVersion: 99\nArchitecture: all\nMaintainer: EiN\nDescription: stand-in: no ALSA client plays through PulseAudio here\n' \
+       > /tmp/alsa-plugins/DEBIAN/control \
+    && dpkg-deb -b /tmp/alsa-plugins /tmp/alsa-plugins.deb && dpkg -i /tmp/alsa-plugins.deb && apt-mark hold libasound2-plugins \
+    && rm -rf /tmp/alsa-plugins /tmp/alsa-plugins.deb
+RUN apt-get update && apt-get install -y --no-install-recommends chromium xvfb pulseaudio fonts-dejavu-core \
     && rm -rf /var/lib/apt/lists/* \
-    && /opt/ffmpeg/bin/ffmpeg -hide_banner -devices | grep -q x11grab
+    && /opt/ffmpeg/bin/ffmpeg -hide_banner -devices | grep -q x11grab \
+    && /opt/ffmpeg/bin/ffmpeg -hide_banner -devices | grep -q pulse
 
 # Nothing installed above brought back PyAV, the CPU onnxruntime or Debian's FFmpeg libraries.
 RUN ! pip show av 2>/dev/null && ! pip show onnxruntime 2>/dev/null \

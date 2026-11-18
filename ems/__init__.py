@@ -1,3 +1,3 @@
 """EMS — EiN Media Service. See docs/api.md for the contract."""
 
-API_VERSION = "0.4.6"
+API_VERSION = "0.4.8"

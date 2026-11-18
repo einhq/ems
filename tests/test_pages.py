@@ -1,11 +1,12 @@
 """`pages`: ffmpeg's MP4 and TS cut where a reader may start, every reader served from one encode,
 its HLS files served as ffmpeg writes them, and a stream that ends when its browser fails, when it
-is deleted or when nobody reads it. The
-rendering is stood in for; the fixtures are what ffmpeg's tee writes (two seconds at 15 fps, a
-keyframe a second, a fragment every 200 ms):
+is deleted or when nobody reads it, and keys pressed in it through the browser's DevTools. The
+rendering is stood in for; the fixtures are what ffmpeg's tee writes (two seconds of a picture at 15
+fps with a keyframe a second, and a tone as AAC, a fragment every 200 ms):
 
-    ffmpeg -f lavfi -i testsrc2=s=160x90:r=15 -t 2 -c:v libx264 -preset ultrafast -bf 0 -g 15 \
-      -map 0:v -flags +global_header -f tee \
+    ffmpeg -f lavfi -i testsrc2=s=160x90:r=15 -f lavfi -i sine=f=440:r=48000 -t 2 \
+      -c:v libx264 -preset ultrafast -bf 0 -g 15 -c:a aac -b:a 64k -ar 48000 -ac 2 \
+      -map 0:v -map 1:a -flags +global_header -f tee \
       "[f=mp4:movflags=frag_keyframe+empty_moov+default_base_moof:frag_duration=200000]page.mp4|[f=mpegts:bsfs/v=dump_extra=freq=keyframe]page.mpegts"
 """
 
@@ -15,13 +16,14 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 
 import pytest
 
 from ems import pages
 from ems.errors import EmsError
-from ems.pages import (CHROME_READ, QUICK_START_SECONDS, Mp4Splitter, PageSpec, Rendering, TsSplitter, decode_time, declared, encoder_args,
-                       fragment_duration, quick_start)
+from ems.pages import (CHROME_READ, QUICK_START_SECONDS, Devtools, Mp4Splitter, PageSpec, Rendering, TsSplitter, decode_times, declared,
+                       encoder_args, fragment_duration, key_event, quick_start, rebased, tracks, video_time)
 
 DATA = os.path.join(os.path.dirname(__file__), "data")
 MP4 = open(os.path.join(DATA, "page.mp4"), "rb").read()
@@ -38,6 +40,16 @@ def test_the_mp4_is_cut_into_its_header_and_fragments_marked_at_keyframes():
     assert MP4.startswith(joined) and MP4[len(joined) + 4:len(joined) + 8] == b"mfra"
     assert [key for key, _ in pieces].count(True) == 2
     assert pieces[0][0] is True
+    # Every fragment holds the picture and the sound.
+    assert all(len(decode_times(piece)) == 2 for _, piece in pieces)
+
+
+def test_the_header_names_the_picture_and_the_sound_by_their_timescales():
+    splitter = Mp4Splitter()
+    splitter.feed(MP4)
+    found = tracks(splitter.header)
+    assert [track.video for track in found.values()] == [True, False]
+    assert found[2].timescale == 48000
 
 
 def test_the_ts_is_cut_at_its_keyframes_and_keeps_its_tables():
@@ -46,8 +58,12 @@ def test_the_ts_is_cut_at_its_keyframes_and_keeps_its_tables():
     assert b"".join(piece for _, piece in pieces) == TS
     assert splitter.header is not None and len(splitter.header) == 2 * 188
     keys = [piece for key, piece in pieces if key]
-    assert len(keys) == 2
+    # The picture's two keyframes, not the sound's packets, which ffmpeg marks too.
+    assert len(keys) == 2 and splitter.video_pid is not None
     assert all(piece[0] == 0x47 and piece[5] & 0x40 for piece in keys)
+    assert all(((piece[1] & 0x1F) << 8 | piece[2]) == splitter.video_pid for piece in keys)
+    marked = {((TS[at + 1] & 0x1F) << 8) | TS[at + 2] for at in range(0, len(TS), 188) if TS[at + 3] & 0x20 and TS[at + 4] and TS[at + 5] & 0x40}
+    assert len(marked) == 2
 
 
 class FakeProcess:
@@ -56,7 +72,7 @@ class FakeProcess:
 
 
 class FakeRendering(Rendering):
-    """Outputs fed by the test; its processes are never real."""
+    """Outputs fed by the test; its processes are never real, and the keys it is sent are kept."""
 
     def __init__(self):
         self.mp4 = asyncio.StreamReader()
@@ -65,6 +81,18 @@ class FakeRendering(Rendering):
                          hls=tempfile.mkdtemp(prefix="ems-page-hls-"))
         self.memory = 300.0
         self.stopped = False
+        self.pressed: list[str] = []
+        self.told: list[tuple[str, object]] = []
+        self.state: object = None
+
+    async def press(self, names: list[str]) -> None:
+        for name in names:
+            key_event(name)
+        self.pressed += names
+
+    async def screen(self, call: str, argument: object = None) -> object:
+        self.told.append((call, argument))
+        return self.state if call == "state" else (True if self.state is not None else None)
 
     def feed(self, mp4: bytes, ts: bytes) -> None:
         self.mp4.feed_data(mp4)
@@ -125,10 +153,11 @@ async def test_every_reader_starts_at_the_latest_keyframe_with_its_clock_at_zero
     header = await anext(chunks)
     assert header[4:8] == b"ftyp"
     first = await anext(chunks)
-    assert first[4:8] == b"moof" and decode_time(first) == 0
-    assert decode_time(channel.gop[0]) > 0
+    # The picture at 0, the sound where it was against it: within one of its frames.
+    assert first[4:8] == b"moof" and decode_times(first)[1] == 0 and 0 <= decode_times(first)[2] < 1024
+    assert all(value > 0 for value in decode_times(channel.gop[0]).values())
     second = await anext(chunks)
-    assert decode_time(second) > 0
+    assert all(value > 0 for value in decode_times(second).values())
     page.leave(channel, reader)
 
     ts_channel, ts_reader = page.join("ts")
@@ -195,41 +224,54 @@ def _stream() -> tuple[bytes, list[bytes]]:
     """The fixture's declared header and its fragments, their clock starting at 0, as a reader is sent them."""
     splitter = Mp4Splitter()
     fragments = [piece for _, piece in splitter.feed(MP4)]
-    base = decode_time(fragments[0])
-    return declared(splitter.header, 86400), [pages.rebased(fragment, base) for fragment in fragments]
+    base = video_time(splitter.header, fragments[0])
+    return declared(splitter.header, 86400), [rebased(fragment, base) for fragment in fragments]
 
 
 def _second(header: bytes) -> int:
-    at = header.index(b"mdhd") - 4
-    return int(QUICK_START_SECONDS * int.from_bytes(header[at + (28 if header[at + 8] == 1 else 20):][:4], "big"))
+    return int(QUICK_START_SECONDS * tracks(header)[1].timescale)
+
+
+def test_every_track_is_moved_by_the_same_time():
+    header, fragments = _stream()
+    video, audio = tracks(header)[1], tracks(header)[2]
+    base = video_time(header, fragments[3])
+    assert base[1] / video.timescale == base[2] / audio.timescale
+    moved = rebased(fragments[3], base)
+    assert decode_times(moved)[1] == 0
+    # The sound keeps where it was against the picture, to within one of its samples.
+    was = decode_times(fragments[3])
+    assert abs((was[2] - decode_times(moved)[2]) / audio.timescale - was[1] / video.timescale) <= 1 / audio.timescale
 
 
 def test_a_quick_start_holds_a_second_and_fills_out_chromes_read():
     header, fragments = _stream()
     start, shift = quick_start(header, fragments[:1])
-    first = fragment_duration(fragments[0], header)
+    first = fragment_duration(fragments[0], header, 1)
     repeated = [piece for piece in start if piece[4:8] == b"moof"]
     assert start[0] == header and start[-1][4:8] == b"free"
     assert sum(len(piece) for piece in start) % CHROME_READ == 0
     # The keyframe's fragment again and again straight after itself, a second of it in all.
-    assert all(pages.at_decode_time(piece, 0) == fragments[0] for piece in repeated)
-    assert [decode_time(piece) for piece in repeated] == [n * first for n in range(len(repeated))]
+    assert all(pages.at_decode_times(piece, decode_times(fragments[0])) == fragments[0] for piece in repeated)
+    assert [decode_times(piece)[1] for piece in repeated] == [n * first for n in range(len(repeated))]
     assert len(repeated) * first >= _second(header) > (len(repeated) - 1) * first
-    assert shift == (len(repeated) - 1) * first
+    assert shift[1] == (len(repeated) - 1) * first
+    # The sound is repeated with it, as long after as the picture.
+    assert shift[2] == shift[1] * tracks(header)[2].timescale // tracks(header)[1].timescale
 
 
 def test_a_quick_start_leaves_what_already_holds_a_second_as_it_is():
     header, fragments = _stream()
-    held = [f for n, f in enumerate(fragments) if sum(fragment_duration(g, header) for g in fragments[:n]) < _second(header)]
+    held = [f for n, f in enumerate(fragments) if sum(fragment_duration(g, header, 1) for g in fragments[:n]) < _second(header)]
     start, shift = quick_start(header, held)
-    assert shift == 0 and start[1:1 + len(held)] == held
+    assert set(shift.values()) == {0} and start[1:1 + len(held)] == held
 
 
 @pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg is not installed")
 def test_a_quick_start_and_what_follows_decode_as_one_stream(tmp_path):
     header, fragments = _stream()
     start, shift = quick_start(header, fragments[:1])
-    rest = [pages.rebased(fragment, -shift) for fragment in fragments[1:]]
+    rest = [rebased(fragment, {track: -value for track, value in shift.items()}) for fragment in fragments[1:]]
     path = tmp_path / "quick.mp4"
     path.write_bytes(b"".join([*start, *rest]))
     decoded = subprocess.run(["ffmpeg", "-v", "error", "-i", str(path), "-f", "null", "-"], capture_output=True, text=True)
@@ -238,14 +280,17 @@ def test_a_quick_start_and_what_follows_decode_as_one_stream(tmp_path):
                            capture_output=True, text=True, check=True)
     times = [int(line) for line in probe.stdout.split()]
     assert len(times) > len(fragments) and times == sorted(set(times))
+    sound = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "a", "-show_entries", "packet=pts", "-of", "csv=p=0", str(path)],
+                           capture_output=True, text=True, check=True)
+    assert sound.stdout.split()
 
 
 async def test_a_reader_that_asks_for_a_duration_is_given_a_quick_start_and_the_rest_after_it(client, launches):
     await client.put("/v0/pages/kitchen", json=SPEC)
     page = client.app.state.ctx.pages.get("kitchen")
     channel, reader = page.join("mp4")
-    base = decode_time(channel.gop[0])
-    expected, shift = quick_start(declared(channel.splitter.header, 86400), [pages.rebased(f, base) for f in channel.gop])
+    base = video_time(channel.splitter.header, channel.gop[0])
+    expected, shift = quick_start(declared(channel.splitter.header, 86400), [rebased(f, base) for f in channel.gop])
     chunks = channel.chunks(reader, 86400)
     assert [await anext(chunks) for _ in expected] == expected
     splitter = Mp4Splitter()
@@ -253,7 +298,7 @@ async def test_a_reader_that_asks_for_a_duration_is_given_a_quick_start_and_the_
     after = fragments[fragments.index(channel.gop[-1]) + 1]
     launches.renderings[0].feed(MP4[len(MP4) * 3 // 4:], b"")
     following = await asyncio.wait_for(anext(chunks), 2)
-    assert following == pages.rebased(after, base - shift)
+    assert following == rebased(after, {track: value - shift[track] for track, value in base.items()})
     page.leave(channel, reader)
 
 
@@ -368,3 +413,137 @@ async def test_a_page_with_no_picture_never_runs(client, launches, monkeypatch):
 async def test_a_page_is_an_http_url(client, launches):
     r = await client.put("/v0/pages/kitchen", json={**SPEC, "url": "file:///etc/passwd"})
     assert r.status_code == 400
+
+
+def test_the_encode_takes_the_picture_first_and_the_sound_as_aac_from_the_input_opened_first():
+    args = encoder_args(PageSpec(url="http://ein.test/"), "h264_nvenc", 5, "/scratch/hls")
+    maps = [args[n + 1] for n, arg in enumerate(args) if arg == "-map"]
+    # The picture is the first track, from the second input: the sound is opened first.
+    assert maps == ["1:v", "0:a"]
+    assert args[args.index("-c:a") + 1] == "aac" and args[args.index("-ar") + 1] == "48000"
+
+
+def test_a_key_is_named_as_the_dom_names_it():
+    assert key_event("ArrowRight") == ("ArrowRight", "ArrowRight", 39, "")
+    assert key_event("Space") == (" ", "Space", 32, " ")
+    assert key_event("k") == ("k", "KeyK", 75, "k")
+    assert key_event("7") == ("7", "Digit7", 55, "7")
+    for name in ("F13", "", "ö", "ArrowSideways"):
+        with pytest.raises(EmsError):
+            key_event(name)
+
+
+async def test_keys_reach_a_running_page_and_an_unknown_key_is_refused(client, launches):
+    await client.put("/v0/pages/kitchen", json=SPEC)
+    r = await client.post("/v0/pages/kitchen/keys", json={"keys": ["ArrowRight", "Space"]})
+    assert r.status_code == 200 and r.json()["result"] is None
+    assert launches.renderings[0].pressed == ["ArrowRight", "Space"]
+    assert (await client.post("/v0/pages/kitchen/keys", json={"keys": ["Hyper"]})).status_code == 400
+    assert (await client.post("/v0/pages/kitchen/keys", json={"keys": []})).status_code == 400
+    assert (await client.post("/v0/pages/elsewhere/keys", json={"keys": ["a"]})).status_code == 404
+    await client.delete("/v0/pages/kitchen")
+    assert (await client.post("/v0/pages/kitchen/keys", json={"keys": ["a"]})).status_code == 404
+
+
+class FakeBrowser:
+    """The browser's side of the DevTools pipe: it answers each call and keeps what it was sent."""
+
+    def __init__(self):
+        self.calls: list[dict] = []
+        self.ours_in, self.its_out = os.pipe()
+        self.its_in, self.ours_out = os.pipe()
+
+    async def devtools(self) -> Devtools:
+        loop = asyncio.get_running_loop()
+        writer, _ = await loop.connect_write_pipe(asyncio.Protocol, os.fdopen(self.ours_out, "wb", buffering=0))
+        self.task = asyncio.ensure_future(self._answer())
+        return Devtools(await pages._pipe_reader(self.ours_in), writer)
+
+    async def _answer(self) -> None:
+        reader = await pages._pipe_reader(self.its_in)
+        out = os.fdopen(self.its_out, "wb", buffering=0)
+        while True:
+            call = json.loads((await reader.readuntil(b"\0"))[:-1])
+            self.calls.append(call)
+            result = {}
+            if call["method"] == "Target.getTargets":
+                result = {"targetInfos": [{"type": "browser", "targetId": "b"}, {"type": "page", "targetId": "p1"}]}
+            elif call["method"] == "Target.attachToTarget":
+                result = {"sessionId": "s1"}
+            # An event between the answers, which the client passes over.
+            out.write(json.dumps({"method": "Target.targetInfoChanged", "params": {}}).encode() + b"\0")
+            out.write(json.dumps({"id": call["id"], "result": result}).encode() + b"\0")
+
+
+async def test_keys_go_through_devtools_to_the_page_attached_once():
+    browser = FakeBrowser()
+    devtools = await browser.devtools()
+    await devtools.press(["ArrowLeft"])
+    await devtools.press(["Space"])
+    methods = [call["method"] for call in browser.calls]
+    assert methods == ["Target.getTargets", "Target.attachToTarget", *["Input.dispatchKeyEvent"] * 4]
+    assert browser.calls[1]["params"] == {"targetId": "p1", "flatten": True}
+    down = browser.calls[4]
+    assert down["sessionId"] == "s1" and down["params"] == {"type": "keyDown", "key": " ", "code": "Space", "windowsVirtualKeyCode": 32, "text": " "}
+    assert browser.calls[5]["params"]["type"] == "keyUp" and "text" not in browser.calls[5]["params"]
+    devtools.close()
+    browser.task.cancel()
+
+
+async def test_a_new_page_is_answered_once_a_keyframe_grabbed_after_its_paint_is_out(client, launches, monkeypatch):
+    loaded = asyncio.Event()
+
+    async def wait_loaded(self):
+        await loaded.wait()
+        return True
+
+    monkeypatch.setattr(FakeRendering, "loaded", wait_loaded)
+    real_launch = launches.__call__
+
+    async def launch_earlier(spec, page_id):
+        rendering = await real_launch(spec, page_id)
+        rendering.grabbed_from = time.monotonic() - 1.0
+        return rendering
+
+    client.app.state.ctx.pages.launch = launch_earlier
+    putting = asyncio.ensure_future(client.put("/v0/pages/kitchen", json=SPEC))
+    await asyncio.sleep(0.2)
+    assert not putting.done()
+    loaded.set()
+    await asyncio.sleep(0.2)
+    # Loaded, but the keyframe the readers would start at is from before.
+    assert not putting.done()
+    page = client.app.state.ctx.pages.pages["kitchen"]
+    page.channels["ts"].keys += 1
+    await asyncio.sleep(0.2)
+    assert not putting.done()
+    # A keyframe grabbed after the paint, two seconds into a stream whose grab began a second before it.
+    header = page.channels["mp4"].splitter.header
+    page.channels["mp4"].gop = [pages.at_decode_times(page.channels["mp4"].gop[0], {1: 2 * tracks(header)[1].timescale})]
+    assert (await asyncio.wait_for(putting, 2)).status_code == 200
+
+
+async def test_a_page_says_what_it_shows_and_takes_messages_when_it_can(client, launches):
+    await client.put("/v0/pages/kitchen", json=SPEC)
+    rendering = launches.renderings[0]
+    assert (await client.get("/v0/pages/kitchen/state")).json()["result"] is None
+    assert (await client.post("/v0/pages/kitchen/message", json={"message": {"seek": 80}})).json()["result"] == {"taken": False}
+    rendering.state = {"title": "IMG_0001.jpg", "media": {"time": 3.5, "duration": 60, "paused": False}}
+    assert (await client.get("/v0/pages/kitchen/state")).json()["result"] == rendering.state
+    assert (await client.post("/v0/pages/kitchen/message", json={"message": {"seek": 80}})).json()["result"] == {"taken": True}
+    assert rendering.told[-1] == ("message", {"seek": 80})
+    assert (await client.post("/v0/pages/kitchen/message", json={"message": 5})).status_code == 400
+    await client.delete("/v0/pages/kitchen")
+    assert (await client.get("/v0/pages/kitchen/state")).status_code == 404
+
+
+async def test_the_page_is_asked_through_devtools_with_the_argument_as_json():
+    browser = FakeBrowser()
+    devtools = await browser.devtools()
+    await devtools.screen("message", {"seek": 12.5})
+    evaluate = browser.calls[-1]
+    assert evaluate["method"] == "Runtime.evaluate" and evaluate["sessionId"] == "s1"
+    assert evaluate["params"]["returnByValue"] is True and evaluate["params"]["awaitPromise"] is True
+    assert 'screen.message({"seek": 12.5})' in evaluate["params"]["expression"]
+    devtools.close()
+    browser.task.cancel()
