@@ -1,7 +1,8 @@
 """Watches: a stream's frames looked at for faces while they change, a face told once it was seen
 twice and again when it is gone, motion, a source that drops and comes back, the same watch stated
-twice, clips cut around a face and on a request, and the routes — with the frames, the worker, the
-crops and the recording stubbed; and ffmpeg's recording and joining of a real stream."""
+twice, clips cut around a face and on a request, a watch's names read at the endpoint it was put
+with, and the routes — with the frames, the worker, the crops and the recording stubbed; and
+ffmpeg's recording and joining of a live stream read from a descriptor."""
 
 import asyncio
 import base64
@@ -25,10 +26,16 @@ from ems.card import CardArbiter, watching  # noqa: E402
 from ems.clips import ClipsSpec, Recorder, ffmpeg_join, ffmpeg_segments  # noqa: E402
 from ems.config import Settings  # noqa: E402
 from ems.ops import watches as watches_op  # noqa: E402
-from ems.watches import Frame, Watches, WatchSpec, masked_source, ppm_size  # noqa: E402
+from ems.remote import parse_header  # noqa: E402
+from ems.watches import Frame, Watches, WatchSpec, ppm_size  # noqa: E402
 from ems.worker import Worker  # noqa: E402
 
 WIDTH, HEIGHT = 64, 36
+
+# The endpoint a watch's names are granted under, as its caller's request names it.
+FILES = {"ems-files": "address=ein.test:2224; secret=" + "ab" * 32}
+SUB = {"path": "/0a1b/0-sub.ts"}
+MAIN = {"path": "/0a1b/1-main.ts"}
 
 
 def frame(grey: int, face: bool) -> Frame:
@@ -65,7 +72,8 @@ class Script:
         self.rounds = [frames, again or []]
         self.reads = 0
 
-    async def __call__(self, spec: WatchSpec):
+    async def __call__(self, spec: WatchSpec, open_source):
+        await open_source()
         frames = self.rounds[min(self.reads, len(self.rounds) - 1)]
         self.reads += 1
         for each in frames:
@@ -82,7 +90,7 @@ async def crop(frame: Frame, x: int, y: int, width: int, height: int) -> bytes:
 SEGMENT = 0.1
 
 
-async def segments(source: str, folder: str, first: int):
+async def segments(source, folder: str, first: int):
     """A recording stub: a segment a tenth of a second long every tenth of a second, its bytes its
     number."""
     number = first
@@ -116,17 +124,24 @@ async def ems(tmp_path, monkeypatch):
     app = create_app(settings, worker=Worker("/nonexistent/model_server.py", worker_stub.socket_path, log=lambda m: None), start_worker=False)
     ctx = app.state.ctx
 
+    opened: list[tuple[str, str]] = []
+
+    async def open_name(endpoint, path: str) -> int:
+        opened.append((endpoint.name, path))
+        return -1
+
     def watches(source) -> Watches:
         kept = watches_op.FacesKept(ctx, lambda m: None)
         ctx.watches = Watches(
-            settings.watches, source=source, find=watches_op.frame_finder(ctx, kept), crop=crop, log=lambda m: None, idle=kept.release,
+            settings.watches, source=source, open_name=open_name, find=watches_op.frame_finder(ctx, kept), crop=crop, log=lambda m: None, idle=kept.release,
             folder=str(tmp_path / "watches"), segments=segments, join=join,
         )
         return ctx.watches
 
     watches.ctx = ctx
+    watches.opened = opened
     async with app.router.lifespan_context(app):
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://ems", headers=AUTH) as client:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://ems", headers={**AUTH, **FILES}) as client:
             yield client, watches, worker_stub
     await worker_stub.stop()
 
@@ -147,7 +162,7 @@ async def test_a_face_is_told_once_seen_twice_and_again_when_gone(ems):
     # Still, then a change with a face, the face held through still frames, then gone.
     script = Script([frame(10, False), frame(100, True), frame(10, True), frame(10, True), *[frame(10, False)] * 8])
     watch_set = watches(script)
-    put = await client.put("/v0/watches/front-door", json={"source": "rtsp://viewer:s3cret@192.0.2.30/sub", "faces": {"fps": 5}})
+    put = await client.put("/v0/watches/front-door", json={"source": SUB, "faces": {"fps": 5}})
     assert put.status_code == 200
     assert put.json()["result"]["made"] is True
     _, queue = watch_set.subscribe("front-door")
@@ -170,7 +185,7 @@ async def test_a_face_is_told_once_seen_twice_and_again_when_gone(ems):
 async def test_frames_that_do_not_change_are_not_looked_at(ems):
     client, watches, worker_stub = ems
     watch_set = watches(Script([frame(10, True)] * 10, again=[frame(10, True)]))
-    await client.put("/v0/watches/front-door", json={"source": "rtsp://192.0.2.30/sub"})
+    await client.put("/v0/watches/front-door", json={"source": SUB})
     _, queue = watch_set.subscribe("front-door")
     heard = await events_until(queue, "source.back")
     assert [event["type"] for event in heard] == ["source.lost", "source.back"]
@@ -181,7 +196,7 @@ async def test_frames_that_do_not_change_are_not_looked_at(ems):
 async def test_a_source_that_ends_is_read_again_and_said_to_be_back(ems):
     client, watches, _ = ems
     watch_set = watches(Script([frame(10, False)], again=[frame(10, False)]))
-    await client.put("/v0/watches/porch", json={"source": "rtsp://192.0.2.31/sub"})
+    await client.put("/v0/watches/porch", json={"source": MAIN})
     _, queue = watch_set.subscribe("porch")
     heard = await events_until(queue, "source.back")
     assert [event["type"] for event in heard] == ["source.lost", "source.back"]
@@ -191,23 +206,29 @@ async def test_a_source_that_ends_is_read_again_and_said_to_be_back(ems):
 async def test_the_same_watch_stated_twice_runs_on_and_another_is_busy(ems):
     client, watches, _ = ems
     watches(Script([frame(10, False)] * 100))
-    spec = {"source": "rtsp://viewer:s3cret@192.0.2.30/sub"}
+    spec = {"source": SUB}
     first = (await client.put("/v0/watches/front-door", json=spec)).json()["result"]
     again = (await client.put("/v0/watches/front-door", json=spec)).json()["result"]
     assert (first["made"], again["made"]) == (True, False)
-    assert again["source"] == "rtsp://viewer:***@192.0.2.30/sub"
-    busy = await client.put("/v0/watches/porch", json={"source": "rtsp://192.0.2.31/sub"})
+    assert again["source"] == SUB["path"]
+    # Another endpoint, as after the caller's endpoint started anew, makes it again.
+    other = {"ems-files": "address=ein.test:2224; secret=" + "cd" * 32}
+    assert (await client.put("/v0/watches/front-door", json=spec, headers=other)).json()["result"]["made"] is True
+    busy = await client.put("/v0/watches/porch", json={"source": MAIN})
     assert busy.status_code == 503 and busy.json()["error"]["code"] == "busy"
     listed = (await client.get("/v0/watches")).json()["result"]
     assert [watch["id"] for watch in listed] == ["front-door"]
     assert (await client.put("/v0/watches/bad id", json=spec)).status_code == 400
     assert (await client.put("/v0/watches/front-door", json={**spec, "colour": "red"})).status_code == 400
+    assert (await client.put("/v0/watches/front-door", json={"source": "rtsp://192.0.2.30/sub"})).status_code == 400
+    refused = await client.put("/v0/watches/front-door", json=spec, headers={"ems-files": ""})
+    assert refused.status_code == 400 and "EMS-Files" in refused.json()["error"]["message"]
 
 
 async def test_the_event_stream_ends_when_its_watch_is_deleted(ems):
     client, watches, _ = ems
     watches(Script([frame(10, False)] * 100))
-    await client.put("/v0/watches/front-door", json={"source": "rtsp://192.0.2.30/sub"})
+    await client.put("/v0/watches/front-door", json={"source": SUB})
     stream = asyncio.create_task(client.get("/v0/watches/front-door/events"))
     await asyncio.sleep(0.2)
     deleted = await client.delete("/v0/watches/front-door")
@@ -224,7 +245,7 @@ async def test_the_faces_family_is_pinned_while_a_watch_runs_and_again_after_a_w
     client, watches, worker_stub = ems
     watches(Script([frame(10 + 90 * (n % 2), False) for n in range(40)]))
     pins = lambda: [(request["op"], request["families"]) for request in worker_stub.requests if request["op"] in ("pin", "unpin")]
-    await client.put("/v0/watches/front-door", json={"source": "rtsp://192.0.2.30/sub"})
+    await client.put("/v0/watches/front-door", json={"source": SUB})
     async with asyncio.timeout(5):
         while not pins():
             await asyncio.sleep(0.05)
@@ -236,7 +257,7 @@ async def test_the_faces_family_is_pinned_while_a_watch_runs_and_again_after_a_w
         while len(pins()) < 2:
             await asyncio.sleep(0.05)
     # A watch made again with another body keeps the family; the last one stopped lets it go.
-    await client.put("/v0/watches/front-door", json={"source": "rtsp://192.0.2.30/sub", "motion": False})
+    await client.put("/v0/watches/front-door", json={"source": SUB, "motion": False})
     assert pins() == [("pin", ["faces"])] * 2
     await client.delete("/v0/watches/front-door")
     assert pins() == [("pin", ["faces"])] * 2 + [("unpin", ["faces"])]
@@ -258,24 +279,32 @@ async def test_a_watchs_frame_leaves_a_quiet_card_quiet():
 async def test_nvdec_decodes_and_the_cpu_takes_a_source_it_gives_nothing_of(monkeypatch):
     reads: list[tuple[str, bool]] = []
 
-    async def decode(spec, nvdec):
-        reads.append((spec.source, nvdec))
-        if nvdec and spec.source.endswith("mjpeg"):
+    async def decode(spec, open_source, nvdec):
+        reads.append((spec.source.path, nvdec))
+        if nvdec and spec.source.path.endswith("mjpeg"):
             raise ConnectionError("no NVDEC for this codec")
         yield frame(10, False)
 
     monkeypatch.setattr(watches_module, "_ffmpeg_frames", decode)
     monkeypatch.setattr(watches_module, "_cpu_only", {})
     monkeypatch.setattr("ems.tools.ffmpeg.gpu_present", lambda: True)
-    for source in ("rtsp://192.0.2.30/h264", "rtsp://192.0.2.31/mjpeg", "rtsp://192.0.2.31/mjpeg"):
-        assert len([each async for each in watches_module.ffmpeg_frames(WatchSpec(source=source))]) == 1
-    assert reads == [("rtsp://192.0.2.30/h264", True), ("rtsp://192.0.2.31/mjpeg", True), ("rtsp://192.0.2.31/mjpeg", False), ("rtsp://192.0.2.31/mjpeg", False)]
-    assert watches_module.filters(WatchSpec(source="x", angle=90), nvdec=True).startswith("fps=3.0,hwdownload,format=nv12,transpose=2,")
+    for source in ("/a/0-h264", "/a/1-mjpeg", "/a/1-mjpeg"):
+        assert len([each async for each in watches_module.ffmpeg_frames(WatchSpec(source={"path": source}), None)]) == 1
+    assert reads == [("/a/0-h264", True), ("/a/1-mjpeg", True), ("/a/1-mjpeg", False), ("/a/1-mjpeg", False)]
+    assert watches_module.filters(WatchSpec(source=SUB, angle=90), nvdec=True).startswith("fps=3.0,hwdownload,format=nv12,transpose=2,")
 
 
-def test_a_source_is_shown_without_its_password_and_ffmpeg_headers_are_read():
-    assert masked_source("rtsp://viewer:s3cret@192.0.2.30:554/sub") == "rtsp://viewer:***@192.0.2.30:554/sub"
-    assert masked_source("rtsp://192.0.2.30/sub") == "rtsp://192.0.2.30/sub"
+async def test_a_watchs_names_are_opened_at_the_endpoint_it_was_put_with(ems):
+    client, watches, _ = ems
+    watches(Script([frame(10, False)] * 100))
+    await client.put("/v0/watches/front-door", json={"source": SUB, "clips": {"source": MAIN}})
+    async with asyncio.timeout(5):
+        while len(watches.opened) < 1:
+            await asyncio.sleep(0.05)
+    assert watches.opened[0] == (parse_header(FILES["ems-files"]).name, SUB["path"])
+
+
+def test_ffmpeg_headers_are_read():
     assert ppm_size(b"P6\n640 360\n255\n") == (640, 360)
     assert ppm_size(b"P6\n640 360\n25") is None
 
@@ -289,7 +318,7 @@ async def test_a_face_cuts_a_clip_from_before_it_until_after_it_is_gone(ems):
     script = Script([frame(10, False), frame(100, True), frame(10, True), frame(10, True), *[frame(10, False)] * 8])
     watch_set = watches(script)
     clips = {"on": ["face"], "pre": 0.5, "post": 1}
-    put = await client.put("/v0/watches/front-door", json={"source": "rtsp://192.0.2.30/sub", "faces": {"fps": 5}, "clips": clips})
+    put = await client.put("/v0/watches/front-door", json={"source": SUB, "faces": {"fps": 5}, "clips": clips})
     assert put.json()["result"]["clips"]["state"] in ("connecting", "recording")
     _, queue = watch_set.subscribe("front-door")
     heard = await events_until(queue, "clip")
@@ -317,7 +346,7 @@ async def test_a_face_cuts_a_clip_from_before_it_until_after_it_is_gone(ems):
 async def test_a_request_cuts_a_clip_and_a_watch_without_clips_refuses_one(ems):
     client, watches, _ = ems
     watch_set = watches(Script([frame(10, False)] * 200))
-    await client.put("/v0/watches/porch", json={"source": "rtsp://192.0.2.31/sub", "clips": {"pre": 0.2, "post": 1}})
+    await client.put("/v0/watches/porch", json={"source": MAIN, "clips": {"pre": 0.2, "post": 1}})
     _, queue = watch_set.subscribe("porch")
     asked = await client.post("/v0/watches/porch/clips", json={"post": 2})
     clip_id = asked.json()["result"]["clip"]
@@ -329,7 +358,7 @@ async def test_a_request_cuts_a_clip_and_a_watch_without_clips_refuses_one(ems):
     await client.delete("/v0/watches/porch")
     # A watch deleted takes its recording and its clips with it.
     assert os.path.isdir(watch_set.folder) and not os.path.exists(os.path.join(watch_set.folder, "porch"))
-    await client.put("/v0/watches/porch", json={"source": "rtsp://192.0.2.31/sub"})
+    await client.put("/v0/watches/porch", json={"source": MAIN})
     refused = await client.post("/v0/watches/porch/clips", json={})
     assert refused.status_code == 400 and refused.json()["error"]["code"] == "invalid_request"
 
@@ -339,28 +368,44 @@ async def test_ffmpeg_records_segments_and_joins_them_into_an_mp4(tmp_path):
     source = tmp_path / "camera.mkv"
     subprocess.run(
         ["ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc=size=320x180:rate=25", "-f", "lavfi", "-i", "sine",
-         "-t", "3", "-c:v", "libx264", "-g", "25", "-c:a", "pcm_alaw", str(source)],
+         "-t", "3", "-c:v", "libx264", "-g", "25", "-c:a", "aac", str(source)],
         check=True,
     )
     folder = tmp_path / "segments"
     folder.mkdir()
+    live: list[subprocess.Popen] = []
+
+    async def open_live():
+        """The file as a camera's stream comes: MPEG-TS at its own pace, again and again, read from a pipe."""
+        process = subprocess.Popen(
+            ["ffmpeg", "-hide_banner", "-loglevel", "error", "-re", "-stream_loop", "-1", "-i", str(source), "-c", "copy", "-f", "mpegts", "pipe:1"],
+            stdout=subprocess.PIPE,
+        )
+        live.append(process)
+        return os.dup(process.stdout.fileno())
+
     got = []
     async with asyncio.timeout(30):
-        recording = ffmpeg_segments(str(source), str(folder), 7)
+        recording = ffmpeg_segments(open_live, str(folder), 7)
         async for path, length in recording:
             got.append((path, length))
             if len(got) == 2:
                 break
         await recording.aclose()
+    for process in live:
+        process.kill()
+        process.wait()
     assert [os.path.basename(path) for path, _ in got] == ["0000000007.mp4", "0000000008.mp4"]
-    assert all(1.5 < length < 2.5 for _, length in got)
+    # The first holds what came while ffmpeg looked at the stream's start as well.
+    lengths = [length for _, length in got]
+    assert 1.5 < lengths[0] < 3.5 and 1.5 < lengths[1] < 2.5, lengths
     out = tmp_path / "clip.mp4"
     await ffmpeg_join([path for path, _ in got], str(out), "2026-11-11T07:53:00.250Z")
     probe = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "stream=codec_name:format=duration:format_tags=creation_time", "-of", "json", str(out)], check=True, capture_output=True, text=True)
     info = json.loads(probe.stdout)
     assert info["format"]["tags"]["creation_time"].startswith("2026-11-11T07:53:00")
     assert sorted(stream["codec_name"] for stream in info["streams"]) == ["aac", "h264"]
-    assert 3.5 < float(info["format"]["duration"]) < 4.5
+    assert 3.5 < float(info["format"]["duration"]) < 6
 
 
 class Ffmpeg:
@@ -391,7 +436,10 @@ async def test_a_recording_that_is_stopped_stops(tmp_path, monkeypatch):
         return Ffmpeg()
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
-    recorder = Recorder("porch", ClipsSpec(), "rtsp://192.0.2.31/main", str(tmp_path / "porch"), segments=ffmpeg_segments, join=ffmpeg_join, tell=lambda kind, data: None, log=lambda m: None)
+    async def open_source() -> int:
+        return os.open(os.devnull, os.O_RDONLY)
+
+    recorder = Recorder("porch", ClipsSpec(), open_source, str(tmp_path / "porch"), segments=ffmpeg_segments, join=ffmpeg_join, tell=lambda kind, data: None, log=lambda m: None)
     recorder.start()
     async with asyncio.timeout(5):
         while not recorder.segments:

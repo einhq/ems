@@ -63,12 +63,12 @@ def which(name: str) -> str | None:
     return shutil.which(name)
 
 
-async def run(args: list[str], *, timeout: float | None = None, deadline: float | None = None, stdin: bytes | None = None, cwd: str | None = None, env: dict | None = None, niceness: int = NICE) -> Completed:
+async def run(args: list[str], *, timeout: float | None = None, deadline: float | None = None, stdin: bytes | None = None, cwd: str | None = None, env: dict | None = None, niceness: int = NICE, pass_fds: tuple[int, ...] = ()) -> Completed:
     """Run to completion. Never raises for a non-zero exit — the caller reads `code`.
 
     `timeout` is the longest the tool may go without progress (see the module's docstring);
     a tool stopped for it comes back as a failed exit whose stderr says so. `niceness` is the
-    `nice -n` the tool runs under.
+    `nice -n` the tool runs under; `pass_fds` the descriptors it is given beside its standard ones.
     """
     nice = which("nice")
     argv = [nice, "-n", str(niceness), *args] if nice else list(args)
@@ -80,6 +80,7 @@ async def run(args: list[str], *, timeout: float | None = None, deadline: float 
         cwd=cwd,
         env=env,
         start_new_session=True,
+        pass_fds=pass_fds,
     )
     watch = _Watch(proc, timeout)
     try:

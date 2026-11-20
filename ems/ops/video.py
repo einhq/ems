@@ -1,5 +1,5 @@
 """`video.frames` — frames as images, at given times or spread across the file — and
-`video.poster`, one frame fitted into rendition targets like a photo."""
+`video.poster`, one frame of a file or of a live stream fitted into rendition targets like a photo."""
 
 from __future__ import annotations
 
@@ -10,12 +10,13 @@ import statistics
 from typing import Literal
 
 from fastapi import APIRouter, Request
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from .. import remote
 from ..context import Context
-from ..errors import EmsError, UNDECODABLE, invalid
-from ..schemas import FileRef, Strict, WithOptions
+from ..clips import input_args
+from ..errors import EmsError, TOOL_FAILED, UNDECODABLE, invalid
+from ..schemas import FileRef, StreamRef, Strict, WithOptions
 from ..streaming import Outcome, Progress, run_op
 from ..tools import encode
 from ..tools import ffmpeg as ffmpeg_tool
@@ -165,13 +166,23 @@ def register(router: APIRouter, ctx: Context) -> None:
 
 
 class PosterRequest(WithOptions):
-    file: FileRef
+    file: FileRef | None = None
+    # A live stream the caller grants in place of a file: its first frame, as it comes.
+    source: StreamRef | None = None
     at: float = Field(default=1.0, ge=0)
     deinterlace: bool = False
     # True for a poster that stands for the whole video: a blank frame at `at` gives way to a
     # later one that shows something (`unblank_poster`). A face's frame is asked for exactly.
     skip_blank: bool = False
     targets: list[RenditionTarget] = Field(min_length=1, max_length=MAX_TARGETS)
+
+    @model_validator(mode="after")
+    def _one_input(self) -> "PosterRequest":
+        if (self.file is None) == (self.source is None):
+            raise ValueError("a poster is of a file or of a live stream (source), one of them")
+        if self.source is not None and self.model_fields_set & {"at", "skip_blank"}:
+            raise ValueError("a live stream's poster is its first frame: no at or skip_blank")
+        return self
 
 
 # Past this second a poster's frame is sought on the input first (`extract_poster`), to this
@@ -219,6 +230,32 @@ async def extract_poster(ctx: Context, path: str, out: str, *, at: float, deinte
         raise await ffprobe_tool.decode_failure(path, f"ffmpeg frame extraction failed: {last}", timeout=timeout)
     if not os.path.isfile(out) or os.path.getsize(out) == 0:
         raise NoFrame()
+
+
+# How much of a live stream ffmpeg reads to learn what it holds before the first frame: its
+# default, 5 s of a pipe, is the whole wait. Only keyframes are decoded, so a stream joined between
+# two gives the next one whole rather than broken frames that fail the decode.
+LIVE_POSTER_INPUT = ["-probesize", "1000000", "-analyzeduration", "200000", "-skip_frame", "nokey"]
+
+
+async def extract_live_poster(ctx: Context, path: str, out: str, *, deinterlace: bool) -> None:
+    """The first keyframe of the live stream granted at `path` as it comes, as a still like
+    `extract_poster`'s. On the CPU: one frame does not pay
+    for the card's start. A stream that ends or stalls before a frame comes is `tool_failed`, which
+    the caller may ask again."""
+    ffmpeg = require("ffmpeg")
+    filters = ("yadif," if deinterlace else "") + SQUARE_PIXELS_FILTER
+    fd = await remote.input_live(path)
+    try:
+        done = await run(
+            [ffmpeg, "-v", "error", "-nostdin", *LIVE_POSTER_INPUT, *input_args(fd), "-an", "-vf", filters, "-frames:v", "1", "-max_error_rate", "1", "-qscale:v", "0", "-y", "-f", "image2", "-update", "1", out],
+            timeout=ctx.settings.tool_stall_seconds,
+            pass_fds=(fd,),
+        )
+    finally:
+        os.close(fd)
+    if done.code != 0 or not os.path.isfile(out) or os.path.getsize(out) == 0:
+        raise EmsError(TOOL_FAILED, f"no frame came from the stream: {done.tail() or f'exit {done.code}'}")
 
 
 async def extract_poster_within(ctx: Context, path: str, out: str, *, at: float, deinterlace: bool) -> float:
@@ -279,18 +316,24 @@ async def unblank_poster(ctx: Context, path: str, out: str, *, t: float, deinter
 
 
 async def poster(ctx: Context, req: PosterRequest, progress: Progress) -> Outcome:
-    path = remote.input(req.file.path)
+    path = remote.input(req.file.path) if req.file else None
     async with ctx.admission.slot("tools", interactive=req.options.interactive):
         scratch = ctx.scratch_dir("poster")
         try:
             await progress.emit("frame")
             frame = os.path.join(scratch, "frame.jpg")
-            t = await extract_poster_within(ctx, path, frame, at=req.at, deinterlace=req.deinterlace)
-            if req.skip_blank:
-                t = await unblank_poster(ctx, path, frame, t=t, deinterlace=req.deinterlace)
+            if path is None:
+                assert req.source is not None
+                await extract_live_poster(ctx, req.source.path, frame, deinterlace=req.deinterlace)
+                t = 0.0
+            else:
+                t = await extract_poster_within(ctx, path, frame, at=req.at, deinterlace=req.deinterlace)
+                if req.skip_blank:
+                    t = await unblank_poster(ctx, path, frame, t=t, deinterlace=req.deinterlace)
             await progress.emit("render")
             # The frame is a JPEG now: the caller's angle applies whole, no reader-applied turn to subtract.
-            result = await render_targets(ctx, frame, req.file.angle, req.file.mirror, req.targets)
+            angle, mirror = (req.file.angle, req.file.mirror) if req.file else (0, False)
+            result = await render_targets(ctx, frame, angle, mirror, req.targets)
         finally:
             shutil.rmtree(scratch, ignore_errors=True)
     result["t"] = t

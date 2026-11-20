@@ -1,12 +1,10 @@
 """Pages rendered into live video for screens (`/v0/pages`, docs/api.md 4.25).
 
 A page is opened in Chromium on a virtual X display of its own (Xvfb), which ffmpeg grabs at a
-steady frame rate and encodes once as H.264. The one encode is muxed three times: as fragmented MP4
-(what a Cast player takes when it is told the stream is live) and as MPEG-TS (what a DLNA screen
-takes), whose every reader is served from it, one that joins getting the format's header and
-everything since the latest keyframe, then what comes; and as live HLS, a playlist of the latest
-seconds in files of a second each, which ffmpeg writes to the page's folder (what a browser hands a
-screen near it, and AirPlay plays). A stream nobody has read for its `idle` seconds stops itself.
+steady frame rate and encodes once as H.264. The one encode is muxed twice, as fragmented MP4 (what
+a Cast player takes when it is told the stream is live) and as MPEG-TS (what a DLNA screen takes),
+and each is written as it comes into a live stream its caller grants under `EMS-Files`, which serves
+it to its readers. EMS serves nothing of it, and a page runs until its caller deletes it or it fails.
 """
 
 from __future__ import annotations
@@ -19,46 +17,29 @@ import shutil
 import signal
 import struct
 import time
-from collections import deque
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import AsyncIterator, Awaitable, Callable, Literal
+from typing import Awaitable, Callable
 
 from pydantic import Field, field_validator
 
 from .errors import BUSY, INVALID_REQUEST, NOT_FOUND, TOOL_FAILED, EmsError
-from .schemas import Strict
+from .remote import Endpoint
+from .schemas import Strict, StreamRef
 
 PAGE_ID = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 FORMATS = ("mp4", "ts")
 # A fragment at least this often, in microseconds, so a player is never more than this behind what
 # was encoded.
 FRAGMENT_US = 200_000
-# Chrome reports a stream's metadata, which it needs before it offers a screen near it the stream,
-# once it has read about a second of media, and it reads in blocks of this many bytes: a new
-# page's fragments, a few hundred bytes of blank page each, take seconds to fill one
-# (ein/core#1420). A reader that asks for a declared duration is given both at once.
-QUICK_START_SECONDS = 1.0
-CHROME_READ = 32 * 1024
-# Pieces a reader may fall behind before it is let go: about a minute of fragments.
-READER_BACKLOG = 300
 # How long a stream that ended stays listed, with why, before it is forgotten.
 ENDED_KEPT_SECONDS = 60.0
 # How long a new stream may take to give its first keyframe in both formats.
 START_SECONDS = 30.0
-# How often the processes, the memory and the readers are looked at.
+# How often the processes and the memory are looked at.
 WATCH_SECONDS = 1.0
 TS_PACKET = 188
-# The HLS form: segments of a keyframe's second each, the playlist naming the latest of them.
-HLS_PLAYLIST = "index.m3u8"
-HLS_SEGMENT_SECONDS = 1
-HLS_LISTED = 10
-# The files a reader may ask for, as ffmpeg names them beside the playlist.
-HLS_NAME = re.compile(r"^index(\.m3u8|\d{1,9}\.ts)$")
-# How long a playlist asked for before ffmpeg has written it is waited for.
-HLS_START_SECONDS = 10.0
-# An HLS player holds no answer open; it is counted a reader this long after it asked for a file.
-HLS_READ_SECONDS = 5.0
 # The page's sound: what its browser plays, as AAC.
 AUDIO_RATE = 48000
 AUDIO_KBPS = 128
@@ -83,10 +64,17 @@ class PageMessage(Strict):
     message: dict
 
 
+class PageOutput(Strict):
+    """The live streams the page is written into, one for each format, as the caller grants them."""
+
+    mp4: StreamRef
+    ts: StreamRef
+
+
 class PageSpec(Strict):
     url: str
     video: PageVideo = Field(default_factory=PageVideo)
-    idle: float = Field(default=20, ge=5, le=600)
+    output: PageOutput
 
     @field_validator("url")
     @classmethod
@@ -219,147 +207,6 @@ def decode_times(fragment: bytes) -> dict[int, int]:
     return {track_id: int.from_bytes(fragment[at:at + width], "big") for track_id, (at, width) in _tfdts(fragment).items()}
 
 
-def at_decode_times(fragment: bytes, times: dict[int, int]) -> bytes:
-    """The fragment with the decode times `times` gives its tracks; the others as they were."""
-    b = bytearray(fragment)
-    for track_id, (at, width) in _tfdts(fragment).items():
-        if track_id in times:
-            b[at:at + width] = max(0, times[track_id]).to_bytes(width, "big")
-    return bytes(b)
-
-
-def same_time(header: bytes, track_id: int, value: int) -> dict[int, int]:
-    """`value` in the timescale of track `track_id`, as the same time in every track's."""
-    known = tracks(header)
-    if track_id not in known:
-        return {}
-    return {other: value * track.timescale // known[track_id].timescale for other, track in known.items()}
-
-
-def video_time(header: bytes, fragment: bytes) -> dict[int, int]:
-    """The picture's decode time in `fragment`, as that time in every track: a stream moved by it
-    keeps its sound with its picture."""
-    video = next((track_id for track_id, track in tracks(header).items() if track.video), None)
-    times = decode_times(fragment)
-    return same_time(header, video, times[video]) if video is not None and video in times else {}
-
-
-def rebased(fragment: bytes, base: dict[int, int]) -> bytes:
-    """The fragment with each track's decode time `base` gives it earlier, so a reader's stream
-    starts at 0."""
-    return at_decode_times(fragment, {track_id: value - base.get(track_id, 0) for track_id, value in decode_times(fragment).items()})
-
-
-def _flags(box: bytes, at: int) -> int:
-    return struct.unpack(">I", box[at + 8:at + 12])[0] & 0xFFFFFF
-
-
-def fragment_duration(fragment: bytes, header: bytes, track_id: int | None = None) -> int | None:
-    """How long a fragment lasts in a track's timescale, the first track's unless `track_id`: its
-    samples' durations from its `trun`, or their count times its `tfhd`'s default, or the header's
-    `trex`'s; `None` when it says none."""
-    traf = next(((at, size) for found, at, size in _trafs(fragment) if track_id is None or found == track_id), None)
-    if traf is None:
-        return None
-    track = track_id if track_id is not None else _trafs(fragment)[0][0]
-    tfhd = _child(fragment, *traf, b"tfhd")
-    trun = _child(fragment, *traf, b"trun")
-    if tfhd is None or trun is None:
-        return None
-    default: int | None = None
-    flags = _flags(fragment, tfhd[0])
-    at = tfhd[0] + 16 + (8 if flags & 0x1 else 0) + (4 if flags & 0x2 else 0)
-    if flags & 0x8:
-        default = struct.unpack(">I", fragment[at:at + 4])[0]
-    else:
-        known = tracks(header).get(track)
-        default = known.default_duration if known is not None else None
-    flags = _flags(fragment, trun[0])
-    count = struct.unpack(">I", fragment[trun[0] + 12:trun[0] + 16])[0]
-    if not flags & 0x100:
-        return count * default if default else None
-    at = trun[0] + 16 + (4 if flags & 0x1 else 0) + (4 if flags & 0x4 else 0)
-    width = 4 * sum(1 for bit in (0x100, 0x200, 0x400, 0x800) if flags & bit)
-    return sum(struct.unpack(">I", fragment[at + n * width:at + n * width + 4])[0] for n in range(count))
-
-
-def quick_start(header: bytes, fragments: list[bytes]) -> tuple[list[bytes], dict[int, int]]:
-    """What a reader is sent at once so that Chrome reads its metadata at once: the header and the
-    fragments since the keyframe (their clock at 0), the keyframe's fragment repeated after itself
-    until they hold `QUICK_START_SECONDS`, and a `free` box filling the bytes out to Chrome's next
-    read. Repeated straight after itself, the fragment leaves the decoder as it found it, so the
-    next one follows on. Also how much later, in each track, the fragments that follow come: what
-    was repeated, timed by the picture, so the sound stays with it."""
-    video = next((track_id for track_id, track in tracks(header).items() if track.video), None)
-    lengths = [fragment_duration(fragment, header, video) for fragment in fragments] if video is not None else []
-    if video is None or not fragments or None in lengths or not lengths[0]:
-        return [header, *fragments], {}
-    scale = tracks(header)[video].timescale
-    first = lengths[0]
-    repeats = max(0, -(-(int(QUICK_START_SECONDS * scale) - sum(lengths)) // first))
-    starts = decode_times(fragments[0])
-
-    def later(n: int) -> dict[int, int]:
-        return same_time(header, video, n * first)
-
-    def moved(fragment: bytes, by: dict[int, int], times: dict[int, int]) -> bytes:
-        return at_decode_times(fragment, {track_id: value + by.get(track_id, 0) for track_id, value in times.items()})
-
-    shift = later(repeats)
-    out = [header, fragments[0], *(moved(fragments[0], later(n), starts) for n in range(1, repeats + 1)),
-           *(moved(fragment, shift, decode_times(fragment)) for fragment in fragments[1:])]
-    gap = -sum(len(piece) for piece in out) % CHROME_READ
-    if gap:
-        gap += CHROME_READ if gap < 8 else 0
-        out.append(struct.pack(">I4s", gap, b"free") + bytes(gap - 8))
-    return out, shift
-
-
-def declared(header: bytes, seconds: int) -> bytes:
-    """The MP4 header (`ftyp` and `moov`) saying the stream lasts `seconds`: in `mvhd`, each track's
-    `tkhd` and `mdhd`, and an `mehd` in `mvex`. ffmpeg's live header says nothing (0), so a browser
-    takes what it has read for the duration, and Chrome offers a screen near it nothing of 15 s or
-    less; one that reads this one counts the stream that long."""
-    b = bytearray(header)
-    moov = next(((at, size) for kind, at, size in _boxes(b, 0, len(b)) if kind == b"moov"), None)
-    if moov is None:
-        return header
-
-    def put(box: int, value: int, track: bool = False) -> None:
-        # A full box's duration follows its version and flags, two times and a word: mvhd's and
-        # mdhd's timescale, tkhd's track id, then for tkhd a reserved word too.
-        at = box + (32 if b[box + 8] == 1 else 24) + (4 if track else 0)
-        if b[box + 8] == 1:
-            struct.pack_into(">Q", b, at, value)
-        else:
-            struct.pack_into(">I", b, at, value)
-
-    def timescale(box: int) -> int:
-        return struct.unpack_from(">I", b, box + (28 if b[box + 8] == 1 else 20))[0]
-
-    mvhd = _child(b, *moov, b"mvhd")
-    mvex = _child(b, *moov, b"mvex")
-    if mvhd is None or mvex is None:
-        return header
-    scale = timescale(mvhd[0])
-    put(mvhd[0], seconds * scale)
-    for kind, at, size in _boxes(b, moov[0] + 8, moov[0] + moov[1]):
-        if kind != b"trak":
-            continue
-        tkhd = _child(b, at, size, b"tkhd")
-        if tkhd is not None:
-            put(tkhd[0], seconds * scale, track=True)
-        mdia = _child(b, at, size, b"mdia")
-        mdhd = _child(b, *mdia, b"mdhd") if mdia is not None else None
-        if mdhd is not None:
-            put(mdhd[0], seconds * timescale(mdhd[0]))
-    if _child(b, *mvex, b"mehd") is None:
-        b[mvex[0] + 8:mvex[0] + 8] = struct.pack(">I4sII", 16, b"mehd", 0, seconds * scale)
-        struct.pack_into(">I", b, mvex[0], mvex[1] + 16)
-        struct.pack_into(">I", b, moov[0], moov[1] + 16)
-    return bytes(b)
-
-
 class Mp4Splitter:
     """ffmpeg's fragmented MP4 cut into its header (`ftyp` and `moov`) and its fragments (`moof`
     and `mdat` together), each told whether it starts at a keyframe."""
@@ -475,106 +322,29 @@ def _video_pid(packet: bytes, adaptation: int) -> int | None:
     return None
 
 
-# ── Readers ────────────────────────────────────────────────────────────────────────────────────
+# ── Outputs ────────────────────────────────────────────────────────────────────────────────────
 
 
-class Reader:
-    """One reader's pieces, waiting to be sent."""
+class Output:
+    """One format of the page's stream as it is written: cut where a reader may start, so that its
+    latest keyframe, and how many came, are known."""
 
-    def __init__(self, first: list[bytes]):
-        self.pieces: deque[bytes] = deque(first)
-        # How many of the pieces it was given on joining, all there at once.
-        self.joined = len(first)
-        self.event = asyncio.Event()
-        self.ended = False
-
-    def offer(self, piece: bytes) -> bool:
-        if len(self.pieces) >= READER_BACKLOG:
-            return False
-        self.pieces.append(piece)
-        self.event.set()
-        return True
-
-    def end(self) -> None:
-        self.ended = True
-        self.event.set()
-
-    async def next(self) -> bytes | None:
-        while not self.pieces:
-            if self.ended:
-                return None
-            self.event.clear()
-            await self.event.wait()
-        return self.pieces.popleft()
-
-
-class Channel:
-    """One format of a stream: its header, the pieces since the latest keyframe, and its readers."""
-
-    def __init__(self, kind: Literal["mp4", "ts"], splitter: Mp4Splitter | TsSplitter):
-        self.kind = kind
+    def __init__(self, splitter: Mp4Splitter | TsSplitter):
         self.splitter = splitter
-        self.gop: list[bytes] = []
-        self.readers: set[Reader] = set()
+        # The fragment, or the TS's run of packets, that starts at the latest keyframe.
+        self.key: bytes | None = None
         # Keyframes seen, so one that came after a moment is told apart.
         self.keys = 0
 
     @property
     def playable(self) -> bool:
-        return self.splitter.header is not None and bool(self.gop)
+        return self.splitter.header is not None and self.key is not None
 
     def feed(self, data: bytes) -> None:
         for key, piece in self.splitter.feed(data):
             if key:
                 self.keys += 1
-                self.gop = [piece]
-            elif self.gop:
-                self.gop.append(piece)
-            else:
-                continue  # nothing before the first keyframe reaches anyone
-            for reader in list(self.readers):
-                if not reader.offer(piece):
-                    self.leave(reader)
-                    reader.end()
-
-    def join(self) -> Reader:
-        header = self.splitter.header
-        assert header is not None and self.gop
-        reader = Reader([header, *self.gop])
-        self.readers.add(reader)
-        return reader
-
-    def leave(self, reader: Reader) -> None:
-        self.readers.discard(reader)
-
-    def end(self) -> None:
-        for reader in list(self.readers):
-            reader.end()
-        self.readers.clear()
-
-    async def chunks(self, reader: Reader, duration: int | None = None) -> AsyncIterator[bytes]:
-        """What `reader` is sent: an MP4 reader's fragments with their clock starting at 0, and
-        with `duration`, its header saying the stream lasts that many seconds (`declared`) and its
-        start made for Chrome to read at once (`quick_start`)."""
-        base: dict[int, int] | None = None
-        header = self.splitter.header or b""
-        if self.kind == "mp4" and duration:
-            joined = [piece for _ in range(reader.joined) if (piece := await reader.next()) is not None]
-            if not joined:
-                return
-            header, *fragments = joined
-            base = video_time(header, fragments[0]) if fragments else None
-            start, shift = quick_start(declared(header, duration), [rebased(fragment, base or {}) for fragment in fragments])
-            for piece in start:
-                yield piece
-            if base is not None:
-                base = {track_id: value - shift.get(track_id, 0) for track_id, value in base.items()}
-        while (piece := await reader.next()) is not None:
-            if self.kind == "mp4" and piece[4:8] == b"moof":
-                if base is None:
-                    base = video_time(header, piece)
-                piece = rebased(piece, base)
-            yield piece
+                self.key = piece
 
 
 # ── Keys ───────────────────────────────────────────────────────────────────────────────────────
@@ -739,12 +509,11 @@ class Rendering:
     the browser's DevTools, which keys reach the page by."""
 
     def __init__(self, processes: dict[str, asyncio.subprocess.Process], outputs: dict[str, asyncio.StreamReader], encoder: str,
-                 folder: str | None = None, hls: str | None = None, devtools: Devtools | None = None):
+                 folder: str | None = None, devtools: Devtools | None = None):
         self.processes = processes
         self.outputs = outputs
         self.encoder = encoder
         self.folder = folder
-        self.hls = hls
         self.devtools = devtools
         self.errors = bytearray()
         # When the grab started, which the stream's clock counts from, at the latest.
@@ -846,27 +615,33 @@ def chromium_args(spec: PageSpec, profile: str, memory_mb: int) -> list[str]:
     return [*args, spec.url]
 
 
-def _tee_path(path: str) -> str:
-    """`path` as a file of ffmpeg's tee, whose own characters are escaped."""
-    return re.sub(r"([\\:|\[\]'])", r"\\\1", path)
+def _display_told(fd: int) -> bytes:
+    """What Xvfb writes to its `-displayfd`, read up to the newline it ends with. The number and the
+    newline are two writes, and an Xvfb whose newline finds the pipe closed ends itself
+    (ein/core#1422)."""
+    told = b""
+    while not told.endswith(b"\n"):
+        piece = os.read(fd, 16)
+        if not piece:
+            break
+        told += piece
+    return told
 
 
-def encoder_args(spec: PageSpec, encoder: str, ts_fd: int, hls: str) -> list[str]:
+def encoder_args(spec: PageSpec, encoder: str, ts_fd: int) -> list[str]:
     """ffmpeg's output side: the encode of the sound (input 0) and the picture (input 1), the
-    fragmented MP4 to stdout, the MPEG-TS to `ts_fd` and the HLS to the folder `hls`. The picture is
-    the first track, which the cuts where a reader may start go by."""
+    fragmented MP4 to stdout and the MPEG-TS to `ts_fd`. The picture is the first track, which the
+    cuts where a reader may start go by."""
     v = spec.video
     if encoder == "h264_nvenc":
         codec = ["-c:v", "h264_nvenc", "-preset", "p4", "-tune", "ll", "-rc", "vbr", "-cq", str(v.quality), "-maxrate", "8M",
                  "-bufsize", "16M", "-profile:v", "high", "-level:v", "4.1", "-forced-idr", "1", "-bf", "0"]
     else:
         codec = ["-c:v", encoder, "-b:v", "5M", "-maxrate", "8M"]
-    # One encode, muxed three times. Each format's header is written once, so the MPEG-TS and the
-    # HLS segments repeat the picture's parameters at every keyframe for a reader that starts there.
+    # One encode, muxed twice. Each format's header is written once, so the MPEG-TS repeats the
+    # picture's parameters at every keyframe for a reader that starts there.
     tee = (f"[f=mp4:movflags=frag_keyframe+empty_moov+default_base_moof:frag_duration={FRAGMENT_US}]pipe\\:1"
-           f"|[f=mpegts:bsfs/v=dump_extra=freq=keyframe]pipe\\:{ts_fd}"
-           f"|[f=hls:bsfs/v=dump_extra=freq=keyframe:hls_time={HLS_SEGMENT_SECONDS}:hls_list_size={HLS_LISTED}"
-           f":hls_flags=delete_segments+independent_segments]{_tee_path(os.path.join(hls, HLS_PLAYLIST))}")
+           f"|[f=mpegts:bsfs/v=dump_extra=freq=keyframe]pipe\\:{ts_fd}")
     sound = ["-c:a", "aac", "-b:a", f"{AUDIO_KBPS}k", "-ar", str(AUDIO_RATE), "-ac", "2"]
     return [*codec, *sound, "-g", str(v.fps), "-flags", "+global_header", "-map", "1:v", "-map", "0:a", "-f", "tee", tee]
 
@@ -896,7 +671,7 @@ def renderer(memory_mb: int, encoders: Callable[[], Awaitable[set[str]]], scratc
                 stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
                 pass_fds=(write,), start_new_session=True)
             os.close(write)
-            told = await asyncio.wait_for(asyncio.get_running_loop().run_in_executor(None, os.read, read, 16), 10)
+            told = await asyncio.wait_for(asyncio.get_running_loop().run_in_executor(None, _display_told, read), 10)
             os.close(read)
             if not told.strip():
                 raise EmsError(TOOL_FAILED, "Xvfb gave no display")
@@ -930,11 +705,7 @@ def renderer(memory_mb: int, encoders: Callable[[], Awaitable[set[str]]], scratc
             writer, _ = await loop.connect_write_pipe(asyncio.Protocol, os.fdopen(ours_out, "wb", buffering=0))
             devtools = Devtools(await _pipe_reader(ours_in), writer)
             failures: list[str] = []
-            hls = os.path.join(folder, "hls")
             for encoder in order:
-                # What an encoder that could not start wrote is not the next one's.
-                shutil.rmtree(hls, ignore_errors=True)
-                os.makedirs(hls)
                 # The sound is opened first: PulseAudio takes about two seconds to start recording,
                 # and a display grab opened before it starts that much ahead of it, which ffmpeg
                 # then holds back to the sound and so grabs a frame or two a second (ein/core#1428).
@@ -945,7 +716,7 @@ def renderer(memory_mb: int, encoders: Callable[[], Awaitable[set[str]]], scratc
                 ts_read, ts_write = os.pipe()
                 grabbed_from = time.monotonic()
                 process = await asyncio.create_subprocess_exec(
-                    *grab, *encoder_args(spec, encoder, ts_write, hls), stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
+                    *grab, *encoder_args(spec, encoder, ts_write), stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE, pass_fds=(ts_write,), start_new_session=True)
                 os.close(ts_write)
                 ts = await _pipe_reader(ts_read)
@@ -954,7 +725,7 @@ def renderer(memory_mb: int, encoders: Callable[[], Awaitable[set[str]]], scratc
                 if first:
                     processes["ffmpeg"] = process
                     mp4 = _prepended(process.stdout, first)
-                    rendering = Rendering(processes, {"mp4": mp4, "ts": ts}, encoder, folder, hls, devtools)
+                    rendering = Rendering(processes, {"mp4": mp4, "ts": ts}, encoder, folder, devtools)
                     rendering.grabbed_from = grabbed_from
                     asyncio.ensure_future(_drain(process.stderr, rendering.errors))
                     return rendering
@@ -1001,21 +772,32 @@ class Ending:
     at: float
 
 
-class Page:
-    """One page streamed: its rendering, its formats, and when it last had a reader."""
+Opener = Callable[[Endpoint, str], Awaitable[int]]
 
-    def __init__(self, page_id: str, spec: PageSpec, memory_mb: int, log: Callable[[str], None]):
+
+def _write_all(fd: int, data: bytes) -> None:
+    view = memoryview(data)
+    while view:
+        view = view[os.write(fd, view):]
+
+
+class Page:
+    """One page streamed: its rendering, and its formats as they are written into the caller's
+    streams."""
+
+    def __init__(self, page_id: str, spec: PageSpec, endpoint: Endpoint, memory_mb: int, log: Callable[[str], None]):
         self.id = page_id
         self.spec = spec
+        self.endpoint = endpoint
         self.memory_mb = memory_mb
         self.log = log
         self.since = time.time()
-        self.channels = {"mp4": Channel("mp4", Mp4Splitter()), "ts": Channel("ts", TsSplitter())}
+        self.outputs = {"mp4": Output(Mp4Splitter()), "ts": Output(TsSplitter())}
+        # The descriptor each format is written to, the caller's name opened to write.
+        self.written: dict[str, int] = {}
         self.rendering: Rendering | None = None
         self.ending: Ending | None = None
         self.made = 0
-        self.unread_since = time.monotonic()
-        self.hls_read: float | None = None
         self.playable = asyncio.Event()
         self.tasks: list[asyncio.Task] = []
         self.ended = asyncio.Event()
@@ -1026,13 +808,6 @@ class Page:
             return "ended"
         return "running" if self.playable.is_set() else "starting"
 
-    def readers(self) -> int:
-        return sum(len(channel.readers) for channel in self.channels.values()) + self.hls_readers()
-
-    def hls_readers(self) -> int:
-        """1 while the HLS form is read: a file of it was asked for within `HLS_READ_SECONDS`."""
-        return int(self.hls_read is not None and time.monotonic() - self.hls_read < HLS_READ_SECONDS)
-
     def status(self) -> dict:
         found = {
             "id": self.id,
@@ -1040,9 +815,7 @@ class Page:
             "state": self.state,
             "since": _iso(self.since),
             "video": self.spec.video.model_dump(),
-            "idle": self.spec.idle,
             "encoder": self.rendering.encoder if self.rendering is not None else None,
-            "readers": {**{kind: len(channel.readers) for kind, channel in self.channels.items()}, "hls": self.hls_readers()},
             "bytes": self.made,
         }
         if self.rendering is not None and self.ending is None:
@@ -1051,7 +824,9 @@ class Page:
             found["reason"] = self.ending.reason
         return found
 
-    async def start(self, launch: Launch) -> None:
+    async def start(self, launch: Launch, open_name: Opener) -> None:
+        for kind in FORMATS:
+            self.written[kind] = await open_name(self.endpoint, getattr(self.spec.output, kind).path)
         self.rendering = await launch(self.spec, self.id)
         for kind in FORMATS:
             self.tasks.append(asyncio.ensure_future(self._read(kind)))
@@ -1078,19 +853,19 @@ class Page:
         if not await self.rendering.loaded():
             return
         painted = time.monotonic() - self.rendering.grabbed_from
-        ts = self.channels["ts"]
+        ts = self.outputs["ts"]
         seen = ts.keys
         while self.ending is None and not (self._keyed_after(painted) and ts.keys > seen):
             await asyncio.sleep(0.05)
 
     def _keyed_after(self, seconds: float) -> bool:
         """Whether the MP4's latest keyframe is `seconds` or later into the stream."""
-        channel = self.channels["mp4"]
-        header = channel.splitter.header
-        if header is None or not channel.gop:
+        output = self.outputs["mp4"]
+        header = output.splitter.header
+        if header is None or output.key is None:
             return False
         video = next((track_id for track_id, track in tracks(header).items() if track.video), None)
-        times = decode_times(channel.gop[0])
+        times = decode_times(output.key)
         return video is not None and video in times and times[video] >= seconds * tracks(header)[video].timescale
 
     async def _first(self) -> None:
@@ -1101,18 +876,23 @@ class Page:
         ended.cancel()
 
     async def _read(self, kind: str) -> None:
+        """The encoder's `kind` as it comes, written into the caller's stream in the same order."""
         assert self.rendering is not None
-        output = self.rendering.outputs[kind]
-        channel = self.channels[kind]
+        source = self.rendering.outputs[kind]
+        output = self.outputs[kind]
         try:
-            while chunk := await output.read(1 << 16):
-                channel.feed(chunk)
+            while chunk := await source.read(1 << 16):
+                output.feed(chunk)
+                await asyncio.to_thread(_write_all, self.written[kind], chunk)
                 if kind == "mp4":
                     self.made += len(chunk)
-                if all(each.playable for each in self.channels.values()):
+                if all(each.playable for each in self.outputs.values()):
                     self.playable.set()
         except ValueError as exc:
             await self.end(f"the encoder's {kind} could not be read: {exc}")
+            return
+        except OSError as exc:
+            await self.end(f"the {kind} stream could not be written: {exc.strerror or exc}")
             return
         await self.end(self.rendering.exited() or "the encoder stopped")
 
@@ -1128,44 +908,6 @@ class Page:
             if used > self.memory_mb:
                 await self.end(f"the browser held {used:.0f} MB, over EMS_PAGE_MEMORY_MB ({self.memory_mb})")
                 return
-            if self.readers():
-                self.unread_since = time.monotonic()
-            elif self.playable.is_set() and time.monotonic() - self.unread_since > self.spec.idle:
-                await self.end("idle")
-                return
-
-    def join(self, kind: str) -> tuple[Channel, Reader]:
-        if self.ending is not None:
-            raise EmsError(NOT_FOUND, f"page {self.id} has ended: {self.ending.reason}")
-        channel = self.channels[kind]
-        if not channel.playable:
-            raise EmsError(BUSY, f"page {self.id} has no picture yet", retry_after=1)
-        return channel, channel.join()
-
-    async def hls_file(self, name: str) -> tuple[bytes, str]:
-        """The file `name` of the HLS form, and its media type. The playlist is waited for while
-        ffmpeg has still to write it; a segment it has deleted is `not_found`."""
-        if not HLS_NAME.match(name):
-            raise EmsError(NOT_FOUND, f"page {self.id} has no {name}")
-        if self.ending is not None:
-            raise EmsError(NOT_FOUND, f"page {self.id} has ended: {self.ending.reason}")
-        if self.rendering is None or self.rendering.hls is None:
-            raise EmsError(BUSY, f"page {self.id} has no picture yet", retry_after=1)
-        self.hls_read = self.unread_since = time.monotonic()
-        path = os.path.join(self.rendering.hls, name)
-        playlist = name == HLS_PLAYLIST
-        waited = 0.0
-        while playlist and not os.path.exists(path) and waited < HLS_START_SECONDS and self.ending is None:
-            await asyncio.sleep(0.1)
-            waited += 0.1
-        try:
-            with open(path, "rb") as handle:
-                data = handle.read()
-        except FileNotFoundError:
-            if playlist and self.ending is None:
-                raise EmsError(BUSY, f"page {self.id} has no playlist yet", retry_after=1) from None
-            raise EmsError(NOT_FOUND, f"page {self.id} has no {name}" + (f" (ended: {self.ending.reason})" if self.ending else "")) from None
-        return data, "application/vnd.apple.mpegurl" if playlist else "video/mp2t"
 
     def _running(self) -> Rendering:
         if self.ending is not None:
@@ -1190,35 +932,34 @@ class Page:
             raise EmsError(BUSY, f"page {self.id} has no browser yet", retry_after=1)
         await self.rendering.press(names)
 
-    def leave(self, channel: Channel, reader: Reader) -> None:
-        channel.leave(reader)
-        reader.end()
-        if not self.readers():
-            self.unread_since = time.monotonic()
-
     async def end(self, reason: str) -> None:
         if self.ending is not None:
             return
         self.ending = Ending(reason, time.monotonic())
         self.ended.set()
         self.log(f"pages: {self.id} ended: {reason}")
-        for channel in self.channels.values():
-            channel.end()
         current = asyncio.current_task()
         for task in self.tasks:
             if task is not current:
                 task.cancel()
         if self.rendering is not None:
             await self.rendering.stop()
+        # Closed, the caller's streams end for their readers.
+        for fd in self.written.values():
+            with suppress(OSError):
+                os.close(fd)
+        self.written.clear()
 
 
 class Pages:
-    """Every page streamed by this EMS, by id; past `limit` running a new one is busy."""
+    """Every page streamed by this EMS, by id; past `limit` running a new one is busy. `open_name`
+    opens a caller's name to write a format into."""
 
-    def __init__(self, limit: int, memory_mb: int, launch: Launch, log: Callable[[str], None]):
+    def __init__(self, limit: int, memory_mb: int, launch: Launch, open_name: Opener, log: Callable[[str], None]):
         self.limit = limit
         self.memory_mb = memory_mb
         self.launch = launch
+        self.open_name = open_name
         self.log = log
         self.pages: dict[str, Page] = {}
 
@@ -1239,24 +980,25 @@ class Pages:
             raise EmsError(NOT_FOUND, f"no page {page_id}")
         return page
 
-    async def put(self, page_id: str, spec: PageSpec) -> tuple[Page, bool]:
-        """The page `page_id` streaming `spec`: started, or started again when its spec changed or
-        it ended. Answers it and whether it was started now."""
+    async def put(self, page_id: str, spec: PageSpec, endpoint: Endpoint) -> tuple[Page, bool]:
+        """The page `page_id` streaming `spec` into the names `endpoint` grants: started, or started
+        again when its spec or endpoint changed or it ended. Answers it and whether it was started
+        now."""
         if not PAGE_ID.match(page_id):
             raise EmsError(INVALID_REQUEST, "a page's id is 1 to 128 letters, digits, '.', '_' or '-'")
         self._forget_ended()
         known = self.pages.get(page_id)
-        if known is not None and known.ending is None and known.spec == spec:
+        if known is not None and known.ending is None and known.spec == spec and known.endpoint == endpoint:
             return known, False
         running = sum(1 for page in self.pages.values() if page.ending is None and page.id != page_id)
         if running >= self.limit:
             raise EmsError(BUSY, f"this EMS streams at most {self.limit} pages (EMS_PAGES)", retry_after=5)
         if known is not None:
             await known.end("put again")
-        page = Page(page_id, spec, self.memory_mb, self.log)
+        page = Page(page_id, spec, endpoint, self.memory_mb, self.log)
         self.pages[page_id] = page
         try:
-            await page.start(self.launch)
+            await page.start(self.launch, self.open_name)
         except BaseException as exc:
             # A page that ended while it started keeps why; one whose rendering never started, the error.
             await page.end(exc.message if isinstance(exc, EmsError) else "did not start")

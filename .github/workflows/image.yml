@@ -1,18 +1,14 @@
 name: image
 
-# EMS's image (Containerfile), published for the installer to pull: ghcr.io/einhq/ems:main is main
-# as of the last build, :sha-<commit> each commit built, :<api> the newest build of that API_VERSION
-# and :<line> the newest of its compatible line (0.4 for 0.4.x, 1 for 1.x), which the installer
-# pulls for the range a module asks for. The label eu.einhq.api says the API_VERSION too. Built when
-# GitHub's main moves, which the daily publish does (ein/core#1287), so the image is that day's
-# (ein/core#1418); each morning after it, when main's commit has no image yet, which a failed build
-# leaves; and at once when run by hand. Built on a runner without a graphics card, so nothing here
-# runs `make gpu-check`.
+# EMS's image (Containerfile), published for installations to pull: ghcr.io/einhq/ems:<version>,
+# one image a release, built from its tag (v<version>, which the daily publish pushes with the
+# snapshot that holds it, ein/core#1287) and never built again, so a version names one image. The
+# label eu.einhq.version says the version too. Run by hand on a tag, it builds that release when it
+# has no image yet, as after a failed build. Built on a runner without a graphics card, so nothing
+# here runs `make gpu-check`.
 on:
   push:
-    branches: [main]
-  schedule:
-    - cron: '47 7 * * *'
+    tags: ['v*.*.*']
   workflow_dispatch:
 
 # One build at a time; a run started during it waits, and only the newest waiting run is kept.
@@ -21,7 +17,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # Whether to build: a scheduled run builds nothing when main's commit already has its image.
+  # Whether to build: a release that has its image already is left as it is.
   check:
     # GitHub alone publishes: a Forgejo that runs this repository's workflows has no use for it.
     if: github.server_url == 'https://github.com'
@@ -29,9 +25,7 @@ jobs:
     permissions:
       contents: read
     outputs:
-      sha: ${{ steps.check.outputs.sha }}
-      api: ${{ steps.check.outputs.api }}
-      line: ${{ steps.check.outputs.line }}
+      version: ${{ steps.check.outputs.version }}
       build: ${{ steps.check.outputs.build }}
     steps:
       - uses: actions/checkout@v7
@@ -39,15 +33,12 @@ jobs:
         env:
           IMAGE: ghcr.io/${{ github.repository_owner }}/ems
         run: |
-          sha=$(git rev-parse --short=9 HEAD)
-          echo "sha=$sha" >>"$GITHUB_OUTPUT"
-          api=$(sed -n 's/^API_VERSION = "\([0-9]*\.[0-9]*\.[0-9]*\)"$/\1/p' ems/__init__.py)
-          [ -n "$api" ] || { echo "no API_VERSION in ems/__init__.py"; exit 1; }
-          major=${api%%.*} minor=${api#*.}
-          echo "api=$api" >>"$GITHUB_OUTPUT"
-          echo "line=$([ "$major" = 0 ] && echo "0.${minor%%.*}" || echo "$major")" >>"$GITHUB_OUTPUT"
-          if [ "$GITHUB_EVENT_NAME" = schedule ] && docker manifest inspect "$IMAGE:sha-$sha" >/dev/null 2>&1; then
-            echo "$IMAGE:sha-$sha exists"
+          version=$(jq -r .version version.json)
+          [[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "no release version in version.json: $version"; exit 1; }
+          [ "$GITHUB_REF" = "refs/tags/v$version" ] || { echo "$GITHUB_REF is not the release tag v$version"; exit 1; }
+          echo "version=$version" >>"$GITHUB_OUTPUT"
+          if docker manifest inspect "$IMAGE:$version" >/dev/null 2>&1; then
+            echo "$IMAGE:$version exists"
             echo build=false >>"$GITHUB_OUTPUT"
           else
             echo build=true >>"$GITHUB_OUTPUT"
@@ -63,35 +54,42 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          # The tags, for git describe.
+          # The tags, for the stamp's git describe.
           fetch-depth: 0
       - name: Stamp
         # What the service's health reports as its build: the commit and its date.
         run: echo "$(git describe --always --dirty) $(git log -1 --format=%cI)" >ems/BUILD
+      - id: previous
+        # The newest release built before this one, whose image is the cache.
+        env:
+          OWNER: ${{ github.repository_owner }}
+          VERSION: ${{ needs.check.outputs.version }}
+        run: |
+          token=$(curl -fsS "https://ghcr.io/token?scope=repository:$OWNER/ems:pull" | jq -r .token)
+          previous=$(curl -fsS -H "Authorization: Bearer $token" "https://ghcr.io/v2/$OWNER/ems/tags/list?n=10000" |
+            jq -r '.tags[]' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | grep -vxF "$VERSION" | sort -V | tail -1 || true)
+          echo "version=$previous" >>"$GITHUB_OUTPUT"
       - uses: docker/setup-buildx-action@v4
       - uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      # The cache is the published image itself (inline): the layers above an edit are reused with
-      # their digests, so an installation's update pulls only the layers that changed. GitHub's own
-      # cache holds 10 GB, too little for these.
+      # The cache is the previous release's image itself (inline): the layers above an edit are
+      # reused with their digests, so an installation's update pulls only the layers that changed.
+      # GitHub's own cache holds 10 GB, too little for these.
       - uses: docker/build-push-action@v7
         with:
           context: .
           file: Containerfile
           platforms: linux/amd64
           push: true
-          tags: |
-            ghcr.io/${{ github.repository_owner }}/ems:main
-            ghcr.io/${{ github.repository_owner }}/ems:sha-${{ needs.check.outputs.sha }}
-            ghcr.io/${{ github.repository_owner }}/ems:${{ needs.check.outputs.api }}
-            ghcr.io/${{ github.repository_owner }}/ems:${{ needs.check.outputs.line }}
+          tags: ghcr.io/${{ github.repository_owner }}/ems:${{ needs.check.outputs.version }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
-            eu.einhq.api=${{ needs.check.outputs.api }}
+            org.opencontainers.image.version=${{ needs.check.outputs.version }}
+            eu.einhq.version=${{ needs.check.outputs.version }}
             org.opencontainers.image.description=EMS, the EiN Media Service: every media tool and model behind one HTTP API, run by compose from ein/deploy
-          cache-from: type=registry,ref=ghcr.io/${{ github.repository_owner }}/ems:main
+          cache-from: ${{ steps.previous.outputs.version && format('type=registry,ref=ghcr.io/{0}/ems:{1}', github.repository_owner, steps.previous.outputs.version) || '' }}
           cache-to: type=inline

@@ -26,7 +26,7 @@ from typing import AsyncIterator, Awaitable, Callable, Literal
 from pydantic import Field
 
 from .errors import NOT_FOUND, EmsError
-from .schemas import Strict
+from .schemas import StreamRef, Strict
 
 # How long a segment is asked to be.
 SEGMENT_SECONDS = 2
@@ -48,7 +48,7 @@ class ClipsSpec(Strict):
     # The longest clip, in seconds.
     max: float = Field(default=120, ge=10, le=600)
     # The stream recorded, when not the one watched: the camera's main stream beside its sub-stream.
-    source: str | None = Field(default=None, min_length=1)
+    source: StreamRef | None = None
 
 
 class ClipRequest(Strict):
@@ -80,10 +80,12 @@ class Clip:
     info: dict = field(default_factory=dict)
 
 
-# What records a source: given it and a folder, writes segments there and yields each one's path
-# and length, in seconds, as it is done, starting its file names at the number given;
+# What opens a watch's live stream for one read of it: a descriptor reading the stream as it comes.
+Opener = Callable[[], Awaitable[int]]
+# What records a source: given its opener and a folder, writes segments there and yields each one's
+# path and length, in seconds, as it is done, starting its file names at the number given;
 # `ffmpeg_segments` in the service, a list in tests.
-SegmentSource = Callable[[str, str, int], AsyncIterator[tuple[str, float]]]
+SegmentSource = Callable[[Opener, str, int], AsyncIterator[tuple[str, float]]]
 # What joins segments into an MP4 at the path given, made at the moment given (ISO 8601).
 Joiner = Callable[[list[str], str, str], Awaitable[None]]
 
@@ -97,7 +99,7 @@ def wall(at: float) -> str:
 class Recorder:
     """One watch's recording: its segments, its clips, and the loop that reads its source."""
 
-    def __init__(self, watch_id: str, spec: ClipsSpec, source: str, folder: str, *, segments: SegmentSource, join: Joiner, tell: Callable[[str, dict], None], log: Callable[[str], None]):
+    def __init__(self, watch_id: str, spec: ClipsSpec, source: Opener, folder: str, *, segments: SegmentSource, join: Joiner, tell: Callable[[str, dict], None], log: Callable[[str], None]):
         self.watch_id = watch_id
         self.spec = spec
         self.source = source
@@ -266,30 +268,36 @@ class Recorder:
         self.tell("clip", clip.info)
 
 
-def input_args(source: str) -> list[str]:
-    """How ffmpeg opens a source: a network stream as it comes, over TCP for RTSP; a local file at
-    its own pace, again and again, for a test."""
-    if source.startswith(("rtsp://", "rtsps://")):
-        return ["-rtsp_transport", "tcp", "-timeout", "10000000", "-i", source]
-    if "://" not in source:
-        return ["-re", "-stream_loop", "-1", "-i", source]
-    return ["-i", source]
+def input_args(fd: int) -> list[str]:
+    """How ffmpeg opens a live stream: the descriptor it is given, read as a pipe, which it cannot
+    seek in, so it probes the stream's format from its bytes."""
+    return ["-i", f"pipe:{fd}"]
 
 
-async def ffmpeg_segments(source: str, folder: str, first: int) -> AsyncIterator[tuple[str, float]]:
+async def spawn_reading(open_source: Opener, args: list[str], **kwargs) -> asyncio.subprocess.Process:
+    """ffmpeg, `args` with `{source}` for its input, started on a descriptor of the source freshly
+    opened, which it keeps and this process lets go of."""
+    fd = await open_source()
+    try:
+        index = args.index("{source}")
+        return await asyncio.create_subprocess_exec(*args[:index], *input_args(fd), *args[index + 1:], pass_fds=(fd,), **kwargs)
+    finally:
+        os.close(fd)
+
+
+async def ffmpeg_segments(source: Opener, folder: str, first: int) -> AsyncIterator[tuple[str, float]]:
     """The source copied into MP4 segments by ffmpeg, its picture as it came and its sound as AAC,
     each segment told by ffmpeg's segment list as it closes. A live stream's packets are timed by
-    the wall clock as they arrive, and each segment's start at zero: through an RTSP restreamer a
-    stream's first packets can come with no time, which a muxer refuses. Each segment is a whole
-    MP4, so `ffmpeg_join` knows every stream's parameters whichever segment it starts at."""
-    live = ["-fflags", "+genpts+discardcorrupt", "-use_wallclock_as_timestamps", "1"] if "://" in source else []
+    the wall clock as they arrive, and each segment's start at zero: a stream joined in its middle
+    can begin with packets that have no time, which a muxer refuses. Each segment is a whole MP4, so
+    `ffmpeg_join` knows every stream's parameters whichever segment it starts at."""
     args = [
-        "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", *live, *input_args(source),
+        "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-fflags", "+genpts+discardcorrupt", "-use_wallclock_as_timestamps", "1", "{source}",
         "-map", "0:v:0", "-map", "0:a:0?", "-c:v", "copy", "-c:a", "aac", "-avoid_negative_ts", "make_zero",
         "-f", "segment", "-segment_time", str(SEGMENT_SECONDS), "-segment_format", "mp4", "-reset_timestamps", "1", "-segment_start_number", str(first),
         "-segment_list", "pipe:1", "-segment_list_type", "csv", os.path.join(folder, "%010d.mp4"),
     ]
-    process = await asyncio.create_subprocess_exec(*args, stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    process = await spawn_reading(source, args, stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     assert process.stdout is not None and process.stderr is not None
     # Whether ffmpeg stopped of itself, when what it said is why; not when the recorder was
     # cancelled or closed, which an error raised here would hide.

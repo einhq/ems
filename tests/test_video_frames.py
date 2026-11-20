@@ -61,6 +61,40 @@ async def test_poster_takes_one_frame_and_fits_it_like_a_photo(client, dirs, mon
     assert body["meta"]["producer"].startswith("ffmpeg/")
 
 
+async def test_a_live_streams_poster_is_its_first_frame_upright(client, dirs, monkeypatch):
+    from ems.tools import magick
+
+    ro, rw = dirs
+    (ro / "main.ts").write_bytes(b"ts")
+    seen = {}
+
+    async def fake_live(ctx, path, out, *, deinterlace):
+        seen["path"], seen["deinterlace"] = path, deinterlace
+        with open(out, "wb") as f:
+            f.write(b"jpeg")
+
+    async def fake_render(source, angle, mirror, plans, *, timeout):
+        seen["angle"], seen["mirror"] = angle, mirror
+        for plan in plans:
+            with open(plan.temp, "wb") as f:
+                f.write(b"a")
+        return magick.Rendered((640, 360), [(640, 360)])
+
+    monkeypatch.setattr(video, "extract_live_poster", fake_live)
+    monkeypatch.setattr(magick, "render", fake_render)
+    target = [{"output": {"path": str(rw / "main.jpg"), "format": "jpeg"}}]
+    r = await client.post("/v0/video/poster", json={"source": {"path": str(ro / "main.ts")}, "targets": target})
+    body = r.json()
+    assert r.status_code == 200, body
+    assert seen == {"path": str(ro / "main.ts"), "deinterlace": False, "angle": 0, "mirror": False}
+    assert body["result"]["t"] == 0.0 and (rw / "main.jpg").read_bytes() == b"a"
+
+    for refused in ({"targets": target}, {"source": {"path": str(ro / "main.ts")}, "file": {"path": str(ro / "main.ts")}, "targets": target},
+                    {"source": {"path": str(ro / "main.ts")}, "at": 2, "targets": target}):
+        r = await client.post("/v0/video/poster", json=refused)
+        assert r.status_code == 400, r.json()
+
+
 async def test_a_poster_past_the_end_of_the_picture_is_its_first_frame(client, dirs, monkeypatch):
     from ems.tools import magick
 

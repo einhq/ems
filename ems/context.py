@@ -14,6 +14,7 @@ from .remote import Mounts
 from .tools.audio import AudioCache
 from .pages import Pages
 from .tools.exiftool import ExifTool
+from .transcodes import Transcodes
 from .watches import Watches
 from .worker import Worker
 
@@ -37,6 +38,8 @@ class Context:
     watches: Watches | None = None
     # The pages rendered into live streams (ems/pages.py); set once the app is made.
     pages: Pages | None = None
+    # The live streams transcoded into others (ems/transcodes.py); set once the app is made.
+    transcodes: Transcodes | None = None
 
     def for_queries(self, family: str) -> Worker:
         """Where a search query for `family` is embedded: the card worker while it holds the family

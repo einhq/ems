@@ -542,7 +542,7 @@ WORKDIR /opt/ems
 COPY ems ems
 COPY scripts scripts
 COPY docs docs
-COPY pyproject.toml README.md LICENSE ./
+COPY pyproject.toml version.json README.md LICENSE ./
 COPY notice /usr/share/doc/ein-ems
 
 # Compile once so the first request does not.

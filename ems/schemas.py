@@ -27,6 +27,13 @@ class FileRef(Strict):
     mimetype: str | None = None
 
 
+class StreamRef(Strict):
+    """A live stream the caller grants a watch: its name under the request's `EMS-Files`, read as it
+    comes, from the moment it is opened (_4.24_)."""
+
+    path: str = Field(min_length=1)
+
+
 class Box(Strict):
     """Fractions of the display frame, origin top-left."""
 

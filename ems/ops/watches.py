@@ -1,6 +1,7 @@
 """`PUT|GET|DELETE /v0/watches/<id>`, `GET /v0/watches` and `GET /v0/watches/<id>/events`: a live
 stream read for its faces and motion, told as server-sent events (ems/watches.py, _4.24_); and
-`/v0/watches/<id>/clips`, the clips it cut of its stream (ems/clips.py)."""
+`/v0/watches/<id>/clips`, the clips it cut of its stream (ems/clips.py). A watch is put with the
+`EMS-Files` its stream's names are granted under, which it reads them through while it runs."""
 
 from __future__ import annotations
 
@@ -12,11 +13,11 @@ import time
 from fastapi import APIRouter, Request
 from fastapi.responses import FileResponse, StreamingResponse
 
-from .. import API_VERSION
+from .. import API_VERSION, remote
 from ..card import watching
 from ..clips import ClipRequest
 from ..context import Context
-from ..errors import EmsError
+from ..errors import EmsError, invalid
 from ..watches import Frame, WatchSpec
 
 PRODUCER = "retinaface-r34+transface"
@@ -108,8 +109,11 @@ def register(router: APIRouter, ctx: Context) -> None:
         return _ok([watch.status() for watch in ctx.watches.watches.values()])
 
     @router.put("/watches/{watch_id}")
-    async def watches_put(watch_id: str, body: WatchSpec):
-        watch, made = await ctx.watches.put(watch_id, body)
+    async def watches_put(request: Request, watch_id: str, body: WatchSpec):
+        header = request.headers.get(remote.HEADER)
+        if not header:
+            raise invalid("a watch reads names its caller grants: name their endpoint in EMS-Files")
+        watch, made = await ctx.watches.put(watch_id, body, remote.parse_header(header))
         return _ok({**watch.status(), "made": made})
 
     @router.get("/watches/{watch_id}")

@@ -456,6 +456,7 @@ def register(router: APIRouter, ctx: Context) -> None:
                 "watches": ctx.settings.watches,
                 "streams": ctx.settings.streams,
                 "pages": ctx.settings.pages,
+                "transcodes": ctx.settings.transcodes,
             },
             # What decides a transcode's fate on this box: the encoder that will run and the
             # CPU-decode budget a refusal is measured against. A caller records the budget's

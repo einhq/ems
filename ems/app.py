@@ -18,17 +18,18 @@ from .card import CardArbiter, CardBudget
 from .config import Settings
 from .context import Context
 from .errors import INTERNAL, INVALID_REQUEST, OP_NOT_SERVED, EmsError
-from .ops import audio, copy_tags, damage, deblur, defects, denoise, document, document_page, faces, fingerprint, image, inpaint, media, ocr, pages, shots, speech, storyboard, stream, system, text, transcode, unfade, video, vision, watches
-from .remote import Mounts
+from .ops import audio, copy_tags, damage, deblur, defects, denoise, document, document_page, faces, fingerprint, image, inpaint, media, ocr, pages, shots, speech, storyboard, stream, system, text, transcode, transcodes, unfade, video, vision, watches
+from .remote import Mounts, open_live, open_written
 from .tools.audio import AudioCache
 from .tools.exiftool import ExifTool
 from .tools.run import which
 from .clips import ffmpeg_join, ffmpeg_segments
 from .pages import Pages, renderer
+from .transcodes import Transcodes
 from .watches import Watches, ffmpeg_crop, ffmpeg_frames
 from .worker import QUERY_FAMILIES, Worker
 
-OP_MODULES = (media, image, copy_tags, unfade, inpaint, defects, damage, denoise, deblur, video, storyboard, shots, audio, transcode, stream, fingerprint, document, document_page, ocr, faces, speech, vision, text, watches, pages)
+OP_MODULES = (media, image, copy_tags, unfade, inpaint, defects, damage, denoise, deblur, video, storyboard, shots, audio, transcode, stream, fingerprint, document, document_page, ocr, faces, speech, vision, text, watches, pages, transcodes)
 
 
 def log(message: str) -> None:
@@ -178,10 +179,14 @@ def create_app(
     )
     kept = watches.FacesKept(ctx, log)
     ctx.watches = Watches(
-        settings.watches, source=ffmpeg_frames, find=watches.frame_finder(ctx, kept), crop=ffmpeg_crop, log=log, idle=kept.release,
+        settings.watches, source=ffmpeg_frames, open_name=lambda endpoint, path: open_live(ctx.files, endpoint, path),
+        find=watches.frame_finder(ctx, kept), crop=ffmpeg_crop, log=log, idle=kept.release,
         folder=os.path.join(settings.scratch, "watches"), segments=ffmpeg_segments, join=ffmpeg_join,
     )
-    ctx.pages = Pages(settings.pages, settings.page_memory_mb, renderer(settings.page_memory_mb, stream.h264_encoders, lambda: ctx.scratch_dir("page")), log)
+    ctx.pages = Pages(settings.pages, settings.page_memory_mb, renderer(settings.page_memory_mb, stream.h264_encoders, lambda: ctx.scratch_dir("page")),
+                      open_name=lambda endpoint, path: open_written(ctx.files, endpoint, path), log=log)
+    ctx.transcodes = Transcodes(settings.transcodes, encoders=stream.h264_encoders, open_source=lambda endpoint, path: open_live(ctx.files, endpoint, path),
+                                open_output=lambda endpoint, path: open_written(ctx.files, endpoint, path), log=log)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -208,6 +213,7 @@ def create_app(
         finally:
             await ctx.watches.stop()
             await ctx.pages.stop()
+            await ctx.transcodes.stop()
             await ctx.card.stop()
             if start_worker:
                 if query_worker is not None:

@@ -14,6 +14,9 @@ Every path in that request is the caller's: EMS has no files of its own. It moun
 - An output (`output.path`, `output.dir`) gets a place in the request's scratch, and what the op
   wrote is copied into the mount before the result goes out. A copy through sshfs has its bytes at
   the caller once it returns.
+- A live stream the caller grants a watch (_4.24_) is read as it comes (`open_live`), for as long as
+  the watch runs, the mount made again whenever it has gone; one it grants a page (_4.25_) or a
+  transcode (_4.26_) to write is written as the bytes come (`open_written`).
 
 Without a mount — no /dev/fuse or sshfs here, an endpoint that cannot be reached, a mount that
 fails during the request — the request is refused as `files_unavailable`, which the caller tries
@@ -356,9 +359,60 @@ def _staging(path: str) -> Staging:
     return staged
 
 
+async def open_live(mounts: Mounts, endpoint: Endpoint, path: str) -> int:
+    """A descriptor reading the caller's name `path` as it comes, for a live stream: opened with
+    O_DIRECT, so every read goes to the caller and is answered with what has come, and the kernel's
+    page cache, which takes a short read for the end of the file, keeps none of it. The caller
+    says such a name never ends. The mount is made, or made again, as needed; `not_found` or
+    `path_not_granted` when the name is not granted, `files_unavailable` when the mount fails."""
+    name = _caller_path(path)
+    for attempt in (0, 1):
+        point = await mounts.mount(endpoint)
+        try:
+            return await asyncio.to_thread(os.open, point + name, os.O_RDONLY | os.O_DIRECT)
+        except FileNotFoundError as exc:
+            raise EmsError(NOT_FOUND, f"{path}: no such name") from exc
+        except PermissionError as exc:
+            raise EmsError(PATH_NOT_GRANTED, f"{path}: not granted") from exc
+        except OSError as exc:
+            if attempt:
+                raise EmsError(FILES_UNAVAILABLE, f"{path}: {exc}") from exc
+            await mounts.drop(endpoint)
+    raise AssertionError("unreachable")
+
+
+async def open_written(mounts: Mounts, endpoint: Endpoint, path: str) -> int:
+    """A descriptor writing the caller's name `path` as the bytes come, for a live stream: its
+    writes go to the caller in order, from its start. The mount is made, or made again, as needed;
+    `not_found` or `path_not_granted` when the name is not granted to write, `files_unavailable`
+    when the mount fails."""
+    name = _caller_path(path)
+    for attempt in (0, 1):
+        point = await mounts.mount(endpoint)
+        try:
+            return await asyncio.to_thread(os.open, point + name, os.O_WRONLY)
+        except FileNotFoundError as exc:
+            raise EmsError(NOT_FOUND, f"{path}: no such name") from exc
+        except PermissionError as exc:
+            raise EmsError(PATH_NOT_GRANTED, f"{path}: not granted to write") from exc
+        except OSError as exc:
+            if attempt:
+                raise EmsError(FILES_UNAVAILABLE, f"{path}: {exc}") from exc
+            await mounts.drop(endpoint)
+    raise AssertionError("unreachable")
+
+
 def input(path: str) -> str:  # noqa: A001 - the op's word for it
     """The local path an op reads an input of the running request's at."""
     return _staging(path).input(path)
+
+
+async def input_live(path: str) -> int:
+    """A descriptor reading an input of the running request's that is a live stream, as it comes
+    (`open_live`): the caller closes it."""
+    staged = _staging(path)
+    staged.input(path)
+    return await open_live(staged.mounts, staged.endpoint, path)
 
 
 def output(path: str) -> str:

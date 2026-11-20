@@ -123,9 +123,12 @@ minor and major, and a new major is a new path prefix. A
 caller should refuse to run against a major it does not know and may warn on a minor below what
 it was written for.
 
-The published image carries the version as the label `eu.einhq.api` and in its tags:
-`ghcr.io/einhq/ems:<api>` (`0.4.8`) and `:<line>`, the newest build of a compatible line (`0.4` for
-0.4.x, `1` for 1.x). An installation pulls the line of the range its modules ask for.
+The version is EMS's release, kept in `version.json`: the daily publish raises it as the commits
+since the last release call for (a `fix` or `feat` the patch, a breaking change the minor), and a
+change callers must wait for raises it by hand in the same commit, which the release then keeps.
+Each release is built once, as `ghcr.io/einhq/ems:<version>` (`0.5.0`) with the label
+`eu.einhq.version`, and never built again; an installation runs the newest release of the line its
+modules ask for (`0.5` for `^0.5.0`).
 
 ### 2.5 Admission
 
@@ -215,6 +218,13 @@ one), and the op runs on local paths for the request's:
   seeks to, while it runs, and what it read stays in the page cache for the next op on the file
   until its size or modification time changes. A path's last component should end in the file's
   own extension, since tools pick a format by the name as well as by the bytes.
+- **A watch's streams** (its `source.path` and `clips.source.path`, _4.24_) and a transcode's source
+  (_4.26_) are read as they come, with no page cache, for as long as they run; the mount is made
+  again whenever it has gone.
+- **A live stream written** (a page's `output.mp4.path` and `output.ts.path`, _4.25_; a transcode's
+  `output.path`, _4.26_) is opened write-only in the mount, not truncated, and written as the bytes
+  come, in order from its start, for as long as it runs; closing it ends the stream for its readers.
+  The caller's endpoint says such a name's size never ends, and serves what is written to its readers.
 - **Outputs** (`output.path`, `output.dir`) get a place in the request's scratch, written through a
   private temporary file and renamed into place there. Once the op has succeeded, EMS copies each
   output it made into the mount, and every file of an output directory into the caller's
@@ -718,6 +728,12 @@ stream, so a caller cannot know where the picture stops. A file with no frame at
 its luma spread under 6 at 48×27: black, white or a tape's blue screen — gives way to the first
 of the frames at a tenth, a quarter and half of the picture that is not blank, and `t` says which;
 when all are blank the frame at `at` stands.
+
+In place of `file`, `source: { "path" }` names a live stream the caller grants (as a watch's,
+_4.24_): the poster is the first keyframe that comes, frames before it skipped, upright and with
+`t` 0; `at` and `skip_blank` are refused with it. A stream that ends or
+stalls before a frame comes is `tool_failed`, to be asked again. It decodes on the CPU: one frame
+does not pay for the card's start.
 
 ### 4.5a `video.storyboard` _(implemented, 5.4)_
 
@@ -1404,7 +1420,7 @@ What this EMS can do, for a caller to check before it relies on it:
               "image_embed": "ViT-SO400M-16-SigLIP2-384__webli", "ocr": "PP-OCRv6_medium+multicentury-ppocrv6-medium+multicentury-htr-model+trocr-large-handwritten",
               "damage": "damage/2+bopb-detection",
               "voiceprint": "voices/1+diar_streaming_sortformer_4spk-v2+speakerverification_en_titanet_large" },
-  "limits": { "models": 8, "tools": 6, "encodes": 2, "queue_depth": 64, "interactive_reserve": 1, "watches": 4, "streams": 2, "pages": 2 },
+  "limits": { "models": 8, "tools": 6, "encodes": 2, "queue_depth": 64, "interactive_reserve": 1, "watches": 4, "streams": 2, "pages": 2, "transcodes": 2 },
   "encode": { "video_encoder": "av1_nvenc", "cpu_budget": "4000/170/64", "stream_encoders": [ "h264_nvenc", "libopenh264" ],
               "page_renderer": true },
   "signatures": { "transcribe": "whisper-large-v3:…,on=cuda:float16,…",
@@ -1434,7 +1450,7 @@ as current, and one stamped otherwise as made with other settings. The worker is
 health gives it, 2 s; one that is down or still loading its models is represented by the last
 signatures it gave, so the fields are absent only until the worker has answered once.
 
-### 4.24 `watches` — a live stream read for faces _(implemented, 0.3.5; clips 0.3.7)_
+### 4.24 `watches` — a live stream read for faces _(implemented, 0.3.5; clips 0.3.7; granted streams 0.5.0)_
 
 A watch reads a live stream for as long as its caller wants, and tells what it sees there as
 events: the faces, motion, and the source going and coming back; with `clips`, it records the
@@ -1442,6 +1458,16 @@ stream as well and cuts a video around what it saw. EMS knows streams, not camer
 the caller names the stream and the id the watch has, and what a face is (a person, a camera's
 device) is the caller's. As everywhere, EMS answers vectors, never names. Nothing of a watch is
 kept: it lives in EMS's memory, and its caller states it again when EMS has started anew.
+
+The stream is the caller's, as a request's files are (_3.1_): a name under the `EMS-Files` header
+the watch is put with, which the caller grants for as long as the watch runs and answers as a
+stream's bytes from the moment it is opened, saying a size that never ends. EMS reads it through its
+mount of that endpoint, opened so that each read is answered with what has come (`O_DIRECT`, past
+the page cache), and hands ffmpeg the descriptor, which reads it as a pipe and finds its format from
+its bytes (MPEG-TS, a camera's). A read that ends, as the caller's does when nothing came for a
+while or the stream stopped, is a source that dropped: EMS opens the name again after the pause
+below, joining the stream then. Since 0.5.0 a watch reads nothing else; 0.4's `rtsp://` and
+`http(s)://` sources are refused.
 
 ```
 PUT    /v0/watches/<id>          make it, or make it again when its body changed
@@ -1457,38 +1483,41 @@ DELETE /v0/watches/<id>/clips/<clip>     drop it
 
 ```json
 PUT /v0/watches/front-door-sub
-{ "source": "rtsp://ein:…@host.containers.internal:8554/front-door-sub",
+EMS-Files: address=ein:2224; secret=…
+{ "source": { "path": "/4f0c…/0-sub.ts" },
   "faces": { "fps": 3, "min_size": 0.03, "min_confidence": 0.7 },
   "motion": true,
   "mask": [ { "x": 0.0, "y": 0.0, "width": 0.3, "height": 0.1 } ],
   "angle": 0, "mirror": false, "crops": true,
   "clips": { "on": ["face", "motion"], "pre": 5, "post": 10, "max": 120,
-             "source": "rtsp://ein:…@host.containers.internal:8554/front-door-main" } }
+             "source": { "path": "/4f0c…/1-main.ts" } } }
 ```
 
-| Field                                    | Default   | Meaning                                                                                                                                               |
-| ---------------------------------------- | --------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `source`                                 |           | What to read: an `rtsp://` (over TCP), `http(s)://` stream ffmpeg reads; a path on EMS's own disk is read again and again at its own pace, for a test |
-| `faces.fps`                              | 3         | Frames looked at a second, 0.2 to 10                                                                                                                  |
-| `faces.min_size`, `faces.min_confidence` | 0.03, 0.7 | As `faces.detect_video`'s: smaller or less certain faces are left out                                                                                 |
-| `motion`                                 | true      | Look for faces only while frames change, or a face is being followed, and tell motion; false looks at every frame                                     |
-| `mask`                                   | none      | Regions left out, fractions of the display frame: no motion counted there, no face told whose centre is there                                         |
-| `angle`, `mirror`                        | 0, false  | The display frame, as for a file (_3.3_)                                                                                                              |
-| `crops`                                  | true      | A JPEG of each face told, in its events                                                                                                               |
-| `clips`                                  | none      | Record the stream and cut clips of it (below); no recording without                                                                                   |
-| `clips.on`                               | both      | What opens a clip and keeps it open while it lasts: `face` (a face followed), `motion` (frames changing; with `motion: true`)                         |
-| `clips.pre`, `clips.post`                | 5, 10     | Seconds of the stream before what opened it (0 to 30), and after it ended (1 to 60)                                                                   |
-| `clips.max`                              | 120       | The longest clip, in seconds (10 to 600)                                                                                                              |
-| `clips.source`                           | `source`  | The stream recorded, when not the one watched: a camera's main stream beside the sub-stream its faces are looked for in                               |
+| Field                                    | Default   | Meaning                                                                                                                                        |
+| ---------------------------------------- | --------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `source.path`                            |           | What to read: a live stream's name under the request's `EMS-Files`, which the caller grants for as long as the watch runs                      |
+| `faces.fps`                              | 3         | Frames looked at a second, 0.2 to 10                                                                                                           |
+| `faces.min_size`, `faces.min_confidence` | 0.03, 0.7 | As `faces.detect_video`'s: smaller or less certain faces are left out                                                                          |
+| `motion`                                 | true      | Look for faces only while frames change, or a face is being followed, and tell motion; false looks at every frame                              |
+| `mask`                                   | none      | Regions left out, fractions of the display frame: no motion counted there, no face told whose centre is there                                  |
+| `angle`, `mirror`                        | 0, false  | The display frame, as for a file (_3.3_)                                                                                                       |
+| `crops`                                  | true      | A JPEG of each face told, in its events                                                                                                        |
+| `clips`                                  | none      | Record the stream and cut clips of it (below); no recording without                                                                            |
+| `clips.on`                               | both      | What opens a clip and keeps it open while it lasts: `face` (a face followed), `motion` (frames changing; with `motion: true`)                  |
+| `clips.pre`, `clips.post`                | 5, 10     | Seconds of the stream before what opened it (0 to 30), and after it ended (1 to 60)                                                            |
+| `clips.max`                              | 120       | The longest clip, in seconds (10 to 600)                                                                                                       |
+| `clips.source.path`                      | `source`  | The stream recorded, when not the one watched: a camera's main stream beside the sub-stream its faces are looked for in, a name as `source` is |
 
-The id is 1 to 128 letters, digits, `.`, `_` or `-`. The same body put again leaves the watch
-running and answers `made: false`; another body stops it and starts it anew. Past `EMS_WATCHES`
-watches (4) a new one is `busy`. Each answer's `result` is the watch's status:
+The id is 1 to 128 letters, digits, `.`, `_` or `-`. A watch put without `EMS-Files` is
+`invalid_request`. The same body put again with the same `EMS-Files` leaves the watch running and
+answers `made: false`; another body or another endpoint (the caller's started anew, with other
+credentials) stops it and starts it anew. Past `EMS_WATCHES` watches (4) a new one is `busy`. Each
+answer's `result` is the watch's status:
 
 ```json
 {
   "id": "front-door-sub",
-  "source": "rtsp://ein:***@host.containers.internal:8554/front-door-sub",
+  "source": "/4f0c…/0-sub.ts",
   "state": "running",
   "since": "2026-11-10T16:02:11.402Z",
   "frames": 5412,
@@ -1502,7 +1531,7 @@ watches (4) a new one is `busy`. Each answer's `result` is the watch's status:
 
 `state` is `connecting`, `running` or `lost` (with `error`, why); `frames` is how many frames were
 read, `looked` how many were looked at for faces, `faces` how many faces were told, `following` how
-many are being followed now. The source's password is never shown. A watch with `clips` has
+many are being followed now; `source` is the name read. A watch with `clips` has
 `clips` in its status as well: `state` (`connecting`, `recording` or `lost`, with `error`), how many
 `segments` are kept, how many clips it `made`, how many are `ready` to fetch, and the `open` one's
 id while one is.
@@ -1515,7 +1544,7 @@ the faces model in the `watches` lane (_2.5_). While any watch runs the faces fa
 the model worker, so no batch work unloads it between two frames, and the card arbiter leaves the
 card as it is for the watch's frames (`health.card.kept`, §4.22); the faces are followed from
 frame to frame as `faces.detect_video` follows them, a face gone for two seconds having left. A
-source that ends or fails is read again after a pause that doubles from a second to a minute.
+source that ends or fails is opened again after a pause that doubles from a second to a minute.
 
 **Events.** The stream starts with `state`, the watch's status, and every event after it carries
 `type`, `watch`, `at` (the wall clock, ISO 8601) and `t` (seconds since the watch started):
@@ -1553,25 +1582,23 @@ opens a clip now, or lengthens the open one, for `request`, and answers `{ "clip
 its `clip` event will carry. A watch without `clips` answers `invalid_request`; an unknown clip is
 `not_found`.
 
-### 4.25 `pages` — a page rendered into live video _(implemented, 0.4.3)_
+### 4.25 `pages` — a page rendered into live video _(implemented, 0.4.3; written into granted streams 0.6.0)_
 
 A web page drawn as a screen would show it, encoded as live H.264 for a player that plays video and
 nothing else: a Cast device's built-in player, a DLNA screen, a screen a browser hands the stream to.
 EMS opens the page in Chromium on a virtual display of its own, in its dark scheme (_0.4.7_: dark
 rather than white until the page paints, and a page that follows the scheme dark), with a sound server of its own that
 takes nothing but the page's sound (_0.4.7_), grabs the display at a steady frame rate and the sound
-as it plays, and encodes them once; every reader, in any format, is served from that one encode.
-Keys pressed in the page reach it as someone's at it would (_0.4.7_). Nothing is kept: a page lives in EMS's
-memory, and the caller puts it again when EMS has started anew.
+as it plays, and encodes them once, muxed in two formats, each written as it comes into a live
+stream the caller grants (_3.1_): EMS serves nothing of it, and who reads it is the caller's affair.
+Keys pressed in the page reach it as someone's at it would (_0.4.7_). Nothing is kept: a page lives
+in EMS's memory, and the caller puts it again when EMS has started anew.
 
 ```
-PUT    /v0/pages/<id>            start it, or start it again when its body changed or it ended
+PUT    /v0/pages/<id>            start it, or start it again when its body or EMS-Files changed or it ended
 GET    /v0/pages                 every page and how it is doing
 GET    /v0/pages/<id>            one
 DELETE /v0/pages/<id>            stop it
-GET    /v0/pages/<id>/live.mp4   the stream as fragmented MP4, without end; ?duration=<s> (0.4.6)
-GET    /v0/pages/<id>/live.ts    the stream as MPEG-TS, without end
-GET    /v0/pages/<id>/hls/<name> the stream as live HLS: index.m3u8 and its segments (0.4.5)
 POST   /v0/pages/<id>/keys       press keys in the page (0.4.7)
 GET    /v0/pages/<id>/state      what the page says it shows (0.4.8)
 POST   /v0/pages/<id>/message    hand the page a message (0.4.8)
@@ -1579,9 +1606,10 @@ POST   /v0/pages/<id>/message    hand the page a message (0.4.8)
 
 ```json
 PUT /v0/pages/kitchen-tv
+EMS-Files: address=ein:2224; secret=…
 { "url": "http://host.containers.internal:8080/__page/3f…",
   "video": { "width": 1920, "height": 1080, "fps": 30, "quality": 23 },
-  "idle": 20 }
+  "output": { "mp4": { "path": "/7c1e…/0-page-3f2a.mp4" }, "ts": { "path": "/7c1e…/1-page-3f2a.ts" } } }
 ```
 
 | Field           | Default | Meaning                                                                                                    |
@@ -1591,14 +1619,17 @@ PUT /v0/pages/kitchen-tv
 | `video.height`  | 1080    | 240 to 1080 pixels high                                                                                    |
 | `video.fps`     | 30      | Frames a second, 5 to 30: the display is grabbed this often whether the page changed or not                |
 | `video.quality` | 23      | NVENC's `cq` (0–51)                                                                                        |
-| `idle`          | 20      | Seconds without a reader, 5 to 600, after which the page stops itself                                      |
+| `output.mp4`    |         | The live stream the fragmented MP4 is written into: its `path`, a name under the request's `EMS-Files`     |
+| `output.ts`     |         | The live stream the MPEG-TS is written into, as `output.mp4`                                               |
 
-The id is as a watch's (_4.24_). The same body put again leaves a running page as it is and answers
-`made: false`; another body, or a page that has ended, starts it anew. The answer comes once the
-page has loaded and painted (its document's `readyState` complete, then two animation frames) and
-both formats have a keyframe grabbed since, so a reader, who starts at the latest keyframe, starts
-at the page and not at the browser opening it (_0.4.7_; typically 2–5 s); a page still loading
-after 15 s is answered as it is. A page that gives no picture within 30 s, or that cannot start at all (no browser, no
+The id is as a watch's (_4.24_). A page put without `EMS-Files` is `invalid_request`, and one whose
+names are not granted to write `not_found` or `path_not_granted`. The same body put again with the
+same `EMS-Files` leaves a running page as it is and answers `made: false`; another body, another
+endpoint, or a page that has ended starts it anew. The answer comes once the page has loaded and
+painted (its document's `readyState` complete, then two animation frames) and both formats have a
+keyframe grabbed since, so a reader who starts at the latest keyframe starts at the page and not
+at the browser opening it (_0.4.7_; typically 2–5 s); a page still loading after 15 s is answered
+as it is. A page that gives no picture within 30 s, or that cannot start at all (no browser, no
 H.264 encoder), is `tool_failed` with why. Past `EMS_PAGES` running pages (2) a new one is `busy`:
 each holds a browser, about two cores to draw a moving page in software, and an encoder session. Each
 answer's `result` is the page's status:
@@ -1610,51 +1641,31 @@ answer's `result` is the page's status:
   "state": "running",
   "since": "2026-11-16T09:35:29.930Z",
   "video": { "width": 1920, "height": 1080, "fps": 30, "quality": 23 },
-  "idle": 20,
   "encoder": "h264_nvenc",
-  "readers": { "mp4": 1, "ts": 0, "hls": 0 },
   "bytes": 146555,
   "memory_mb": 406,
   "made": true
 }
 ```
 
-`state` is `starting`, `running` or `ended` (with `reason`: `idle`, `deleted`, or what failed, such
-as `chromium exited with 1`); an ended page is listed for a minute and then forgotten. `encoder` is
-`h264_nvenc`, or `libopenh264` where the card's could not start; `readers` how many read each
-format, `hls` 1 while a file of the HLS form was asked for within 5 s (_0.4.5_), since an HLS player
-holds no answer open; `bytes` how much has been encoded;
+`state` is `starting`, `running` or `ended` (with `reason`: `deleted`, or what failed, such as
+`chromium exited with 1` or `the ts stream could not be written: …`); an ended page is listed for a
+minute and then forgotten. `encoder` is `h264_nvenc`, or `libopenh264` where the card's could not
+start; `bytes` how much of the MP4 has been written;
 `memory_mb` what the browser holds, all its processes together. A browser over
 `EMS_PAGE_MEMORY_MB` (2048) ends the page.
 
-**Reading it.** `live.mp4` is fragmented MP4 (`video/mp4`), what a Cast player takes; `live.ts` is
-MPEG-TS (`video/mp2t`), what a DLNA screen takes. Both are H.264, High profile at level 4.1 on the
-card (Constrained Baseline on the CPU), at most 8 Mbit/s, with a keyframe every second, and the
-page's sound as AAC, 48 kHz stereo at 128 kbit/s, silence while it plays none (_0.4.7_). The
-picture is the first track, and a reader starts at its keyframes.
-A reader gets the format's header (the MP4's `ftyp` and `moov`; the TS's PAT and PMT), then
-everything since the latest keyframe, then the stream as it comes, a fragment at least every 200 ms;
-the TS repeats the picture's parameters at every keyframe, and an MP4 reader's clock starts at 0.
-With `?duration=<seconds>` (16 to 604800, _0.4.6_) the MP4's header says the stream lasts that
-long (`mvhd`, each track's `tkhd` and `mdhd`, and an `mehd`) instead of nothing: a browser counts
-an endless MP4 only as long as what it has read, and Chrome hands a screen near it (the Remote
-Playback API) nothing of 15 s or less, nor HLS on Android. Such a reader also has a second of the
-stream at once, padded to a multiple of 32 KiB with a `free` box: Chrome reads a stream's metadata,
-which it must have before it offers a screen, only once it holds about a second of media, and fills
-its reads 32 KiB at a time, so a new page's few hundred bytes of blank page a fragment took seconds.
-Where what came since the latest keyframe is less than a second, its first fragment is sent again
-straight after itself, which leaves the decoder as it was, and the stream follows that much later.
-Both answers carry `Access-Control-Allow-Origin: *`, since a player fetches from a page of its own.
-A reader that falls a minute behind is let go and its answer ends; every answer ends when the page
-does. A page asked for before its first keyframe is `busy`, one that has ended `not_found` with why.
-
-**As HLS** _(0.4.5)_. `hls/index.m3u8` is a live playlist (`application/vnd.apple.mpegurl`, no
-`#EXT-X-ENDLIST` while the page runs) of the latest ten seconds, in MPEG-TS segments
-(`hls/index<n>.ts`, `video/mp2t`) of a second each, every one starting at a keyframe; older
-segments are deleted. It is what Safari hands an AirPlay screen; Chrome on Android hands a Cast
-screen no HLS, and takes the MP4 with `?duration` instead. The playlist is waited for while the first segment is still being
-made, up to 10 s; after that it is `busy`. A segment no longer listed, a name that is neither, or a
-page that has ended is `not_found`. Each file asked for counts as reading the page, for its `idle`.
+**The streams.** `output.mp4` is written fragmented MP4 (`video/mp4`), what a Cast player takes;
+`output.ts` MPEG-TS (`video/mp2t`), what a DLNA screen takes. Both are H.264, High profile at level
+4.1 on the card (Constrained Baseline on the CPU), at most 8 Mbit/s, with a keyframe every second,
+and the page's sound as AAC, 48 kHz stereo at 128 kbit/s, silence while it plays none (_0.4.7_). The
+picture is the first track. The MP4 is its header (`ftyp` and `moov`) once, then a fragment at
+least every 200 ms, each keyframe starting one; the TS repeats its programme tables, and the
+picture's parameters at every keyframe. Each is written from its start, in order, as ffmpeg makes
+it; a write that fails (the caller's stream gone) ends the page, and every name is closed when the
+page ends, which ends the caller's streams for their readers. Until 0.6.0 EMS served each reader
+itself (`live.mp4`, `live.ts` and an HLS form) and stopped a page nobody had read for its `idle`
+seconds: both are the caller's now.
 
 **Keys** _(0.4.7)_. `POST /v0/pages/<id>/keys` with `{ "keys": ["ArrowRight"] }` (1 to 32) presses
 and releases each key in the page in turn, through the browser's DevTools, as someone at it would:
@@ -1677,6 +1688,75 @@ a `state()` or `message()` that throws, or a browser that does not answer within
 
 `capabilities.limits.pages` is `EMS_PAGES`, and `capabilities.encode.page_renderer` whether this
 EMS has a browser, a virtual display and a sound server to render pages with.
+
+### 4.26 `transcodes` — a live stream transcoded into another _(implemented, 0.6.0)_
+
+A live stream the caller grants, a camera's say, which a browser or a screen cannot play as it
+comes (HEVC, an odd profile), read as it comes and written, as H.264 and AAC in MPEG-TS or
+fragmented MP4, into another live stream the caller grants for writing (_3.1_). EMS knows streams, not cameras, and
+serves nothing of it: who reads the output, and when the transcode is no longer wanted, is the
+caller's. Nothing is kept: a transcode lives in EMS's memory, and its caller puts it again when EMS
+has started anew.
+
+```
+PUT    /v0/transcodes/<id>       start it, or start it again when its body or EMS-Files changed or it ended
+GET    /v0/transcodes            every transcode and how it is doing
+GET    /v0/transcodes/<id>       one
+DELETE /v0/transcodes/<id>       stop it
+```
+
+```json
+PUT /v0/transcodes/front-door-main
+EMS-Files: address=ein:2224; secret=…
+{ "source": { "path": "/4f0c…/0-main.ts" },
+  "output": { "path": "/4f0c…/1-main.h264.ts" },
+  "video": { "height": 1080 } }
+```
+
+| Field           | Default | Meaning                                                                                                |
+| --------------- | ------- | ------------------------------------------------------------------------------------------------------ |
+| `source.path`   |         | The live stream read, a name under the request's `EMS-Files`, as a watch's source (_4.24_)             |
+| `output.path`   |         | The live stream written, a name granted to write                                                       |
+| `format`        | mpegts  | What the output is written as: `mpegts`, or `mp4`, fragmented with a fragment at each keyframe (0.6.1) |
+| `video.height`  | none    | The picture at most this many pixels high (144 to 2160), scaled down keeping its shape                 |
+| `video.quality` | 23      | NVENC's `cq` (0–51)                                                                                    |
+
+The id is as a watch's. A transcode put without `EMS-Files` is `invalid_request`, and one whose
+output is not granted to write `not_found` or `path_not_granted`. The same body put again with the
+same `EMS-Files` leaves it running and answers `made: false`; another body, another endpoint, or a
+transcode that has ended starts it anew. Past `EMS_TRANSCODES` (2) running a new one is `busy`:
+each holds a decode, on the CPU, and an encoder. The answer comes once the output is open; the
+source is read from then on. Each answer's `result` is its status:
+
+```json
+{
+  "id": "front-door-main",
+  "source": "/4f0c…/0-main.ts",
+  "output": "/4f0c…/1-main.h264.ts",
+  "state": "running",
+  "since": "2026-11-18T16:02:11.402Z",
+  "format": "mpegts",
+  "video": { "height": 1080, "quality": 23 },
+  "encoder": "h264_nvenc",
+  "bytes": 9120344,
+  "made": true
+}
+```
+
+`state` is `connecting` until the first bytes are written, `running`, `lost` while the source has
+dropped or cannot be opened (with `error`, why), or `ended` (with `reason`: `deleted`, or `the
+output could not be written: …`); an ended transcode is listed for a minute and then forgotten.
+`encoder` is `h264_nvenc`, or `libopenh264` once the card's could not start; `bytes` how much has
+been written.
+
+The output is H.264 (High profile on the card) at most 8 Mbit/s with a keyframe every second
+(in MPEG-TS its parameters at each, in MP4 a fragment starting at each, after a header with no samples), and the source's first sound as AAC, 48 kHz stereo at 128 kbit/s; a source
+without sound has none. A source that ends or fails is opened again after a pause that doubles from
+a second to a minute, and what comes then is encoded anew and written on into the same output, its
+programme tables (or MP4 header) and timestamps those of the new encode. Deleting a transcode closes its output,
+which ends the caller's stream for its readers.
+
+`capabilities.limits.transcodes` is `EMS_TRANSCODES`.
 
 ## 5. Error codes
 
@@ -1705,7 +1785,7 @@ this instance serves, a comma list of globs over their names such as
 `media.*,image.*,video.frames,vision.embed`; `*`, every op, by default — a glob that matches no op is
 a warning in health),
 the admission limits (`EMS_LIMIT_MODELS`, `EMS_LIMIT_TOOLS`, `EMS_LIMIT_ENCODES`,
-`EMS_QUEUE_DEPTH`, `EMS_INTERACTIVE_RESERVE`, `EMS_AFFINITY_WAIT`), `EMS_WATCHES` (the most watches at once, 4), `EMS_STREAMS` (the most `video.stream`s at once, 2), `EMS_PAGES` (the most pages rendered at once, 2), `EMS_PAGE_MEMORY_MB` (the most a page's browser may hold, 2048), `EMS_EXIFTOOL_WORKERS`, `EMS_EXPECT_GPU` (`1`: a card
+`EMS_QUEUE_DEPTH`, `EMS_INTERACTIVE_RESERVE`, `EMS_AFFINITY_WAIT`), `EMS_WATCHES` (the most watches at once, 4), `EMS_STREAMS` (the most `video.stream`s at once, 2), `EMS_PAGES` (the most pages rendered at once, 2), `EMS_PAGE_MEMORY_MB` (the most a page's browser may hold, 2048), `EMS_TRANSCODES` (the most live streams transcoded at once, 2), `EMS_EXIFTOOL_WORKERS`, `EMS_EXPECT_GPU` (`1`: a card
 is expected, and health lists `what: "gpu"` under `degraded` when none is visible), `EMS_CARD_BUDGET_MB` (the most of the card the models
 treat as there — how a smaller card is rehearsed; 0 is the whole card), `EMS_CARD_SHARE_MB` (the most
 of the card EMS's own processes hold when it starts, for a card shared with another service such as

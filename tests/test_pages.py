@@ -1,6 +1,6 @@
-"""`pages`: ffmpeg's MP4 and TS cut where a reader may start, every reader served from one encode,
-its HLS files served as ffmpeg writes them, and a stream that ends when its browser fails, when it
-is deleted or when nobody reads it, and keys pressed in it through the browser's DevTools. The
+"""`pages`: ffmpeg's MP4 and TS cut where a reader may start, each written as it comes into the
+name its caller grants, and a stream that ends when its browser fails, when a write fails or when
+it is deleted, and keys pressed in it through the browser's DevTools. The
 rendering is stood in for; the fixtures are what ffmpeg's tee writes (two seconds of a picture at 15
 fps with a keyframe a second, and a tone as AAC, a fragment every 200 ms):
 
@@ -13,17 +13,15 @@ fps with a keyframe a second, and a tone as AAC, a fragment every 200 ms):
 import asyncio
 import json
 import os
-import shutil
-import subprocess
 import tempfile
+import threading
 import time
 
 import pytest
 
 from ems import pages
 from ems.errors import EmsError
-from ems.pages import (CHROME_READ, QUICK_START_SECONDS, Devtools, Mp4Splitter, PageSpec, Rendering, TsSplitter, decode_times, declared,
-                       encoder_args, fragment_duration, key_event, quick_start, rebased, tracks, video_time)
+from ems.pages import Devtools, Mp4Splitter, PageSpec, Rendering, TsSplitter, decode_times, encoder_args, key_event, tracks
 
 DATA = os.path.join(os.path.dirname(__file__), "data")
 MP4 = open(os.path.join(DATA, "page.mp4"), "rb").read()
@@ -77,8 +75,7 @@ class FakeRendering(Rendering):
     def __init__(self):
         self.mp4 = asyncio.StreamReader()
         self.ts = asyncio.StreamReader()
-        super().__init__({"chromium": FakeProcess(), "ffmpeg": FakeProcess()}, {"mp4": self.mp4, "ts": self.ts}, "h264_nvenc",
-                         hls=tempfile.mkdtemp(prefix="ems-page-hls-"))
+        super().__init__({"chromium": FakeProcess(), "ffmpeg": FakeProcess()}, {"mp4": self.mp4, "ts": self.ts}, "h264_nvenc")
         self.memory = 300.0
         self.stopped = False
         self.pressed: list[str] = []
@@ -122,15 +119,46 @@ class Launches:
         return rendering
 
 
+class Written:
+    """The caller's names as a page opens them to write: a file of its own each, by name."""
+
+    def __init__(self):
+        self.folder = tempfile.mkdtemp(prefix="ems-page-written-")
+        self.opened: list[tuple[str, str]] = []
+
+    async def __call__(self, endpoint, name):
+        self.opened.append((endpoint.host, name))
+        return os.open(self.path(name), os.O_WRONLY | os.O_CREAT)
+
+    def path(self, name: str) -> str:
+        return os.path.join(self.folder, name.strip("/").replace("/", "-"))
+
+    def bytes(self, name: str) -> bytes:
+        return open(self.path(name), "rb").read()
+
+
 @pytest.fixture
 def launches(client, monkeypatch):
     monkeypatch.setattr(pages, "WATCH_SECONDS", 0.05)
     found = Launches()
     client.app.state.ctx.pages.launch = found
+    found.written = Written()
+    client.app.state.ctx.pages.open_name = found.written
     return found
 
 
-SPEC = {"url": "http://ein.test:8080/__page/abc", "video": {"width": 1280, "height": 720, "fps": 30}, "idle": 5}
+SPEC = {"url": "http://ein.test:8080/__page/abc", "video": {"width": 1280, "height": 720, "fps": 30},
+        "output": {"mp4": {"path": "/0f/0-page.mp4"}, "ts": {"path": "/0f/1-page.ts"}}}
+
+
+async def _written(written: Written, name: str, size: int) -> bytes:
+    """What `name` holds once it holds `size` bytes."""
+    for _ in range(200):
+        data = written.bytes(name)
+        if len(data) >= size:
+            return data
+        await asyncio.sleep(0.01)
+    return written.bytes(name)
 
 
 async def test_a_page_runs_once_it_has_a_picture_and_the_same_body_again_leaves_it(client, launches):
@@ -145,220 +173,43 @@ async def test_a_page_runs_once_it_has_a_picture_and_the_same_body_again_leaves_
     assert [page["id"] for page in listed] == ["kitchen"]
 
 
-async def test_every_reader_starts_at_the_latest_keyframe_with_its_clock_at_zero(client, launches):
+async def test_each_format_is_written_into_its_name_as_it_comes_and_closed_when_the_page_ends(client, launches):
     await client.put("/v0/pages/kitchen", json=SPEC)
+    written = launches.written
+    assert written.opened == [("caller.test", "/0f/0-page.mp4"), ("caller.test", "/0f/1-page.ts")]
+    fed = len(MP4) * 3 // 4
+    assert await _written(written, "/0f/0-page.mp4", fed) == MP4[:fed]
+    launches.renderings[0].feed(MP4[fed:], TS[len(TS) * 3 // 4:])
+    assert await _written(written, "/0f/0-page.mp4", len(MP4)) == MP4
+    assert await _written(written, "/0f/1-page.ts", len(TS)) == TS
     page = client.app.state.ctx.pages.get("kitchen")
-    channel, reader = page.join("mp4")
-    chunks = channel.chunks(reader)
-    header = await anext(chunks)
-    assert header[4:8] == b"ftyp"
-    first = await anext(chunks)
-    # The picture at 0, the sound where it was against it: within one of its frames.
-    assert first[4:8] == b"moof" and decode_times(first)[1] == 0 and 0 <= decode_times(first)[2] < 1024
-    assert all(value > 0 for value in decode_times(channel.gop[0]).values())
-    second = await anext(chunks)
-    assert all(value > 0 for value in decode_times(second).values())
-    page.leave(channel, reader)
-
-    ts_channel, ts_reader = page.join("ts")
-    start = await ts_reader.next()
-    assert start == ts_channel.splitter.header
-    key = await ts_reader.next()
-    assert key[5] & 0x40
-    assert page.status()["readers"] == {"mp4": 0, "ts": 1, "hls": 0}
-    page.leave(ts_channel, ts_reader)
-
-
-async def test_a_live_route_sends_the_header_then_the_stream_until_the_page_ends(client, launches):
-    await client.put("/v0/pages/kitchen", json=SPEC)
-    page = client.app.state.ctx.pages.get("kitchen")
-    header = page.channels["ts"].splitter.header
-    # The test client answers once the body is whole, so the page is deleted while it is read.
-    reading = asyncio.ensure_future(client.get("/v0/pages/kitchen/live.ts"))
-    for _ in range(100):
-        if page.readers():
-            break
-        await asyncio.sleep(0.01)
-    assert page.status()["readers"] == {"mp4": 0, "ts": 1, "hls": 0}
+    assert page.status()["bytes"] == len(MP4) and "readers" not in page.status()
+    fds = list(page.written.values())
     await client.delete("/v0/pages/kitchen")
-    r = await asyncio.wait_for(reading, 2)
-    assert r.headers["content-type"] == "video/mp2t"
-    assert r.headers["access-control-allow-origin"] == "*"
-    assert r.content.startswith(header) and r.content[len(header) + 5] & 0x40
-    assert page.readers() == 0
+    for fd in fds:
+        with pytest.raises(OSError):
+            os.fstat(fd)
 
 
-def test_a_declared_header_gains_an_mehd_once():
-    splitter = Mp4Splitter()
-    splitter.feed(MP4)
-    header = declared(splitter.header, 86400)
-    assert len(header) == len(splitter.header) + 16 and header.count(b"mehd") == 1
-    assert declared(header, 86400) == header
+async def test_a_page_is_put_with_the_endpoint_its_names_are_granted_under(client, launches):
+    r = await client.put("/v0/pages/kitchen", json=SPEC, headers={"ems-files": ""})
+    assert r.status_code == 400 and "EMS-Files" in r.json()["error"]["message"]
+    r = await client.put("/v0/pages/kitchen", json={key: value for key, value in SPEC.items() if key != "output"})
+    assert r.status_code == 400
+    await client.put("/v0/pages/kitchen", json=SPEC)
+    # The same body through another endpoint is the caller started anew: the page starts anew.
+    again = (await client.put("/v0/pages/kitchen", json=SPEC, headers={"ems-files": "address=caller.test:2224; secret=0th3r"})).json()["result"]
+    assert again["made"] is True and len(launches.renderings) == 2
 
 
-@pytest.mark.skipif(not shutil.which("ffprobe"), reason="ffprobe is not installed")
-def test_a_declared_header_says_the_stream_lasts_that_long_where_a_player_reads_it(tmp_path):
-    splitter = Mp4Splitter()
-    splitter.feed(MP4)
-    header = declared(splitter.header, 86400)
-    path = tmp_path / "declared.mp4"
-    path.write_bytes(header + MP4[len(splitter.header):])
-    # ffprobe reads the header's durations; the fixture's own header says nothing.
-    probe = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration:stream=duration", "-of", "json", str(path)],
-                           capture_output=True, text=True, check=True)
-    found = json.loads(probe.stdout)
-    assert float(found["format"]["duration"]) == 86400 and float(found["streams"][0]["duration"]) == 86400
-
-
-async def test_a_reader_of_the_mp4_may_ask_for_its_header_to_declare_a_duration(client, launches):
+async def test_a_page_whose_stream_cannot_be_written_ends(client, launches):
     await client.put("/v0/pages/kitchen", json=SPEC)
     page = client.app.state.ctx.pages.get("kitchen")
-    channel, reader = page.join("mp4")
-    chunks = channel.chunks(reader, 86400)
-    assert await anext(chunks) == declared(channel.splitter.header, 86400)
-    page.leave(channel, reader)
-    assert (await client.get("/v0/pages/kitchen/live.mp4?duration=5")).status_code == 400
-
-
-def _stream() -> tuple[bytes, list[bytes]]:
-    """The fixture's declared header and its fragments, their clock starting at 0, as a reader is sent them."""
-    splitter = Mp4Splitter()
-    fragments = [piece for _, piece in splitter.feed(MP4)]
-    base = video_time(splitter.header, fragments[0])
-    return declared(splitter.header, 86400), [rebased(fragment, base) for fragment in fragments]
-
-
-def _second(header: bytes) -> int:
-    return int(QUICK_START_SECONDS * tracks(header)[1].timescale)
-
-
-def test_every_track_is_moved_by_the_same_time():
-    header, fragments = _stream()
-    video, audio = tracks(header)[1], tracks(header)[2]
-    base = video_time(header, fragments[3])
-    assert base[1] / video.timescale == base[2] / audio.timescale
-    moved = rebased(fragments[3], base)
-    assert decode_times(moved)[1] == 0
-    # The sound keeps where it was against the picture, to within one of its samples.
-    was = decode_times(fragments[3])
-    assert abs((was[2] - decode_times(moved)[2]) / audio.timescale - was[1] / video.timescale) <= 1 / audio.timescale
-
-
-def test_a_quick_start_holds_a_second_and_fills_out_chromes_read():
-    header, fragments = _stream()
-    start, shift = quick_start(header, fragments[:1])
-    first = fragment_duration(fragments[0], header, 1)
-    repeated = [piece for piece in start if piece[4:8] == b"moof"]
-    assert start[0] == header and start[-1][4:8] == b"free"
-    assert sum(len(piece) for piece in start) % CHROME_READ == 0
-    # The keyframe's fragment again and again straight after itself, a second of it in all.
-    assert all(pages.at_decode_times(piece, decode_times(fragments[0])) == fragments[0] for piece in repeated)
-    assert [decode_times(piece)[1] for piece in repeated] == [n * first for n in range(len(repeated))]
-    assert len(repeated) * first >= _second(header) > (len(repeated) - 1) * first
-    assert shift[1] == (len(repeated) - 1) * first
-    # The sound is repeated with it, as long after as the picture.
-    assert shift[2] == shift[1] * tracks(header)[2].timescale // tracks(header)[1].timescale
-
-
-def test_a_quick_start_leaves_what_already_holds_a_second_as_it_is():
-    header, fragments = _stream()
-    held = [f for n, f in enumerate(fragments) if sum(fragment_duration(g, header, 1) for g in fragments[:n]) < _second(header)]
-    start, shift = quick_start(header, held)
-    assert set(shift.values()) == {0} and start[1:1 + len(held)] == held
-
-
-@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg is not installed")
-def test_a_quick_start_and_what_follows_decode_as_one_stream(tmp_path):
-    header, fragments = _stream()
-    start, shift = quick_start(header, fragments[:1])
-    rest = [rebased(fragment, {track: -value for track, value in shift.items()}) for fragment in fragments[1:]]
-    path = tmp_path / "quick.mp4"
-    path.write_bytes(b"".join([*start, *rest]))
-    decoded = subprocess.run(["ffmpeg", "-v", "error", "-i", str(path), "-f", "null", "-"], capture_output=True, text=True)
-    assert decoded.returncode == 0 and decoded.stderr == ""
-    probe = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v", "-show_entries", "packet=pts", "-of", "csv=p=0", str(path)],
-                           capture_output=True, text=True, check=True)
-    times = [int(line) for line in probe.stdout.split()]
-    assert len(times) > len(fragments) and times == sorted(set(times))
-    sound = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "a", "-show_entries", "packet=pts", "-of", "csv=p=0", str(path)],
-                           capture_output=True, text=True, check=True)
-    assert sound.stdout.split()
-
-
-async def test_a_reader_that_asks_for_a_duration_is_given_a_quick_start_and_the_rest_after_it(client, launches):
-    await client.put("/v0/pages/kitchen", json=SPEC)
-    page = client.app.state.ctx.pages.get("kitchen")
-    channel, reader = page.join("mp4")
-    base = video_time(channel.splitter.header, channel.gop[0])
-    expected, shift = quick_start(declared(channel.splitter.header, 86400), [rebased(f, base) for f in channel.gop])
-    chunks = channel.chunks(reader, 86400)
-    assert [await anext(chunks) for _ in expected] == expected
-    splitter = Mp4Splitter()
-    fragments = [piece for _, piece in splitter.feed(MP4)]
-    after = fragments[fragments.index(channel.gop[-1]) + 1]
-    launches.renderings[0].feed(MP4[len(MP4) * 3 // 4:], b"")
-    following = await asyncio.wait_for(anext(chunks), 2)
-    assert following == rebased(after, {track: value - shift[track] for track, value in base.items()})
-    page.leave(channel, reader)
-
-
-def test_the_hls_is_written_beside_the_two_streams_from_the_one_encode():
-    args = encoder_args(PageSpec(url="http://ein.test/"), "h264_nvenc", 5, "/scratch/page:1/hls")
-    tee = args[-1]
-    assert args[-2:-1] == ["tee"] and tee.count("|") == 2
-    hls = tee.split("|")[2]
-    assert hls.startswith("[f=hls:bsfs/v=dump_extra=freq=keyframe:hls_time=1:")
-    assert "delete_segments" in hls and hls.endswith("]/scratch/page\\:1/hls/index.m3u8")
-
-
-async def test_the_hls_files_are_served_as_ffmpeg_writes_them_and_count_as_a_reader(client, launches, monkeypatch):
-    monkeypatch.setattr(pages, "HLS_START_SECONDS", 2.0)
-    await client.put("/v0/pages/kitchen", json=SPEC)
-    page = client.app.state.ctx.pages.get("kitchen")
-    folder = launches.renderings[0].hls
-    playlist = b"#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1.000000,\nindex7.ts\n"
-
-    async def write_later():
-        await asyncio.sleep(0.3)
-        open(os.path.join(folder, "index7.ts"), "wb").write(TS[:188 * 4])
-        open(os.path.join(folder, "index.m3u8"), "wb").write(playlist)
-
-    # A playlist asked for before ffmpeg has written it is waited for.
-    writing = asyncio.ensure_future(write_later())
-    r = await client.get("/v0/pages/kitchen/hls/index.m3u8")
-    await writing
-    assert r.status_code == 200 and r.content == playlist
-    assert r.headers["content-type"] == "application/vnd.apple.mpegurl"
-    assert r.headers["access-control-allow-origin"] == "*"
-    assert page.status()["readers"] == {"mp4": 0, "ts": 0, "hls": 1}
-    segment = await client.get("/v0/pages/kitchen/hls/index7.ts")
-    assert segment.headers["content-type"] == "video/mp2t" and segment.content == TS[:188 * 4]
-    assert (await client.get("/v0/pages/kitchen/hls/index6.ts")).status_code == 404
-    assert (await client.get("/v0/pages/kitchen/hls/..%2Fprofile")).status_code == 404
-    await client.delete("/v0/pages/kitchen")
-    page.hls_read = None
-    assert (await client.get("/v0/pages/kitchen/hls/index.m3u8")).status_code == 404
-
-
-async def test_an_hls_player_keeps_a_page_from_idling(client, launches, monkeypatch):
-    await client.put("/v0/pages/kitchen", json=SPEC)
-    page = client.app.state.ctx.pages.get("kitchen")
-    open(os.path.join(launches.renderings[0].hls, "index.m3u8"), "wb").write(b"#EXTM3U\n")
-    page.unread_since -= 10
-    await client.get("/v0/pages/kitchen/hls/index.m3u8")
-    await asyncio.sleep(0.2)
-    assert page.ending is None
-
-
-async def test_a_page_nobody_reads_for_its_idle_seconds_ends(client, launches, monkeypatch):
-    await client.put("/v0/pages/kitchen", json=SPEC)
-    page = client.app.state.ctx.pages.get("kitchen")
-    page.unread_since -= 10
+    os.close(page.written["ts"])
+    launches.renderings[0].feed(b"", TS[len(TS) * 3 // 4:])
     await asyncio.wait_for(page.ended.wait(), 2)
-    assert page.status()["reason"] == "idle"
+    assert page.status()["reason"].startswith("the ts stream could not be written")
     assert launches.renderings[0].stopped
-    r = await client.get("/v0/pages/kitchen/live.mp4")
-    assert r.status_code == 404 and "idle" in r.json()["error"]["message"]
 
 
 async def test_a_browser_over_its_memory_or_gone_ends_the_page(client, launches):
@@ -375,12 +226,10 @@ async def test_a_browser_over_its_memory_or_gone_ends_the_page(client, launches)
     assert hall.status()["reason"] == "chromium exited with 1"
 
 
-async def test_deleting_a_page_stops_it_and_its_readers(client, launches):
+async def test_deleting_a_page_stops_it(client, launches):
     await client.put("/v0/pages/kitchen", json=SPEC)
-    page = client.app.state.ctx.pages.get("kitchen")
-    _, reader = page.join("mp4")
     assert (await client.delete("/v0/pages/kitchen")).status_code == 200
-    assert reader.ended and launches.renderings[0].stopped
+    assert launches.renderings[0].stopped
     assert (await client.get("/v0/pages/kitchen")).status_code == 404
 
 
@@ -415,8 +264,25 @@ async def test_a_page_is_an_http_url(client, launches):
     assert r.status_code == 400
 
 
+def test_xvfbs_display_is_read_up_to_its_newline_which_it_writes_apart():
+    read, write = os.pipe()
+    os.write(write, b"12")
+
+    def newline():
+        time.sleep(0.1)
+        os.write(write, b"\n")
+        os.close(write)
+
+    thread = threading.Thread(target=newline)
+    thread.start()
+    # Closing the pipe after the number alone would end Xvfb at the newline.
+    assert pages._display_told(read) == b"12\n"
+    thread.join()
+    os.close(read)
+
+
 def test_the_encode_takes_the_picture_first_and_the_sound_as_aac_from_the_input_opened_first():
-    args = encoder_args(PageSpec(url="http://ein.test/"), "h264_nvenc", 5, "/scratch/hls")
+    args = encoder_args(PageSpec(url="http://ein.test/", output=SPEC["output"]), "h264_nvenc", 5)
     maps = [args[n + 1] for n, arg in enumerate(args) if arg == "-map"]
     # The picture is the first track, from the second input: the sound is opened first.
     assert maps == ["1:v", "0:a"]
@@ -514,12 +380,13 @@ async def test_a_new_page_is_answered_once_a_keyframe_grabbed_after_its_paint_is
     # Loaded, but the keyframe the readers would start at is from before.
     assert not putting.done()
     page = client.app.state.ctx.pages.pages["kitchen"]
-    page.channels["ts"].keys += 1
+    page.outputs["ts"].keys += 1
     await asyncio.sleep(0.2)
     assert not putting.done()
     # A keyframe grabbed after the paint, two seconds into a stream whose grab began a second before it.
-    header = page.channels["mp4"].splitter.header
-    page.channels["mp4"].gop = [pages.at_decode_times(page.channels["mp4"].gop[0], {1: 2 * tracks(header)[1].timescale})]
+    mp4 = page.outputs["mp4"]
+    at, width = pages._tfdts(mp4.key)[1]
+    mp4.key = mp4.key[:at] + (2 * tracks(mp4.splitter.header)[1].timescale).to_bytes(width, "big") + mp4.key[at + width:]
     assert (await asyncio.wait_for(putting, 2)).status_code == 200
 
 

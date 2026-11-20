@@ -1,8 +1,10 @@
 """Watches: a live stream EMS reads for as long as its caller wants, and what it sees there told as
 events, under an id the caller chose (_4.24_).
 
-A watch reads its source with ffmpeg, a few frames a second in the display frame, each frame a PPM
-on ffmpeg's output; NVDEC decodes it where the host has a card. A frame is looked at for faces while it differs from the one before (`motion`)
+A watch's stream is a name its caller grants it under the `EMS-Files` the watch was put with, read
+through the caller's mount as it comes (remote.py, `open_live`) for as long as the watch runs. It
+reads it with ffmpeg, a few frames a second in the display frame, each frame a PPM on ffmpeg's
+output; NVDEC decodes it where the host has a card. A frame is looked at for faces while it differs from the one before (`motion`)
 or a face is being followed; the model worker finds the faces (`detect_faces`), and they are
 followed from frame to frame by `face_tracks`' rules: a face continues its track by overlapping
 box and likeness, or by likeness alone, and a track ends when its face has been gone for
@@ -12,8 +14,9 @@ While any watch runs the faces family stays loaded, and its frames leave the car
 is (ems/ops/watches.py, ems/card.py).
 
 Nothing of a watch is kept: it lives in memory, and a caller states its watches again when EMS
-starts. A source that drops is read again after a pause that doubles up to a minute, and the
-watch says so (`source.lost`, `source.back`). A watch with `clips` records its stream as well, and
+starts. A source that drops, or ends, as a granted stream's read does when nothing came for a while,
+is opened again after a pause that doubles up to a minute, and the watch says so (`source.lost`,
+`source.back`). A watch with `clips` records its stream as well, and
 cuts a clip around a face or motion (ems/clips.py).
 """
 
@@ -28,13 +31,13 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import AsyncIterator, Awaitable, Callable, Literal
-from urllib.parse import urlsplit, urlunsplit
 
 from pydantic import Field
 
-from .clips import ClipsSpec, Joiner, Recorder, SegmentSource, input_args
+from .clips import ClipsSpec, Joiner, Opener, Recorder, SegmentSource, spawn_reading
 from .errors import BUSY, INVALID_REQUEST, NOT_FOUND, EmsError
-from .schemas import Box, Strict
+from .remote import Endpoint
+from .schemas import Box, StreamRef, Strict
 from .tools import ffmpeg as ffmpeg_tool
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "modelworker"))
@@ -70,7 +73,7 @@ class FacesSpec(Strict):
 class WatchSpec(Strict):
     """What a watch reads and how: `PUT /v0/watches/<id>`'s body."""
 
-    source: str = Field(min_length=1)
+    source: StreamRef
     faces: FacesSpec = Field(default_factory=FacesSpec)
     # Look for faces only in frames that changed, and tell when there is motion.
     motion: bool = True
@@ -95,26 +98,15 @@ class Frame:
     ppm: bytes
 
 
-# What reads a source: given the spec, yields its frames until the source ends or fails, when it
-# raises with why. `ffmpeg_frames` in the service, a list of frames in tests.
-FrameSource = Callable[[WatchSpec], AsyncIterator[Frame]]
+# What reads a source: given the spec and the source's opener, yields its frames until the source
+# ends or fails, when it raises with why. `ffmpeg_frames` in the service, a list of frames in tests.
+FrameSource = Callable[[WatchSpec, Opener], AsyncIterator[Frame]]
+# What opens a caller's granted name at the endpoint a watch was put with: `open_live` in the service.
+NameOpener = Callable[[Endpoint, str], Awaitable[int]]
 # What makes a JPEG of a part of a frame: `(frame, x, y, width, height)` in pixels.
 CropEncoder = Callable[[Frame, int, int, int, int], Awaitable[bytes]]
 # What finds the faces in a frame, as the worker's `detect_faces` answers: pixel boxes.
 FaceFinder = Callable[[str, Frame], Awaitable[dict]]
-
-
-def masked_source(source: str) -> str:
-    """The source as a status shows it: without a password."""
-    try:
-        parts = urlsplit(source)
-    except ValueError:
-        return source
-    if not parts.password:
-        return source
-    host = parts.hostname or ""
-    netloc = f"{parts.username}:***@{host}" + (f":{parts.port}" if parts.port else "")
-    return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
 
 
 def now_iso() -> str:
@@ -213,10 +205,13 @@ def follow(tracks: list[Track], found: list[dict]) -> list[tuple[Track | None, d
 class Watch:
     """One watch: its spec, its reading loop, what it has seen, and who listens."""
 
-    def __init__(self, watch_id: str, spec: WatchSpec, *, source: FrameSource, find: FaceFinder, crop: CropEncoder, log: Callable[[str], None], recorder: Callable[[Watch], Recorder] | None = None):
+    def __init__(self, watch_id: str, spec: WatchSpec, endpoint: Endpoint, *, source: FrameSource, open_name: NameOpener, find: FaceFinder, crop: CropEncoder,
+                 log: Callable[[str], None], recorder: Callable[[Watch], Recorder] | None = None):
         self.id = watch_id
         self.spec = spec
+        self.endpoint = endpoint
         self.source = source
+        self.open_name = open_name
         self.find = find
         self.crop = crop
         self.log = log
@@ -238,7 +233,7 @@ class Watch:
     def status(self) -> dict:
         return {
             "id": self.id,
-            "source": masked_source(self.spec.source),
+            "source": self.spec.source.path,
             "state": self.state,
             "since": self.since,
             "frames": self.frames,
@@ -254,6 +249,10 @@ class Watch:
         self.task = asyncio.create_task(self.run(), name=f"watch {self.id}")
         if self.recorder is not None:
             self.recorder.start()
+
+    def opener(self, name: str) -> Opener:
+        """What opens the caller's name `name` for one read of it."""
+        return lambda: self.open_name(self.endpoint, name)
 
     def records(self) -> Recorder:
         if self.recorder is None:
@@ -293,7 +292,7 @@ class Watch:
             began = time.monotonic()
             try:
                 grid = None
-                async for frame in self.source(self.spec):
+                async for frame in self.source(self.spec, self.opener(self.spec.source.path)):
                     if lost:
                         lost = False
                         self.tell("source.back", {})
@@ -425,10 +424,11 @@ class Watch:
 class Watches:
     """Every watch of this EMS, by id. `idle` is called once the last of them has stopped."""
 
-    def __init__(self, limit: int, *, source: FrameSource, find: FaceFinder, crop: CropEncoder, log: Callable[[str], None],
+    def __init__(self, limit: int, *, source: FrameSource, open_name: NameOpener, find: FaceFinder, crop: CropEncoder, log: Callable[[str], None],
                  folder: str, segments: SegmentSource, join: Joiner, idle: Callable[[], Awaitable[None]] | None = None):
         self.limit = limit
         self.source = source
+        self.open_name = open_name
         self.find = find
         self.crop = crop
         self.log = log
@@ -442,7 +442,8 @@ class Watches:
     def recorder(self, watch: Watch) -> Recorder:
         clips = watch.spec.clips
         assert clips is not None
-        return Recorder(watch.id, clips, clips.source or watch.spec.source, os.path.join(self.folder, watch.id), segments=self.segments, join=self.join, tell=watch.tell, log=self.log)
+        recorded = watch.opener((clips.source or watch.spec.source).path)
+        return Recorder(watch.id, clips, recorded, os.path.join(self.folder, watch.id), segments=self.segments, join=self.join, tell=watch.tell, log=self.log)
 
     def get(self, watch_id: str) -> Watch:
         watch = self.watches.get(watch_id)
@@ -450,19 +451,19 @@ class Watches:
             raise EmsError(NOT_FOUND, f"no watch {watch_id}")
         return watch
 
-    async def put(self, watch_id: str, spec: WatchSpec) -> tuple[Watch, bool]:
-        """The watch `watch_id` reading `spec`: made, or made again when its spec changed. Answers
-        it and whether it was made now; the same spec twice leaves it running."""
+    async def put(self, watch_id: str, spec: WatchSpec, endpoint: Endpoint) -> tuple[Watch, bool]:
+        """The watch `watch_id` reading `spec`'s names at `endpoint`: made, or made again when either
+        changed. Answers it and whether it was made now; the same twice leaves it running."""
         if not WATCH_ID.match(watch_id):
             raise EmsError(INVALID_REQUEST, "a watch's id is 1 to 128 letters, digits, '.', '_' or '-'")
         known = self.watches.get(watch_id)
-        if known is not None and known.spec == spec:
+        if known is not None and known.spec == spec and known.endpoint == endpoint:
             return known, False
         if known is None and len(self.watches) >= self.limit:
             raise EmsError(BUSY, f"this EMS runs at most {self.limit} watches (EMS_WATCHES)")
         if known is not None:
             await self._drop(watch_id)
-        watch = Watch(watch_id, spec, source=self.source, find=self.find, crop=self.crop, log=self.log, recorder=self.recorder)
+        watch = Watch(watch_id, spec, endpoint, source=self.source, open_name=self.open_name, find=self.find, crop=self.crop, log=self.log, recorder=self.recorder)
         self.watches[watch_id] = watch
         watch.start()
         return watch, True
@@ -503,14 +504,15 @@ _cpu_only: dict[str, float] = {}
 NVDEC_AGAIN_AFTER = 3600.0
 
 
-async def ffmpeg_frames(spec: WatchSpec) -> AsyncIterator[Frame]:
+async def ffmpeg_frames(spec: WatchSpec, open_source: Opener) -> AsyncIterator[Frame]:
     """The source's frames as ffmpeg decodes them: by NVDEC on a host with a card, on the CPU
     without one or when NVDEC gives nothing (a codec it lacks), the CPU's error told if it gives
-    nothing either."""
-    if ffmpeg_tool.gpu_present() and time.monotonic() - _cpu_only.get(spec.source, -NVDEC_AGAIN_AFTER) >= NVDEC_AGAIN_AFTER:
+    nothing either. Each read opens the source again, joining it at that moment."""
+    key = spec.source.path
+    if ffmpeg_tool.gpu_present() and time.monotonic() - _cpu_only.get(key, -NVDEC_AGAIN_AFTER) >= NVDEC_AGAIN_AFTER:
         frames = 0
         try:
-            async for frame in _ffmpeg_frames(spec, nvdec=True):
+            async for frame in _ffmpeg_frames(spec, open_source, nvdec=True):
                 frames += 1
                 yield frame
             return
@@ -518,20 +520,20 @@ async def ffmpeg_frames(spec: WatchSpec) -> AsyncIterator[Frame]:
             if frames:
                 raise
     frames = 0
-    async for frame in _ffmpeg_frames(spec, nvdec=False):
+    async for frame in _ffmpeg_frames(spec, open_source, nvdec=False):
         if not frames and ffmpeg_tool.gpu_present():
-            _cpu_only[spec.source] = time.monotonic()
+            _cpu_only[key] = time.monotonic()
         frames += 1
         yield frame
 
 
-async def _ffmpeg_frames(spec: WatchSpec, nvdec: bool) -> AsyncIterator[Frame]:
-    """One read of the source (`input_args`)."""
+async def _ffmpeg_frames(spec: WatchSpec, open_source: Opener, nvdec: bool) -> AsyncIterator[Frame]:
+    """One read of the source, opened for it (`spawn_reading`)."""
     args = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin"]
     if nvdec:
         args += ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]
-    args += [*input_args(spec.source), "-an", "-vf", filters(spec, nvdec), "-f", "image2pipe", "-vcodec", "ppm", "pipe:1"]
-    process = await asyncio.create_subprocess_exec(*args, stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    args += ["{source}", "-an", "-vf", filters(spec, nvdec), "-f", "image2pipe", "-vcodec", "ppm", "pipe:1"]
+    process = await spawn_reading(open_source, args, stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     assert process.stdout is not None and process.stderr is not None
     # Whether ffmpeg stopped of itself, when what it said is why; not when the reader was
     # cancelled or closed, which an error raised here would hide.

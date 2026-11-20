@@ -55,6 +55,9 @@ class Settings:
     pages: int
     # The most memory one page's browser may hold, in MB, before its stream is stopped.
     page_memory_mb: int
+    # The most live streams transcoded at once (`transcodes`): each holds a decode and an encoder
+    # for as long as it runs.
+    transcodes: int
     # How long a caller's oldest model request may wait while its requests for a family already
     # running go first.
     affinity_wait: int
@@ -162,6 +165,7 @@ class Settings:
             streams=integer("EMS_STREAMS", 2),
             pages=integer("EMS_PAGES", 2),
             page_memory_mb=integer("EMS_PAGE_MEMORY_MB", 2048),
+            transcodes=integer("EMS_TRANSCODES", 2),
             affinity_wait=integer("EMS_AFFINITY_WAIT", 300),
             expect_gpu=e.get("EMS_EXPECT_GPU", "") == "1",
             exiftool_workers=integer("EMS_EXIFTOOL_WORKERS", 2),
