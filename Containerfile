@@ -564,6 +564,11 @@ ENV EMS_TEXT_EMBED_MODEL=${TEXT_EMBED_MODEL}
 # thread each beats one image at N threads — and one thread per slot is what lets EMS_LIMIT_TOOLS
 # be sized against cores.
 ENV MAGICK_THREAD_LIMIT=1
+# The ceilings one `magick` may take, here so that they do not rest on the distribution's
+# policy.xml (whose values these are): a picture is untrusted, and one declaring huge dimensions
+# or decompressing into gigabytes is refused or fails its own render rather than the container.
+ENV MAGICK_WIDTH_LIMIT=32KP MAGICK_HEIGHT_LIMIT=32KP MAGICK_AREA_LIMIT=256MP \
+    MAGICK_MEMORY_LIMIT=1GiB MAGICK_MAP_LIMIT=2GiB MAGICK_DISK_LIMIT=2GiB
 # The transcodes' knobs (see ems/tools/encode.py): the CPU decode's projected footprint per window,
 # the constant it is projected from, how many windows one encode may become. EMS_VIDEO_ENCODER
 # is empty on purpose — av1_nvenc when the card and this ffmpeg offer it, libsvtav1 otherwise.

@@ -62,8 +62,8 @@ def decode_attempts(path: str, frames: str, times: str, *, gpu: bool) -> list[tu
     out = ["-map", "0:v:0", "-an", "-sn", "-dn", "-fps_mode", "passthrough", "-f", "rawvideo", frames]
     attempts = []
     if gpu:
-        attempts.append(("cuda", base + ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda", "-i", path, "-vf", f"scale_cuda=48:27:interp_algo=bicubic:format=yuv444p,hwdownload,format=yuv444p,{stamp}", *out]))
-    attempts.append(("cpu", base + ["-i", path, "-vf", f"scale=48:27,{stamp}", *out]))
+        attempts.append(("cuda", base + ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda", *ffmpeg_tool.source(path), "-vf", f"scale_cuda=48:27:interp_algo=bicubic:format=yuv444p,hwdownload,format=yuv444p,{stamp}", *out]))
+    attempts.append(("cpu", base + [*ffmpeg_tool.source(path), "-vf", f"scale=48:27,{stamp}", *out]))
     return attempts
 
 

@@ -184,9 +184,9 @@ async def _concat(ctx: Context, segments: list[str], audio: str | None, out: str
         for segment in segments:
             f.write("file '" + segment.replace("'", "'\\''") + "'\n")
     try:
-        args = [require("ffmpeg"), "-hide_banner", "-f", "concat", "-safe", "0", "-i", listing]
+        args = [require("ffmpeg"), "-hide_banner", "-f", "concat", "-safe", "0", *ffmpeg_tool.source(listing)]
         if audio:
-            args += ["-i", audio, "-map", "0:v:0", "-map", "1:a:0"]
+            args += [*ffmpeg_tool.source(audio), "-map", "0:v:0", "-map", "1:a:0"]
         else:
             args += ["-map", "0:v:0"]
         done = await run(args + ["-c", "copy", "-movflags", "+faststart", "-y", "-f", "mp4", out], timeout=timeout)
@@ -240,7 +240,7 @@ async def transcode_video(ctx: Context, req: VideoTranscodeRequest, progress: Pr
             # Stage one: everything in VRAM.
             if encoder and cuda_chain and source_codec not in encode.NVDEC_CANNOT_DECODE:
                 await progress.emit("encode", message="gpu")
-                done = await enc.run([*head, "-hwaccel", "cuda", "-hwaccel_output_format", "cuda", *_seek_args(clip), "-i", src, *maps, *_clip_args(clip), "-vf", cuda_chain, *gpu_args, *common, temp], phase="encode")
+                done = await enc.run([*head, "-hwaccel", "cuda", "-hwaccel_output_format", "cuda", *_seek_args(clip), *ffmpeg_tool.source(src), *maps, *_clip_args(clip), "-vf", cuda_chain, *gpu_args, *common, temp], phase="encode")
                 if done.code == 0:
                     ran = f"{encoder}/cuda"
                 else:
@@ -265,7 +265,7 @@ async def transcode_video(ctx: Context, req: VideoTranscodeRequest, progress: Pr
                     # Stage two: the CPU chain with the frames handed to VRAM at the end of it.
                     if encoder:
                         await progress.emit("encode", message="cpu decode, gpu encode")
-                        done = await enc.run([*head, *_seek_args(clip), "-i", src, *maps, *_clip_args(clip), "-vf", upload_chain, *gpu_args, *common, temp], phase="encode")
+                        done = await enc.run([*head, *_seek_args(clip), *ffmpeg_tool.source(src), *maps, *_clip_args(clip), "-vf", upload_chain, *gpu_args, *common, temp], phase="encode")
                         if done.code == 0:
                             ran = f"{encoder}/upload"
                         else:
@@ -273,7 +273,7 @@ async def transcode_video(ctx: Context, req: VideoTranscodeRequest, progress: Pr
                     # Stage three: the whole job on the CPU.
                     if not ran:
                         await progress.emit("encode", message="cpu")
-                        done = await enc.run([*head, *_seek_args(clip), "-i", src, *maps, *_clip_args(clip), "-vf", cpu_chain, *cpu_args, *common, temp], phase="encode")
+                        done = await enc.run([*head, *_seek_args(clip), *ffmpeg_tool.source(src), *maps, *_clip_args(clip), "-vf", cpu_chain, *cpu_args, *common, temp], phase="encode")
                         if done.code == 0:
                             ran = encode.CPU_ENCODER
                         else:
@@ -313,7 +313,7 @@ async def _encode_windows(enc: Encoder, plan: encode.Plan, src: str, temp: str, 
         audio_path = f"{base}-audio.mp4"
         scratch.append(audio_path)
         await enc.progress.emit("encode", message="audio")
-        done = await enc.run([*_seek_args(clip), "-i", src, *ffprobe_tool.audio_map(probe), *_clip_args(clip), "-vn", *_audio_args(audio), "-y", "-f", "mp4", audio_path], phase="encode", span=0.0)
+        done = await enc.run([*_seek_args(clip), *ffmpeg_tool.source(src), *ffprobe_tool.audio_map(probe), *_clip_args(clip), "-vn", *_audio_args(audio), "-y", "-f", "mp4", audio_path], phase="encode", span=0.0)
         if done.code != 0:
             raise EmsError(TOOL_FAILED, f"the audio pass failed: {done.tail(2, 300)}")
 
@@ -334,12 +334,12 @@ async def _encode_windows(enc: Encoder, plan: encode.Plan, src: str, temp: str, 
         span = 1.0 / plan.windows
         ok = False
         if encoder and stage != "cpu":
-            done = await enc.run([*head, "-ss", str(at), "-i", src, *picture, *length, "-vf", upload_chain, *gpu_args, "-an", "-y", "-f", "mp4", segment], phase="encode", base=index * span, span=span)
+            done = await enc.run([*head, "-ss", str(at), *ffmpeg_tool.source(src), *picture, *length, "-vf", upload_chain, *gpu_args, "-an", "-y", "-f", "mp4", segment], phase="encode", base=index * span, span=span)
             ok = done.code == 0
             if ok:
                 stage = "gpu"
         if not ok and stage != "gpu":
-            done = await enc.run([*head, "-ss", str(at), "-i", src, *picture, *length, "-vf", cpu_chain, *cpu_args, "-an", "-y", "-f", "mp4", segment], phase="encode", base=index * span, span=span)
+            done = await enc.run([*head, "-ss", str(at), *ffmpeg_tool.source(src), *picture, *length, "-vf", cpu_chain, *cpu_args, "-an", "-y", "-f", "mp4", segment], phase="encode", base=index * span, span=span)
             ok = done.code == 0
             if ok:
                 stage = "cpu"
@@ -422,7 +422,7 @@ async def transcode_audio(ctx: Context, req: AudioTranscodeRequest, progress: Pr
             args, facts = audio_plan(stream, str(probe.format.get("format_name") or ""), req.audio)
             total = ffprobe_tool.number(probe.format.get("duration"))
             await progress.emit("encode", message="remux" if facts["remuxed"] else "aac")
-            done = await Encoder(ctx, progress, total).run(["-i", src, "-map", f"0:{stream['index']}", *args, temp], phase="encode")
+            done = await Encoder(ctx, progress, total).run([*ffmpeg_tool.source(src), "-map", f"0:{stream['index']}", *args, temp], phase="encode")
             if done.code != 0:
                 raise EmsError(TOOL_FAILED, f"encoding failed: {done.tail(2, 300)}")
             if not os.path.isfile(temp) or os.path.getsize(temp) == 0:

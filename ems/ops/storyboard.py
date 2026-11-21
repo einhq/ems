@@ -97,8 +97,8 @@ def decode_attempts(path: str, sheet: str, plan: SheetPlan, *, gpu: bool) -> lis
     out = ["-map", "0:v:0", "-an", "-sn", "-dn", "-frames:v", "1", "-update", "1", sheet]
     attempts = []
     if gpu:
-        attempts.append(("cuda", base + ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda", "-i", path, "-vf", f"{tick},scale_cuda={size}:interp_algo=bicubic:format=nv12,hwdownload,format=nv12,setsar=1,{grid}", *out]))
-    attempts.append(("cpu", base + ["-i", path, "-vf", f"{tick},scale={size}:flags=bicubic,setsar=1,{grid}", *out]))
+        attempts.append(("cuda", base + ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda", *ffmpeg_tool.source(path), "-vf", f"{tick},scale_cuda={size}:interp_algo=bicubic:format=nv12,hwdownload,format=nv12,setsar=1,{grid}", *out]))
+    attempts.append(("cpu", base + [*ffmpeg_tool.source(path), "-vf", f"{tick},scale={size}:flags=bicubic,setsar=1,{grid}", *out]))
     return attempts
 
 

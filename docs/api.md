@@ -1835,7 +1835,11 @@ idle CPU and several seconds on a busy one. `health` lists both workers' models 
 given EMS is running; the card's share (_4.22a_) is the one setting a caller changes.
 
 Sizing the tool lane: every tool runs single-threaded (`MAGICK_THREAD_LIMIT=1` in the image), so
-`EMS_LIMIT_TOOLS` is a number of cores. Requests queue
+`EMS_LIMIT_TOOLS` is a number of cores. Every file is treated as hostile: ffmpeg and ffprobe open
+it, and what it names inside it, only as local files or inline data (`-protocol_whitelist
+file,crypto,data`; a live stream's pipe names nothing outside itself), and one `magick` stops at
+32K pixels a side, 256 megapixels in memory and 1 GiB of memory, 2 GiB mapped and 2 GiB on disk
+(the image's `MAGICK_*_LIMIT`), failing that one render. Requests queue
 FIFO within a lane; a caller that runs several kinds of tool work at once (renditions beside text extraction)
 bounds each kind on its own side, or the cheap one waits behind the slow one.
 

@@ -127,6 +127,7 @@ async def test_a_transcode_is_put_with_its_endpoint_and_past_the_limit_is_busy(c
 def test_the_encode_reads_the_source_as_a_pipe_and_writes_h264_with_a_keyframe_a_second():
     args = encoder_args(TranscodeSpec(**SPEC, video={"height": 720}), "h264_nvenc", 7)
     assert args[args.index("-i") + 1] == "pipe:7" and args[-2:] == ["mpegts", "pipe:1"]
+    assert args[args.index("-i") - 2:args.index("-i")] == ["-protocol_whitelist", "pipe"]
     assert args[args.index("-c:v") + 1] == "h264_nvenc" and "expr:gte(t,n_forced*1)" in args
     assert "scale=-2:'min(ih,720)'" in args[args.index("-vf") + 1]
     assert args[args.index("-map", args.index("-map") + 1) + 1] == "0:a:0?"

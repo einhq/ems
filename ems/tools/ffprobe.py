@@ -14,6 +14,13 @@ from dataclasses import dataclass
 from ..errors import EmsError, TOOL_FAILED, UNDECODABLE
 from .run import require, run
 
+# The protocols ffmpeg and ffprobe may open for a file they are given, the file itself and what its
+# container names inside it (a playlist's segments, a concat list's entries) alike: local files and
+# inline data, never the network or a protocol such as `subfile` or `concat` that reads into
+# another file. Media EMS reads is untrusted, and this is ffmpeg's own default for a file only
+# as long as the build keeps it so.
+PROTOCOLS = "file,crypto,data"
+
 
 @dataclass
 class Probe:
@@ -64,7 +71,7 @@ def _refusal(stderr: str, path: str) -> str:
 
 async def probe(path: str, *, timeout: float) -> Probe:
     done = await run(
-        [require("ffprobe"), "-v", "error", "-show_format", "-show_streams", "-of", "json", path],
+        [require("ffprobe"), "-v", "error", "-protocol_whitelist", PROTOCOLS, "-show_format", "-show_streams", "-of", "json", path],
         timeout=timeout,
     )
     if done.code != 0:

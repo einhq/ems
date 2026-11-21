@@ -27,6 +27,7 @@ from pydantic import Field
 
 from .errors import NOT_FOUND, EmsError
 from .schemas import StreamRef, Strict
+from .tools import ffmpeg as ffmpeg_tool
 
 # How long a segment is asked to be.
 SEGMENT_SECONDS = 2
@@ -271,7 +272,7 @@ class Recorder:
 def input_args(fd: int) -> list[str]:
     """How ffmpeg opens a live stream: the descriptor it is given, read as a pipe, which it cannot
     seek in, so it probes the stream's format from its bytes."""
-    return ["-i", f"pipe:{fd}"]
+    return ffmpeg_tool.pipe_source(fd)
 
 
 async def spawn_reading(open_source: Opener, args: list[str], **kwargs) -> asyncio.subprocess.Process:
@@ -324,7 +325,7 @@ async def ffmpeg_join(paths: list[str], out: str, made: str) -> None:
     with open(listing, "w") as handle:
         handle.writelines(f"file '{path}'\n" for path in paths)
     process = await asyncio.create_subprocess_exec(
-        "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-f", "concat", "-safe", "0", "-i", listing,
+        "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-f", "concat", "-safe", "0", *ffmpeg_tool.source(listing),
         "-map", "0", "-c", "copy", "-metadata", f"creation_time={made}", "-movflags", "+faststart", "-f", "mp4", out,
         stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
     )

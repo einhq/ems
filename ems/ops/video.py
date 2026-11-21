@@ -72,7 +72,7 @@ async def extract_frames(ctx: Context, path: str, out_dir: str, *, at: list[floa
     if at:
         for index, t in enumerate(at):
             out = os.path.join(out_dir, f"frame-{index:03d}.{ext}")
-            args = [ffmpeg, "-y", "-v", "error", "-display_rotation", "0", "-ss", f"{t:.3f}", "-i", path, "-frames:v", "1", "-vf", SQUARE_PIXELS_FILTER + finish]
+            args = [ffmpeg, "-y", "-v", "error", "-display_rotation", "0", "-ss", f"{t:.3f}", *ffmpeg_tool.source(path), "-frames:v", "1", "-vf", SQUARE_PIXELS_FILTER + finish]
             if fmt == "jpeg":
                 args += ["-q:v", qscale]
             done = await run(args + [out], timeout=timeout)
@@ -126,7 +126,7 @@ async def _frame_from(path: str, out: str, *, start: float, length: float | None
     window = ["-t", f"{length:.3f}"] if length else []
     # showinfo logs at info, so the level is info and the banner and progress are silenced instead.
     base = [ffmpeg, "-y", "-hide_banner", "-nostats", "-v", "info", "-display_rotation", "0"]
-    rest = ["-ss", f"{start:.3f}", *window, "-i", path, "-vf", filters, "-frames:v", "1", *tail, "-update", "1", out]
+    rest = ["-ss", f"{start:.3f}", *window, *ffmpeg_tool.source(path), "-vf", filters, "-frames:v", "1", *tail, "-update", "1", out]
     attempts = []
     if ffmpeg_tool.gpu_present():
         attempts.append(base + ["-hwaccel", "cuda"] + rest)
@@ -210,7 +210,7 @@ async def extract_poster(ctx: Context, path: str, out: str, *, at: float, deinte
     lead = at - POSTER_SEEK_LEAD if at > POSTER_SEEK_AFTER else 0.0
     # An input seek counts the output's time from where it landed.
     seek = ["-ss", f"{lead:.3f}"] if lead > 0 else []
-    tail = [*seek, "-i", path, "-vf", filters, "-ss", f"{at - lead:.3f}", "-vframes", "1", "-qscale:v", "0", "-y", "-f", "image2", "-update", "1", out]
+    tail = [*seek, *ffmpeg_tool.source(path), "-vf", filters, "-ss", f"{at - lead:.3f}", "-vframes", "1", "-qscale:v", "0", "-y", "-f", "image2", "-update", "1", out]
     attempts = []
     if ffmpeg_tool.gpu_present():
         attempts.append([ffmpeg, "-v", "error", "-display_rotation", "0", "-hwaccel", "cuda"] + tail)
@@ -285,7 +285,7 @@ UNBLANK_AT = (0.1, 0.25, 0.5)
 async def frame_spread(path: str, *, timeout: float) -> float | None:
     """The standard deviation of a still's luma at 48×27, or None when ffmpeg cannot read it."""
     size = 48 * 27
-    done = await run([require("ffmpeg"), "-v", "error", "-i", path, "-vf", "scale=48:27,format=gray", "-frames:v", "1", "-f", "rawvideo", "-"], timeout=timeout)
+    done = await run([require("ffmpeg"), "-v", "error", *ffmpeg_tool.source(path), "-vf", "scale=48:27,format=gray", "-frames:v", "1", "-f", "rawvideo", "-"], timeout=timeout)
     if done.code != 0 or len(done.stdout) < size:
         return None
     return statistics.pstdev(done.stdout[:size])

@@ -31,6 +31,7 @@ from ..context import Context
 from ..errors import EmsError, TOOL_FAILED, invalid
 from ..schemas import FileRef, Strict, WithOptions
 from ..streaming import Outcome, Progress, run_op
+from ..tools import ffmpeg as ffmpeg_tool
 from ..tools import ffprobe as ffprobe_tool
 from ..tools.run import require, run
 from ..tools.versions import producer
@@ -96,7 +97,7 @@ async def draw(ctx: Context, path: str, scratch: str, boxes: list[tuple[int, int
     # The sound `Probe.audio` picks; ffmpeg's own when the probe finds none, so its error says why.
     sound = (await ffprobe_tool.probe(path, timeout=ctx.settings.tool_stall_seconds)).audio()
     graph = filter_graph(boxes, style, f"0:{sound['index']}" if sound else "0:a")
-    args = [require("ffmpeg"), "-y", "-v", "error", "-i", path, "-filter_complex", graph]
+    args = [require("ffmpeg"), "-y", "-v", "error", *ffmpeg_tool.source(path), "-filter_complex", graph]
     for i, out in enumerate(outs):
         args += ["-map", f"[out{i}]", "-frames:v", "1", out]
     done = await run(args, timeout=ctx.settings.tool_stall_seconds)

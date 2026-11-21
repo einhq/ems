@@ -26,6 +26,7 @@ from pydantic import Field
 from .errors import BUSY, INVALID_REQUEST, NOT_FOUND, TOOL_FAILED, EmsError
 from .remote import Endpoint
 from .schemas import Strict, StreamRef
+from .tools import ffmpeg as ffmpeg_tool
 
 TRANSCODE_ID = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 # How long an ended transcode stays listed, with why, before it is forgotten.
@@ -71,7 +72,7 @@ def encoder_args(spec: TranscodeSpec, encoder: str, source_fd: int) -> list[str]
     else:
         container = ["-bsf:v", "dump_extra=freq=keyframe", "-f", "mpegts"]
     return [
-        "ffmpeg", "-hide_banner", "-nostdin", "-loglevel", "error", "-fflags", "+genpts+discardcorrupt", "-i", f"pipe:{source_fd}",
+        "ffmpeg", "-hide_banner", "-nostdin", "-loglevel", "error", "-fflags", "+genpts+discardcorrupt", *ffmpeg_tool.pipe_source(source_fd),
         "-map", "0:v:0", "-map", "0:a:0?", *scale, *codec, "-force_key_frames", "expr:gte(t,n_forced*1)",
         "-c:a", "aac", "-b:a", f"{AUDIO_KBPS}k", "-ar", str(AUDIO_RATE), "-ac", "2",
         *container, "pipe:1",

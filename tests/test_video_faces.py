@@ -254,7 +254,7 @@ async def test_a_late_poster_frame_is_sought_on_the_input_first(client, dirs, mo
     await video.extract_poster(ctx, str(ro / "v.mp4"), str(tmp_path / "late.jpg"), at=2400.0, deinterlace=False)
     args = calls[-1]
     source = args.index("-i")
-    assert args[source - 2:source] == ["-ss", "2395.000"]
+    assert args[source - 4:source] == ["-ss", "2395.000", "-protocol_whitelist", "file,crypto,data"]
     assert args[args.index("-ss", source):][:2] == ["-ss", "5.000"]
 
     await video.extract_poster(ctx, str(ro / "v.mp4"), str(tmp_path / "early.jpg"), at=1.0, deinterlace=False)

@@ -192,10 +192,10 @@ def stages(req: VideoStreamRequest, probe: ffprobe_tool.Probe, src: str, encoder
         cuda_chain = encode.cuda_filters(shape)
         codec = req.hints.source_codec or video.get("codec_name")
         if cuda_chain and codec not in encode.NVDEC_CANNOT_DECODE:
-            found.append((f"{GPU_ENCODER}/cuda", [*head, "-hwaccel", "cuda", "-hwaccel_output_format", "cuda", *seek, "-i", src, *maps, "-vf", cuda_chain, *gpu, *tail]))
-        found.append((f"{GPU_ENCODER}/upload", [*head, *seek, "-i", src, *maps, "-vf", encode.upload_filters(shape), *gpu, *tail]))
+            found.append((f"{GPU_ENCODER}/cuda", [*head, "-hwaccel", "cuda", "-hwaccel_output_format", "cuda", *seek, *ffmpeg_tool.source(src), *maps, "-vf", cuda_chain, *gpu, *tail]))
+        found.append((f"{GPU_ENCODER}/upload", [*head, *seek, *ffmpeg_tool.source(src), *maps, "-vf", encode.upload_filters(shape), *gpu, *tail]))
     if CPU_ENCODER in encoders:
-        found.append((CPU_ENCODER, [*head, *seek, "-i", src, *maps, "-vf", f"{encode.cpu_filters(shape)},format=yuv420p", *cpu, *tail]))
+        found.append((CPU_ENCODER, [*head, *seek, *ffmpeg_tool.source(src), *maps, "-vf", f"{encode.cpu_filters(shape)},format=yuv420p", *cpu, *tail]))
     if not found:
         raise EmsError(TOOL_FAILED, "this EMS's ffmpeg has no H.264 encoder", permanent=True)
     return found

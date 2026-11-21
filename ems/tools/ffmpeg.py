@@ -9,8 +9,18 @@ from __future__ import annotations
 import glob
 import os
 
-from .ffprobe import audio_map, decode_failure, probe
+from .ffprobe import PROTOCOLS, audio_map, decode_failure, probe
 from .run import require, run
+
+
+def source(path: str) -> list[str]:
+    """ffmpeg's input of a file, opened under `PROTOCOLS`."""
+    return ["-protocol_whitelist", PROTOCOLS, "-i", path]
+
+
+def pipe_source(fd: int) -> list[str]:
+    """ffmpeg's input of a stream on descriptor `fd`, which may name nothing outside itself."""
+    return ["-protocol_whitelist", "pipe", "-i", f"pipe:{fd}"]
 
 
 def gpu_present() -> bool:
@@ -28,7 +38,7 @@ async def extract_audio(path: str, out_wav: str, *, timeout: float, sample_rate:
     if probed.refusal is None and probed.audio() is None:
         return False
     done = await run(
-        [require("ffmpeg"), "-y", "-v", "error", "-vn", "-i", path, *audio_map(probed), "-acodec", "pcm_s16le", "-ar", str(sample_rate), "-ac", str(channels), out_wav],
+        [require("ffmpeg"), "-y", "-v", "error", "-vn", *source(path), *audio_map(probed), "-acodec", "pcm_s16le", "-ar", str(sample_rate), "-ac", str(channels), out_wav],
         timeout=timeout,
     )
     if done.code != 0:
