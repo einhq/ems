@@ -2,6 +2,8 @@
 
 import dataclasses
 
+from ems import API_VERSION
+
 
 async def test_unauthorized_without_key(client):
     r = await client.get("/v0/health", headers={"Authorization": ""})
@@ -18,7 +20,7 @@ async def test_capabilities_lists_ops(client, tmp_path, monkeypatch):
     assert r.status_code == 200
     assert "faces.detect" in body["ops"] and "media.probe" in body["ops"]
     assert "roots" not in body
-    assert body["api"] == "0.6.1"
+    assert body["api"] == API_VERSION
     assert body["limits"]["transcodes"] == 2
     assert "document.renditions" in body["ops"]
     assert "video.storyboard" in body["ops"] and "video.shots" in body["ops"]
