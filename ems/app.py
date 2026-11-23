@@ -183,7 +183,7 @@ def create_app(
         find=watches.frame_finder(ctx, kept), crop=ffmpeg_crop, log=log, idle=kept.release,
         folder=os.path.join(settings.scratch, "watches"), segments=ffmpeg_segments, join=ffmpeg_join,
     )
-    ctx.pages = Pages(settings.pages, settings.page_memory_mb, renderer(settings.page_memory_mb, stream.h264_encoders, lambda: ctx.scratch_dir("page")),
+    ctx.pages = Pages(settings.pages, settings.page_memory_mb, renderer(settings.page_memory_mb, stream.h264_encoders, lambda: ctx.scratch_dir("page"), log),
                       open_name=lambda endpoint, path: open_written(ctx.files, endpoint, path), log=log)
     ctx.transcodes = Transcodes(settings.transcodes, encoders=stream.h264_encoders, open_source=lambda endpoint, path: open_live(ctx.files, endpoint, path),
                                 open_output=lambda endpoint, path: open_written(ctx.files, endpoint, path), log=log)

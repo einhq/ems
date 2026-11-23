@@ -25,6 +25,7 @@ from typing import Awaitable, Callable
 from pydantic import Field, field_validator
 
 from .errors import BUSY, INVALID_REQUEST, NOT_FOUND, TOOL_FAILED, EmsError
+from .page_proxy import PageProxy, origin_of
 from .remote import Endpoint
 from .schemas import Strict, StreamRef
 
@@ -505,16 +506,17 @@ class Devtools:
 
 
 class Rendering:
-    """What draws and encodes a page: its processes, the encoder's two outputs, the profile, and
-    the browser's DevTools, which keys reach the page by."""
+    """What draws and encodes a page: its processes, the encoder's two outputs, the profile, the
+    browser's DevTools, which keys reach the page by, and the proxy it reaches the network through."""
 
     def __init__(self, processes: dict[str, asyncio.subprocess.Process], outputs: dict[str, asyncio.StreamReader], encoder: str,
-                 folder: str | None = None, devtools: Devtools | None = None):
+                 folder: str | None = None, devtools: Devtools | None = None, proxy: PageProxy | None = None):
         self.processes = processes
         self.outputs = outputs
         self.encoder = encoder
         self.folder = folder
         self.devtools = devtools
+        self.proxy = proxy
         self.errors = bytearray()
         # When the grab started, which the stream's clock counts from, at the latest.
         self.grabbed_from = time.monotonic()
@@ -559,6 +561,8 @@ class Rendering:
                     pass
         for process in self.processes.values():
             await process.wait()
+        if self.proxy is not None:
+            self.proxy.close()
         if self.folder:
             shutil.rmtree(self.folder, ignore_errors=True)
 
@@ -595,7 +599,10 @@ async def _pipe_reader(fd: int) -> asyncio.StreamReader:
     return reader
 
 
-def chromium_args(spec: PageSpec, profile: str, memory_mb: int) -> list[str]:
+def chromium_args(spec: PageSpec, profile: str, memory_mb: int, proxy: int, sandbox: bool) -> list[str]:
+    """Chromium for the page, every connection of it through the SOCKS5 proxy on 127.0.0.1's port
+    `proxy`, which resolves its names: loopback is not exempt, and WebRTC sends nothing past it.
+    Without `sandbox` (`sandbox_possible`), Chromium runs without its sandbox."""
     v = spec.video
     args = [
         "--kiosk", "--no-first-run", "--no-default-browser-check", f"--user-data-dir={profile}",
@@ -608,11 +615,26 @@ def chromium_args(spec: PageSpec, profile: str, memory_mb: int) -> list[str]:
         "--force-dark-mode",
         # The page's heap: half the cap, the rest is the browser's own.
         f"--js-flags=--max-old-space-size={max(128, memory_mb // 2)}",
+        f"--proxy-server=socks5://127.0.0.1:{proxy}", "--proxy-bypass-list=<-loopback>",
+        "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
     ]
-    # Chromium's sandbox does not run as root, which EMS's container is.
-    if os.geteuid() == 0:
+    if not sandbox:
         args.append("--no-sandbox")
     return [*args, spec.url]
+
+
+async def sandbox_possible() -> str | None:
+    """Why Chromium's sandbox cannot start here, or None when it can. The sandbox puts each of its
+    processes in user, PID and network namespaces of their own and chroots it there, which a host
+    can forbid: Ubuntu's kernel.apparmor_restrict_unprivileged_userns, or a container without
+    SYS_CHROOT in its bounding set. It does not run as root at all."""
+    if os.geteuid() == 0:
+        return "EMS runs as root"
+    probe = await asyncio.create_subprocess_exec(
+        "unshare", "--user", "--map-root-user", "--pid", "--net", "--fork", "chroot", "/", "true",
+        stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
+    _, error = await probe.communicate()
+    return None if probe.returncode == 0 else error.decode(errors="replace").strip() or f"unshare exited {probe.returncode}"
 
 
 def _display_told(fd: int) -> bytes:
@@ -646,11 +668,15 @@ def encoder_args(spec: PageSpec, encoder: str, ts_fd: int) -> list[str]:
     return [*codec, *sound, "-g", str(v.fps), "-flags", "+global_header", "-map", "1:v", "-map", "0:a", "-f", "tee", tee]
 
 
-def renderer(memory_mb: int, encoders: Callable[[], Awaitable[set[str]]], scratch: Callable[[], str]) -> Launch:
+def renderer(memory_mb: int, encoders: Callable[[], Awaitable[set[str]]], scratch: Callable[[], str],
+             log: Callable[[str], None]) -> Launch:
     """How a page is rendered here: Xvfb, a PulseAudio server whose one sink takes nothing but the
-    page's sound, Chromium on the display playing into that sink with its DevTools on a pipe, and
-    ffmpeg grabbing the display and the sink with the first encoder of NVENC and the CPU's that
-    writes."""
+    page's sound, Chromium on the display playing into that sink with its DevTools on a pipe and the
+    network through a proxy of its own (`PageProxy`: the page's origin and the internet, nothing
+    else, each refusal logged once), and ffmpeg grabbing the display and the sink with the first
+    encoder of NVENC and the CPU's that writes. Chromium runs in its sandbox where the host lets it
+    start (`sandbox_possible`, asked once), and the log says it once where not."""
+    sandbox: list[bool] = []
 
     async def launch(spec: PageSpec, page_id: str) -> Rendering:
         for tool in ("Xvfb", "chromium", "ffmpeg", "pulseaudio", "bash"):
@@ -660,11 +686,18 @@ def renderer(memory_mb: int, encoders: Callable[[], Awaitable[set[str]]], scratc
         order = [name for name in ("h264_nvenc", "libopenh264") if name in available]
         if not order:
             raise EmsError(TOOL_FAILED, "this EMS's ffmpeg has no H.264 encoder", permanent=True)
+        if not sandbox:
+            why = await sandbox_possible()
+            if why is not None:
+                log(f"pages: Chromium's sandbox cannot start here ({why}): pages run without it")
+            sandbox.append(why is None)
         folder = scratch()
         v = spec.video
         processes: dict[str, asyncio.subprocess.Process] = {}
         devtools: Devtools | None = None
+        proxy = PageProxy(origin_of(spec.url), lambda where: log(f"pages: {page_id}: its browser may not reach {where}, which is not on the internet"))
         try:
+            proxy_port = await proxy.start()
             read, write = os.pipe()
             processes["xvfb"] = await asyncio.create_subprocess_exec(
                 "Xvfb", "-displayfd", str(write), "-screen", "0", f"{v.width}x{v.height}x24", "-nolisten", "tcp",
@@ -697,7 +730,7 @@ def renderer(memory_mb: int, encoders: Callable[[], Awaitable[set[str]]], scratc
             its_in, ours_out = os.pipe()
             processes["chromium"] = await asyncio.create_subprocess_exec(
                 "bash", "-c", f'exec "$0" "$@" 3<&{its_in} 4>&{its_out} {its_in}<&- {its_out}>&-',
-                "chromium", *chromium_args(spec, os.path.join(folder, "profile"), memory_mb), env=env, pass_fds=(its_in, its_out),
+                "chromium", *chromium_args(spec, os.path.join(folder, "profile"), memory_mb, proxy_port, sandbox[0]), env=env, pass_fds=(its_in, its_out),
                 stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL, start_new_session=True)
             os.close(its_in)
             os.close(its_out)
@@ -725,7 +758,7 @@ def renderer(memory_mb: int, encoders: Callable[[], Awaitable[set[str]]], scratc
                 if first:
                     processes["ffmpeg"] = process
                     mp4 = _prepended(process.stdout, first)
-                    rendering = Rendering(processes, {"mp4": mp4, "ts": ts}, encoder, folder, devtools)
+                    rendering = Rendering(processes, {"mp4": mp4, "ts": ts}, encoder, folder, devtools, proxy)
                     rendering.grabbed_from = grabbed_from
                     asyncio.ensure_future(_drain(process.stderr, rendering.errors))
                     return rendering
@@ -734,7 +767,7 @@ def renderer(memory_mb: int, encoders: Callable[[], Awaitable[set[str]]], scratc
                 failures.append(f"{encoder}: {(errors[-1] if errors else f'exited {process.returncode}')[-200:]}")
             raise EmsError(TOOL_FAILED, "no encoder could start the page's stream: " + " | ".join(failures))
         except BaseException:
-            await Rendering(processes, {}, "", folder, devtools=devtools).stop()
+            await Rendering(processes, {}, "", folder, devtools=devtools, proxy=proxy).stop()
             raise
 
     return launch

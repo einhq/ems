@@ -35,6 +35,17 @@ endpoint in an `EMS-Files` header, and EMS reads the inputs and writes the
 outputs back through an sshfs mount of it, for which the container needs
 `/dev/fuse` and `SYS_ADMIN` (docs/api.md, 3.1).
 
+EMS starts as root to read its keys file, which may be readable by its owner
+alone, and runs on as the user `ems`, with no capability of its own
+(ems/privileges.py). Of the container's capabilities it keeps `SYS_ADMIN` and
+`SYS_CHROOT` in its bounding set, which only the setuid `fusermount3` and
+Chromium's sandbox, in a user namespace of its own, take up; becoming `ems`
+needs `SETUID`, `SETGID` and `SETPCAP`, and a keys file of another user than
+the container's root `DAC_READ_SEARCH`. A container that keeps the engine's
+default capabilities has all of them but the last. Where the host forbids
+Chromium's sandbox (Ubuntu's `kernel.apparmor_restrict_unprivileged_userns`),
+pages run without it and the log says so.
+
 ## Run
 
 ```bash

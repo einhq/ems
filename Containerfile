@@ -6,7 +6,8 @@
 # Build:
 #   podman build -t ems -f Containerfile .
 #
-# Run (GPU, mounting its callers' files with sshfs, docs/api.md 3.1):
+# Run (GPU, mounting its callers' files with sshfs, docs/api.md 3.1; EMS starts as root and goes on
+# as the user ems, ems/privileges.py):
 #   podman run --rm --device nvidia.com/gpu=all --device /dev/fuse --cap-add SYS_ADMIN --network=host \
 #     -e EMS_KEY=let-me-in ems
 #
@@ -514,7 +515,8 @@ ENV PATH="/opt/ffmpeg/bin:$PATH"
 RUN pip install --no-cache-dir "fastapi>=0.115" "uvicorn[standard]>=0.30"
 
 # sshfs, which mounts a caller's files (ems/remote.py), and socat, which carries each of its
-# connections (ems/files_connect.py); the container needs /dev/fuse and SYS_ADMIN for it.
+# connections (ems/files_connect.py); the container needs /dev/fuse and SYS_ADMIN for it, which
+# EMS, running as ems, reaches through fusermount3 alone.
 RUN apt-get update && apt-get install -y --no-install-recommends sshfs socat \
     && rm -rf /var/lib/apt/lists/*
 
@@ -533,6 +535,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends chromium xvfb p
     && rm -rf /var/lib/apt/lists/* \
     && /opt/ffmpeg/bin/ffmpeg -hide_banner -devices | grep -q x11grab \
     && /opt/ffmpeg/bin/ffmpeg -hide_banner -devices | grep -q pulse
+
+# The user EMS runs as once its keys are read (ems/privileges.py). fusermount3 is the one program
+# that keeps its setuid bit, and nothing keeps a setgid bit: ems takes up the container's
+# capabilities through nothing else.
+RUN useradd --system --user-group --create-home --home-dir /home/ems --shell /usr/sbin/nologin ems \
+    && find / -xdev -perm /6000 -type f ! -path /usr/bin/fusermount3 -exec chmod ug-s {} + \
+    && [ "$(find / -xdev -perm /6000 -type f)" = /usr/bin/fusermount3 ]
 
 # Nothing installed above brought back PyAV, the CPU onnxruntime or Debian's FFmpeg libraries.
 RUN ! pip show av 2>/dev/null && ! pip show onnxruntime 2>/dev/null \

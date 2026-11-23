@@ -239,7 +239,8 @@ directory, and writes of each output. It never lists a directory, and it never r
 anything there. A caller's endpoint should write an output in place: a copy through sshfs has
 every byte at the caller once it returns, while its SFTP close may come later.
 
-The container needs `/dev/fuse` and the `SYS_ADMIN` capability to mount. A host without them, an
+The container needs `/dev/fuse` and the `SYS_ADMIN` capability to mount, which EMS, running as the
+user `ems`, takes up through the setuid `fusermount3` alone. A host without them, an
 endpoint EMS cannot reach or that refuses its answer or certificate, and a mount that fails during the request make it
 `502 files_unavailable` (not permanent): the caller tries again later. An input the endpoint does
 not have is `404 not_found`, and a path it refuses is `403 path_not_granted` (permanent). A host on
@@ -1593,6 +1594,14 @@ as it plays, and encodes them once, muxed in two formats, each written as it com
 stream the caller grants (_3.1_): EMS serves nothing of it, and who reads it is the caller's affair.
 Keys pressed in the page reach it as someone's at it would (_0.4.7_). Nothing is kept: a page lives
 in EMS's memory, and the caller puts it again when EMS has started anew.
+
+The browser reaches the host and port the `url` names, wherever they are, and otherwise only
+addresses on the internet. Every connection it makes, a redirect, a frame, a fetch or a socket of
+the page's included, goes through a SOCKS5 proxy EMS runs for that page alone, which resolves the
+name itself and refuses loopback, private, link-local (a cloud's metadata service), shared and
+reserved addresses, and connects to the address it checked; WebRTC sends nothing past it. A page
+cannot look at what sits on EMS's networks other than its own server, and EMS logs each host and
+port a page was refused once (`pages: <id>: its browser may not reach …`).
 
 ```
 PUT    /v0/pages/<id>            start it, or start it again when its body or EMS-Files changed or it ended
