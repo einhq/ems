@@ -106,12 +106,17 @@ async def test_a_segment_is_mpegts_of_a_set_length_on_the_sources_clock(client, 
     assert r.headers["content-type"] == "video/mp2t"
     [args] = ffmpeg.runs
     assert args[args.index("-ss") + 1] == "8" and args[args.index("-t") + 1] == "4" and args.index("-t") > args.index("-i")
-    assert args[args.index("-output_ts_offset") + 1] == "8"
+    # Every segment's clock leads the source's alike, and its sound starts without the encoder's priming.
+    assert args[args.index("-output_ts_offset") + 1] == "18"
+    assert args[args.index("-bsf:a") + 1] == "noise=drop=not(n)"
     assert args[-5:] == ["-muxdelay", "0", "-f", "mpegts", "pipe:1"]
     assert "frag_keyframe+empty_moov+default_base_moof" not in args
     install(monkeypatch, ffmpeg := FakeFfmpeg())
+    await client.post("/v0/video/stream", json=body(ro, duration=4, source_clock=True, format="mpegts"))
+    assert ffmpeg.runs[0][ffmpeg.runs[0].index("-output_ts_offset") + 1] == "10"
+    install(monkeypatch, ffmpeg := FakeFfmpeg())
     await client.post("/v0/video/stream", json=body(ro, start=8))
-    assert "-output_ts_offset" not in ffmpeg.runs[0] and "-t" not in ffmpeg.runs[0]
+    assert "-output_ts_offset" not in ffmpeg.runs[0] and "-bsf:a" not in ffmpeg.runs[0] and "-t" not in ffmpeg.runs[0]
     r = await client.post("/v0/video/stream", json=body(ro, format="webm"))
     assert r.status_code == 400
 

@@ -871,7 +871,9 @@ makes, which a player seeks in by asking for another segment (_0.4.4_).
 - `audio: null` drops the sound; otherwise it is AAC in two channels at `bitrate`.
 - `start` is where in the video the stream begins, in seconds: an input-side seek, decoded from the
   keyframe before it so the first frame is the one at `start`. The stream's own clock starts at 0
-  there, or with `source_clock` (_0.4.4_) at `start`, so the parts of one video line up.
+  there, or with `source_clock` (_0.4.4_) at `start` plus 10 s (_0.6.4_), so the parts of one video
+  line up as segments of one HLS playlist: each part's times run on from the part before, the first
+  part's too, and its sound starts at `start`, without the encoder's priming before it (_0.6.4_).
 - `duration` (_0.4.4_) ends the stream after that many seconds of the video; without it, it runs to
   the end.
 - `format` (_0.4.4_) is `mp4` (fragmented, the default) or `mpegts`, written with no mux delay.

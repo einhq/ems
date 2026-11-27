@@ -2,7 +2,8 @@
 
 For a player that cannot decode the AV1 renditions, such as a Cast or DLNA screen. Nothing is
 written anywhere: the response body is the stream, and closing the connection kills the encoder.
-A stream of a set length on the source's clock is one segment of an HLS playlist its caller makes.
+A stream of a set length on the source's clock is one segment of an HLS playlist its caller makes:
+each is its own encode, so its timestamps are made to run on from the one before it.
 
 The encoder is chosen before the first byte goes out: everything in VRAM, then a CPU decode into
 NVENC, then the CPU alone, each started in turn until one writes. Once bytes have gone out a
@@ -47,6 +48,13 @@ KEYFRAMES = ["-force_key_frames", "expr:gte(t,n_forced*2)"]
 FRAGMENTS = ["-movflags", "frag_keyframe+empty_moov+default_base_moof", "-frag_duration", "1000000", "-f", "mp4"]
 # MPEG-TS with no mux delay, so a stream on the source's clock starts where it says.
 TRANSPORT = ["-muxdelay", "0", "-f", "mpegts"]
+# A stream on the source's clock runs this far ahead of it, every segment alike. A muxer moves a
+# stream whose first decode time is below 0 (its first picture's less the B-frames' reorder delay)
+# up to 0, which would put the first segment alone off the clock, its decode times past the next's.
+CLOCK_LEAD = 10
+# The AAC encoder's first packet is its priming, before the stream's start; in a segment it would
+# fall inside the one before, and a player that checks the times refuses the playlist.
+NO_PRIMING = ["-bsf:a", "noise=drop=not(n)"]
 CONTENT_TYPES = {"mp4": "video/mp4", "mpegts": "video/mp2t"}
 CHUNK = 64 * 1024
 # The probes kept of the files streamed last: an HLS player reads a video as a request a segment.
@@ -181,7 +189,7 @@ def stages(req: VideoStreamRequest, probe: ffprobe_tool.Probe, src: str, encoder
     maps = ["-map", f"0:{video['index']}"] + (ffprobe_tool.audio_map(probe) if req.audio is not None else [])
     sound = ["-an"] if req.audio is None else ["-c:a", "aac", "-b:a", req.audio.bitrate, "-ac", "2"]
     length = ["-t", f"{req.duration:g}"] if req.duration else []
-    clock = ["-output_ts_offset", f"{req.start:g}"] if req.source_clock and req.start > 0 else []
+    clock = ["-output_ts_offset", f"{req.start + CLOCK_LEAD:g}", *NO_PRIMING] if req.source_clock else []
     container = TRANSPORT if req.format == "mpegts" else FRAGMENTS
     tail = [*length, "-fpsmax", str(req.video.fps), *KEYFRAMES, *sound, *clock, *container, "pipe:1"]
     head = [require("ffmpeg"), "-hide_banner", "-nostdin", "-loglevel", "error", "-display_rotation", "0"]
